@@ -38,6 +38,7 @@ __all__ = [
     'AudioToCharWithDursF0Dataset',
     'AudioToCharWithPriorDataset',
     'AudioToBPEDataset',
+    'AudioToPhonemeDataset',
     'TarredAudioToCharDataset',
     'TarredAudioToBPEDataset',
 ]
@@ -759,6 +760,85 @@ class AudioToBPEDataset(_AudioTextDataset):
         self,
         manifest_filepath: str,
         tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        sample_rate: int,
+        int_values: bool = False,
+        augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,
+        max_duration: Optional[int] = None,
+        min_duration: Optional[int] = None,
+        max_utts: int = 0,
+        trim: bool = False,
+        use_start_end_token: bool = True,
+    ):
+        if use_start_end_token and hasattr(tokenizer, 'bos_token'):
+            bos_id = tokenizer.bos_id
+        else:
+            bos_id = None
+
+        if use_start_end_token and hasattr(tokenizer, 'eos_token'):
+            eos_id = tokenizer.eos_id
+        else:
+            eos_id = None
+
+        if hasattr(tokenizer, 'pad_token'):
+            pad_id = tokenizer.pad_id
+        else:
+            pad_id = 0
+
+        class TokenizerWrapper:
+            def __init__(self, tokenizer):
+                self._tokenizer = tokenizer
+
+            def __call__(self, text):
+                t = self._tokenizer.text_to_ids(text)
+                return t
+
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            parser=TokenizerWrapper(tokenizer),
+            sample_rate=sample_rate,
+            int_values=int_values,
+            augmentor=augmentor,
+            max_duration=max_duration,
+            min_duration=min_duration,
+            max_utts=max_utts,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            pad_id=pad_id,
+            trim=trim,
+        )
+
+
+class AudioToPhonemeDataset(_AudioTextDataset):
+    """
+    Dataset that loads tensors via a JSON file manifest containing paths to audio files, durations (in
+    seconds), transcripts, and phoneme transcripts.
+    The format of this manifest is the same as for other ASR tasks, with phonemes in the "text" field.
+    The manifest can optionally have an "original_text" field for the original transcript.
+    Each new line is a different sample. Example of a single line below:
+    {"audio_filepath": "/path/to/audio.wav", "duration": 2.13,
+    "original_text": "hello world", "text": "HH AH0 L OW1 W ER1 L D"}
+
+    In practice, the dataset and manifest used for character encoding and phoneme encoding are exactly the
+    same. The only difference lies in how the dataset tokenizes the phonemized text in the manifest.
+    This dataset requires a WordTokenizer, which is used to separate phonemes and tokenize them.
+    """
+
+    # TODO: Flesh out docstring for dataset
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports."""
+        return {
+            'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
+            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'transcript_length': NeuralType(tuple('B'), LengthsType()),
+        }
+
+    def __init__(
+        self,
+        manifest_filepath: str,
+        tokenizer: 'nemo.collections.common.tokenizers.WordTokenizer',
         sample_rate: int,
         int_values: bool = False,
         augmentor: 'nemo.collections.asr.parts.perturb.AudioAugmentor' = None,

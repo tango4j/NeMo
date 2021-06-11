@@ -119,6 +119,35 @@ def get_bpe_dataset(
     return dataset
 
 
+def get_phoneme_dataset(
+    config: dict, tokenizer: 'WordTokenizer', augmentor: Optional['AudioAugmentor'] = None
+) -> audio_to_text.AudioToPhonemeDataset:
+    """
+    Instantiates a phoneme-based AudioToPhonemeDataset for ASR.
+
+    Args:
+        config: Config of the AudioToPhonemeDataset.
+        tokenizer: An instance of a WordTokenizer object.
+        augmentor: Optional AudioAugmentor object for augmentations on audio data.
+
+    Returns:
+        An instance of AudioToPhonemeDataset.
+    """
+    dataset = audio_to_text.AudioToPhonemeDataset(
+        manifest_filepath=config['manifest_filepath'],
+        tokenizer=tokenizer,
+        sample_rate=config['sample_rate'],
+        int_values=config.get('int_values', False),
+        augmentor=augmentor,
+        max_duration=config.get('max_duration', None),
+        min_duration=config.get('min_duration', None),
+        max_utts=config.get('max_utts', 0),
+        trim=config.get('trim_silence', False),
+        use_start_end_token=config.get('use_start_end_token', True),
+    )
+    return dataset
+
+
 def get_tarred_char_dataset(
     config: dict, shuffle_n: int, global_rank: int, world_size: int, augmentor: Optional['AudioAugmentor'] = None
 ) -> audio_to_text.TarredAudioToCharDataset:
