@@ -47,9 +47,10 @@ class EncDecCTCModelPhoneme(EncDecCTCModel):
             raise ValueError("`cfg` must have `phonemes_file` path to create a tokenizer!")
         phonemes_file = self.register_artifact('phonemes_file', phonemes_file)
 
-        # Create WordTokenizer and override dnumber of classes in the decoder if a placeholder was given
+        # Create WordTokenizer and override number of classes in the decoder if a placeholder was given
         self.tokenizer = tokenizers.WordTokenizer(vocab_file=cfg['phonemes_file'])
-        vocabulary = self.tokenizer.vocab
+        #vocabulary = self.tokenizer.vocab
+        vocabulary = {f"{phoneme} ":index for phoneme,index in self.tokenizer.vocab.items()}
 
         with open_dict(cfg):
             cfg.decoder.vocabulary = ListConfig(list(vocabulary.keys()))
