@@ -22,7 +22,7 @@ from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.utils import logging
 
 
-def PER(Metric):
+class PER(Metric):
     """
     This metric computes the numerator and denominator for the overall Phoneme Error Rate (PER) between
     prediction and reference texts.
@@ -48,7 +48,7 @@ def PER(Metric):
             return {'val_loss': val_loss_mean, 'log': tensorboard_logs}
 
     Args:
-        vocabulary: List of strings that describes the vocabulary of the dataset.
+        tokenizer: NeMo tokenizer object.
         batch_dim_index: Index of the batch dimension.
         ctc_decode: Whether to use CTC decoding or not. Currently, must be set.
         log_prediction: Whether to log a single decoded sample per call.
@@ -59,12 +59,12 @@ def PER(Metric):
     """
 
     def __init__(
-        self, vocabulary, batch_dim_index=0, ctc_decode=True, log_prediction=True, dist_sync_on_step=False,
+        self, tokenizer, batch_dim_index=0, ctc_decode=True, log_prediction=True, dist_sync_on_step=False,
     ):
         super().__init__(dist_sync_on_step=dist_sync_on_step, compute_on_step=False)
+        self.tokenizer = tokenizer
         self.batch_dim_index = batch_dim_index
-        self.blank_id = len(vocabulary)
-        self.labels_map = dict([(i, vocabulary[i]) for i in range(len(vocabulary))])
+        self.blank_id = tokenizer.vocab_size
         self.ctc_decode = ctc_decode
         self.log_prediction = log_prediction
 
@@ -185,9 +185,8 @@ def PER(Metric):
         for h, r in zip(hypotheses, references):
             h_list = h.split()
             r_list = r.split()
-            #print(f"h_list: {h_list}")
             phonemes += len(r_list)
-            # Compute Levenstein's distance
+            # Compute Levenshtein distance
             scores += editdistance.eval(h_list, r_list)
 
         self.scores = torch.tensor(scores, device=self.scores.device, dtype=self.scores.dtype)

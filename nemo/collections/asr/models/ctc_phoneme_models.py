@@ -20,6 +20,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.losses.ctc import CTCLoss
+from nemo.collections.asr.metrics.per import PER
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.core.classes.common import PretrainedModelInfo
@@ -49,8 +50,7 @@ class EncDecCTCModelPhoneme(EncDecCTCModel):
 
         # Create WordTokenizer and override number of classes in the decoder if a placeholder was given
         self.tokenizer = tokenizers.WordTokenizer(vocab_file=cfg['phonemes_file'])
-        #vocabulary = self.tokenizer.vocab
-        vocabulary = {f"{phoneme} ":index for phoneme,index in self.tokenizer.vocab.items()}
+        vocabulary = self.tokenizer.vocab
 
         with open_dict(cfg):
             cfg.decoder.vocabulary = ListConfig(list(vocabulary.keys()))
@@ -66,6 +66,15 @@ class EncDecCTCModelPhoneme(EncDecCTCModel):
             cfg.decoder["num_classes"] = len(vocabulary)
 
         super().__init__(cfg=cfg, trainer=trainer)
+
+        # Set up PER metric (override WER from parent class)
+        self._wer = PER(
+            tokenizer=self.tokenizer,
+            batch_dim_index=0,
+            ctc_decode=True,
+            dist_sync_on_step=True,
+            log_prediction=self._cfg.get("log_prediction", False),
+        )
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
         if 'augmentor' in config:
@@ -155,10 +164,9 @@ class EncDecCTCModelPhoneme(EncDecCTCModel):
                 zero_infinity=True,
                 reduction=self._cfg.get("ctc_reduction", "mean_batch"),
             )
-            self._wer = WER(
-                vocabulary=self.decoder.vocabulary,
+            self._wer = PER(
+                tokenizer=self.tokenizer,
                 batch_dim_index=0,
-                use_cer=self._cfg.get('use_cer', False),
                 ctc_decode=True,
                 dist_sync_on_step=True,
                 log_prediction=self._cfg.get("log_prediction", False),
