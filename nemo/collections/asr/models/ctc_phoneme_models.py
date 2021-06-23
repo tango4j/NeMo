@@ -51,6 +51,7 @@ class EncDecCTCModelPhoneme(EncDecCTCModel):
         # Create WordTokenizer and override number of classes in the decoder if a placeholder was given
         self.tokenizer = tokenizers.WordTokenizer(vocab_file=cfg['phonemes_file'])
         vocabulary = self.tokenizer.vocab
+        #vocabulary = {f"{phoneme} ":index for phoneme,index in self.tokenizer.vocab.items()}
 
         with open_dict(cfg):
             cfg.decoder.vocabulary = ListConfig(list(vocabulary.keys()))

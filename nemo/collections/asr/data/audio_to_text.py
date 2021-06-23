@@ -41,6 +41,7 @@ __all__ = [
     'AudioToPhonemeDataset',
     'TarredAudioToCharDataset',
     'TarredAudioToBPEDataset',
+    'TarredAudioToPhonemeDataset',
 ]
 
 
@@ -1353,6 +1354,136 @@ class TarredAudioToBPEDataset(_TarredAudioToTextDataset):
         audio_tar_filepaths: Union[str, List[str]],
         manifest_filepath: str,
         tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        sample_rate: int,
+        int_values: bool = False,
+        augmentor: Optional['nemo.collections.asr.parts.perturb.AudioAugmentor'] = None,
+        shuffle_n: int = 0,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        max_utts: int = 0,
+        trim: bool = False,
+        use_start_end_token: bool = True,
+        shard_strategy: str = "scatter",
+        global_rank: int = 0,
+        world_size: int = 0,
+    ):
+        if use_start_end_token and hasattr(tokenizer, 'bos_token'):
+            bos_id = tokenizer.bos_id
+        else:
+            bos_id = None
+
+        if use_start_end_token and hasattr(tokenizer, 'eos_token'):
+            eos_id = tokenizer.eos_id
+        else:
+            eos_id = None
+
+        if hasattr(tokenizer, 'pad_token'):
+            pad_id = tokenizer.pad_id
+        else:
+            pad_id = 0
+
+        class TokenizerWrapper:
+            def __init__(self, tokenizer):
+                self._tokenizer = tokenizer
+
+            def __call__(self, text):
+                t = self._tokenizer.text_to_ids(text)
+                return t
+
+        super().__init__(
+            audio_tar_filepaths=audio_tar_filepaths,
+            manifest_filepath=manifest_filepath,
+            parser=TokenizerWrapper(tokenizer),
+            sample_rate=sample_rate,
+            int_values=int_values,
+            augmentor=augmentor,
+            shuffle_n=shuffle_n,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            max_utts=max_utts,
+            trim=trim,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            pad_id=pad_id,
+            shard_strategy=shard_strategy,
+            global_rank=global_rank,
+            world_size=world_size,
+        )
+
+
+class TarredAudioToPhonemeDataset(_TarredAudioToTextDataset):
+    """
+    A similar Dataset to the AudioToPhonemeDataset, but which loads tarred audio files.
+
+    Accepts a single comma-separated JSON manifest file (in the same style as for the AudioToPhonemeDataset),
+    as well as the path(s) to the tarball(s) containing the wav files. Each line of the manifest should
+    contain the information for one audio file, including at least the transcript and name of the audio
+    file within the tarball.
+
+    Valid formats for the audio_tar_filepaths argument include:
+    (1) a single string that can be brace-expanded, e.g. 'path/to/audio.tar' or 'path/to/audio_{1..100}.tar.gz', or
+    (2) a list of file paths that will not be brace-expanded, e.g. ['audio_1.tar', 'audio_2.tar', ...].
+
+    See the WebDataset documentation for more information about accepted data and input formats.
+
+    If using multiple workers the number of shards should be divisible by world_size to ensure an
+    even split among workers. If it is not divisible, logging will give a warning but training will proceed.
+    In addition, if using mutiprocessing, each shard MUST HAVE THE SAME NUMBER OF ENTRIES after filtering
+    is applied. We currently do not check for this, but your program may hang if the shards are uneven!
+
+    Notice that a few arguments are different from the AudioToPhonemeDataset; for example, shuffle (bool) has been
+    replaced by shuffle_n (int).
+
+    Additionally, please note that the len() of this DataLayer is assumed to be the length of the manifest
+    after filtering. An incorrect manifest length may lead to some DataLoader issues down the line.
+
+    Args:
+        audio_tar_filepaths: Either a list of audio tarball filepaths, or a
+            string (can be brace-expandable).
+        manifest_filepath (str): Path to the manifest.
+        tokenizer (WordTokenizer): A WordTokenizer that contains phoneme to ID info and vice versa.
+        sample_rate (int): Sample rate to resample loaded audio to
+        int_values (bool): If true, load samples as 32-bit integers. Defauts to False.
+        augmentor (nemo.collections.asr.parts.perturb.AudioAugmentor): An AudioAugmentor
+            object used to augment loaded audio
+        shuffle_n (int): How many samples to look ahead and load to be shuffled.
+            See WebDataset documentation for more details.
+            Defaults to 0.
+        min_duration (float): Dataset parameter.
+            All training files which have a duration less than min_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to 0.1.
+        max_duration (float): Dataset parameter.
+            All training files which have a duration more than max_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to None.
+        max_utts (int): Limit number of utterances. 0 means no maximum.
+        trim (bool): Whether to use trim silence from beginning and end
+            of audio signal using librosa.effects.trim().
+            Defaults to False.
+        pad_id (id): Token used to pad when collating samples in batches.
+            If this is None, pads using 0s.
+            Defaults to None.
+        shard_strategy (str): Tarred dataset shard distribution strategy chosen as a str value during ddp.
+            -   `scatter`: The default shard strategy applied by WebDataset, where each node gets
+                a unique set of shards, which are permanently pre-allocated and never changed at runtime.
+            -   `replicate`: Optional shard strategy, where each node gets all of the set of shards
+                available in the tarred dataset, which are permanently pre-allocated and never changed at runtime.
+                The benefit of replication is that it allows each node to sample data points from the entire
+                dataset independently of other nodes, and reduces dependence on value of `shuffle_n`.
+
+                Note: Replicated strategy allows every node to sample the entire set of available tarfiles,
+                and therefore more than one node may sample the same tarfile, and even sample the same
+                data points! As such, there is no assured guarantee that all samples in the dataset will be
+                sampled at least once during 1 epoch.
+        global_rank (int): Worker rank, used for partitioning shards. Defaults to 0.
+        world_size (int): Total number of processes, used for partitioning shards. Defaults to 0.
+    """
+    def __init__(
+        self,
+        audio_tar_filepaths: Union[str, List[str]],
+        manifest_filepath: str,
+        tokenizer: 'nemo.collections.common.tokenizers.WordTokenizer',
         sample_rate: int,
         int_values: bool = False,
         augmentor: Optional['nemo.collections.asr.parts.perturb.AudioAugmentor'] = None,

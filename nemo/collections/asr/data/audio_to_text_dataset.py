@@ -231,6 +231,49 @@ def get_tarred_bpe_dataset(
     return dataset
 
 
+def get_tarred_phoneme_dataset(
+    config: dict,
+    tokenizer: 'WordTokenizer',
+    shuffle_n: int,
+    global_rank: int,
+    world_size: int,
+    augmentor: Optional['AudioAugmentor'] = None
+) -> audio_to_text.TarredAudioToPhonemeDataset:
+    """
+    Instantiates a phoneme-based TarredAudioToPhonemeDataset.
+
+    Args:
+        config: Config of the TarredAudioToPhonemeDataset.
+        tokenizer: An instance of a WordTokenizer object.
+        shuffle_n: How many samples to look ahead and load to be shuffled.
+            See WebDataset documentation for more details.
+        global_rank: Global rank of this device.
+        world_size: Global world size in the training method.
+        augmentor: Optional AudioAugmentor object for augmentations on audio data.
+
+    Returns:
+        An instance of TarredAudioToPhonemeDataset.
+    """
+    dataset = audio_to_text.TarredAudioToPhonemeDataset(
+        audio_tar_filepaths=config['tarred_audio_filepaths'],
+        manifest_filepath=config['manifest_filepath'],
+        tokenizer=tokenizer,
+        sample_rate=config['sample_rate'],
+        int_values=config.get('int_values', False),
+        augmentor=augmentor,
+        shuffle_n=shuffle_n,
+        max_duration=config.get('max_duration', None),
+        min_duration=config.get('min_duration', None),
+        max_utts=config.get('max_utts', 0),
+        trim=config.get('trim_silence', False),
+        use_start_end_token=config.get('use_start_end_token', True),
+        shard_strategy=config.get('tarred_shard_strategy', 'scatter'),
+        global_rank=global_rank,
+        world_size=world_size,
+    )
+    return dataset
+
+
 def get_dali_char_dataset(
     config: dict,
     shuffle: bool,
