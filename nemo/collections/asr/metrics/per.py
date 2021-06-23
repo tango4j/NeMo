@@ -134,7 +134,7 @@ class PER(Metric):
         Returns:
             A decoded string.
         """
-        hypothesis = self.tokenizer.ids_to_text(tokens)
+        hypothesis = ' '.join(self.decode_ids_to_tokens(tokens))
         return hypothesis
 
     def decode_ids_to_tokens(self, tokens: List[int]) -> List[str]:
@@ -148,7 +148,7 @@ class PER(Metric):
         Returns:
             A list of decoded tokens.
         """
-        token_list = self.tokenizer.ids_to_tokens(tokens)
+        token_list = [self.tokenizer.inv_vocab[t] for t in tokens if t != self.blank_id]
         return token_list
 
     def update(
