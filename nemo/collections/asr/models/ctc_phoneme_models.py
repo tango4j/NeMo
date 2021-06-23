@@ -23,8 +23,8 @@ from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.metrics.per import PER
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
-from nemo.core.classes.common import PretrainedModelInfo
 from nemo.collections.common import tokenizers
+from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging, model_utils
 
 
@@ -51,7 +51,7 @@ class EncDecCTCModelPhoneme(EncDecCTCModel):
         # Create WordTokenizer and override number of classes in the decoder if a placeholder was given
         self.tokenizer = tokenizers.WordTokenizer(vocab_file=cfg['phonemes_file'])
         vocabulary = self.tokenizer.vocab
-        #vocabulary = {f"{phoneme} ":index for phoneme,index in self.tokenizer.vocab.items()}
+        # vocabulary = {f"{phoneme} ":index for phoneme,index in self.tokenizer.vocab.items()}
 
         with open_dict(cfg):
             cfg.decoder.vocabulary = ListConfig(list(vocabulary.keys()))

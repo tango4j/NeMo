@@ -1479,6 +1479,7 @@ class TarredAudioToPhonemeDataset(_TarredAudioToTextDataset):
         global_rank (int): Worker rank, used for partitioning shards. Defaults to 0.
         world_size (int): Total number of processes, used for partitioning shards. Defaults to 0.
     """
+
     def __init__(
         self,
         audio_tar_filepaths: Union[str, List[str]],

@@ -237,7 +237,7 @@ def get_tarred_phoneme_dataset(
     shuffle_n: int,
     global_rank: int,
     world_size: int,
-    augmentor: Optional['AudioAugmentor'] = None
+    augmentor: Optional['AudioAugmentor'] = None,
 ) -> audio_to_text.TarredAudioToPhonemeDataset:
     """
     Instantiates a phoneme-based TarredAudioToPhonemeDataset.
