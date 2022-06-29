@@ -18,7 +18,7 @@ from pytorch_lightning import seed_everything
 from nemo.collections.asr.models import ClusteringDiarizer
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
-from nemo.collections.asr.parts.utils._nmesc_clustering import getCosAffinityMatrix
+#from nemo.collections.asr.parts.utils._nmesc_clustering import getCosAffinityMatrix
 from sklearn.metrics.pairwise import cosine_similarity
 
 """

@@ -448,14 +448,19 @@ class _AudioMSDDTrainDataset(Dataset):
         sample = self.collection[index]
         if sample.offset is None:
             sample.offset = 0
+        #print('sample: ', sample)
         clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(sample)
         features = self.featurizer.process(sample.audio_file, offset=sample.offset, duration=sample.duration)
+        #print('offset: ', sample.offset)
+        #print('duration: ', sample.duration)
+        #print('features: ', features)
         feature_length = torch.tensor(features.shape[0]).long()
         ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(sample)
         if self.random_flip:
             torch.manual_seed(index)
             flip = torch.cat([torch.randperm(self.max_spks), torch.tensor(-1).unsqueeze(0)])
             clus_label_index, targets = flip[clus_label_index], targets[:, flip[:self.max_spks]]
+        #print('feature_length: ', feature_length)
         return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets
 
 

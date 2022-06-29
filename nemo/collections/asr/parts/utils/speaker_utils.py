@@ -827,9 +827,14 @@ def write_rttm2manifest(AUDIO_RTTM_MAP: str, manifest_file: str, include_uniq_id
             rttm_file_path = AUDIO_RTTM_MAP[uniq_id]['rttm_filepath']
             rttm_lines = read_rttm_lines(rttm_file_path)
             offset, duration = get_offset_and_duration(AUDIO_RTTM_MAP, uniq_id, deci)
+            #print('offset: ', offset)
+            #print('duration: ', duration)
             vad_start_end_list_raw = []
             for line in rttm_lines:
                 start, dur = get_vad_out_from_rttm_line(line)
+                #if start + dur > duration: #COLEMAN CHANGE HERE
+                #    print('start+dur: ', start+dur)
+                #else:
                 vad_start_end_list_raw.append([start, start + dur])
             vad_start_end_list = combine_float_overlaps(vad_start_end_list_raw, deci)
             if len(vad_start_end_list) == 0:
@@ -867,6 +872,8 @@ def segments_manifest_to_subsegments_manifest(
     Returns:
         returns path to subsegment manifest file
     """
+    #print(segments_manifest_file)
+    #print(subsegments_manifest_file)
     if subsegments_manifest_file is None:
         pwd = os.getcwd()
         subsegments_manifest_file = os.path.join(pwd, 'subsegments.json')
@@ -876,6 +883,7 @@ def segments_manifest_to_subsegments_manifest(
     ) as subsegments_manifest:
         segments = segments_manifest.readlines()
         for segment in segments:
+            #print(segment)
             segment = segment.strip()
             dic = json.loads(segment)
             audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']

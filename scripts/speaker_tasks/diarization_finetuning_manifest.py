@@ -140,6 +140,7 @@ def main(input_manifest_path, output_manifest_path, window, shift, step_count, d
     input_manifest_file = sorted(input_manifest_file)
     AUDIO_RTTM_MAP = audio_rttm_map(input_manifest_path)
     segments_manifest_file = write_rttm2manifest(AUDIO_RTTM_MAP, segment_manifest_path, deci)
+    print(segments_manifest_file)
     subsegments_manifest_file = subsegment_manifest_path
     segments_manifest_to_subsegments_manifest(
         segments_manifest_file,

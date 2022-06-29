@@ -56,7 +56,11 @@ def normalize_batch(x, seq_len, normalize_type):
         x_mean = torch.zeros((seq_len.shape[0], x.shape[1]), dtype=x.dtype, device=x.device)
         x_std = torch.zeros((seq_len.shape[0], x.shape[1]), dtype=x.dtype, device=x.device)
         for i in range(x.shape[0]):
+            #print('i: ', i)
             if x[i, :, : seq_len[i]].shape[1] == 1:
+                #print(x.shape)
+                #print(seq_len[i])
+                #print(x[i, :, : seq_len[i]].shape)
                 raise ValueError(
                     "normalize_batch with `per_feature` normalize_type received a tensor of length 1. This will result "
                     "in torch.std() returning nan"
@@ -381,6 +385,8 @@ class FilterbankFeatures(nn.Module):
 
     def forward(self, x, seq_len):
         seq_len = self.get_seq_len(seq_len.float())
+
+        #print('seq_len: ', seq_len)
 
         if self.stft_pad_amount is not None:
             x = torch.nn.functional.pad(
