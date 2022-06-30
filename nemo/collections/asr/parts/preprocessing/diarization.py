@@ -30,6 +30,7 @@ from gpuRIR import att2t_SabineEstimator, beta_SabineEstimation, simulateRIR, t2
 from nemo.collections.asr.parts.utils.speaker_utils import labels_to_rttmfile
 
 #######################################################################
+from nemo.utils import logging
 from collections import Counter
 from collections import OrderedDict as od
 from nemo.collections.asr.parts.utils.speaker_utils import (
