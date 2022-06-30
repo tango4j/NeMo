@@ -474,7 +474,7 @@ class _AudioMSDDTrainDataset(Dataset):
                 manifests_files=segment_manifest_path,
                 emb_dict=None,
                 clus_label_dict=None,
-                pairwise_infer=pairwise_infer,
+                pairwise_infer=self.pairwise_infer,
             )
 
             self._sample_counter = 1
