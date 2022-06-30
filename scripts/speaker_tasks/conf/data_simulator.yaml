@@ -24,3 +24,7 @@ data_simulator:
   window_size: 0.1
   normalization: equal
   normalization_var: 0.1
+  segment_manifest_window: 0.5
+  segment_manifest_shift: 0.25
+  segment_manifest_step_count: 50
+  segment_manifest_deci: 3
