@@ -951,18 +951,18 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         synthetic_cfg_path: str,
         emb_dir: str,
     ):
-        # super().__init__()
-        self.emb_dict = emb_dict
-        self.emb_seq = emb_seq
-        self.clus_label_dict = clus_label_dict
+
+        self.featurizer = featurizer
+        self.multiscale_args_dict = multiscale_args_dict
+        self.multiscale_timestamp_dict = multiscale_timestamp_dict
         self.round_digits = 2
         self.decim = 10 ** self.round_digits
-        self.frame_per_sec = int(1 / window_stride)
         self.soft_label_thres = soft_label_thres
         self.pairwise_infer = pairwise_infer
         self.max_spks = 2
-        self.use_single_scale_clus = use_single_scale_clus
-        self.seq_eval_mode = seq_eval_mode
+        self.frame_per_sec = int(1 / window_stride)
+        self.emb_batch_size = emb_batch_size
+        self.random_flip = random_flip
 
         with open(synthetic_cfg_path, 'r') as f:
             self._params = OmegaConf.load(f)
