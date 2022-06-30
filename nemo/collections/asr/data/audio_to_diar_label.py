@@ -31,6 +31,7 @@ from nemo.core.neural_types import (
 )
 
 from omegaconf import OmegaConf
+from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGenerator
 
 
 def get_scale_mapping_list(uniq_timestamps):
