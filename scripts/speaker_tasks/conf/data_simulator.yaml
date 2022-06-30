@@ -3,7 +3,7 @@ data_simulator:
   sr: 16000
   num_speakers: 4
   session_length: 3000
-  output_dir: /home/chooper/projects/chooper-dl/NeMo/examples/speaker_tasks/diarization/test
+  output_dir: /home/chooper/projects/chooper_dl/NeMo/examples/speaker_tasks/diarization/test
   output_filename: diarization_session
   overwrite_output: true
   sentence_length_params:
