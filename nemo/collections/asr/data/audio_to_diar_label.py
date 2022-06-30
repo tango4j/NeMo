@@ -958,7 +958,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             with open(synthetic_cfg_path, 'r') as f:
                 self._params = OmegaConf.load(f)
             self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
-        self._sample_counter = 0
+        # self._sample_counter = 0
+        self._sample_counter = 1
         self._samples_per_refresh = 10000
         self.emb_dir = emb_dir
 
@@ -972,6 +973,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             emb_batch_size=emb_batch_size,
             pairwise_infer=pairwise_infer,
         )
+        self.regenerate_dataset()
 
     def _extract_timestamps(self, manifest_file: str):
         """
