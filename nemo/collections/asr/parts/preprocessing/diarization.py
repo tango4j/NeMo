@@ -30,7 +30,6 @@ from gpuRIR import att2t_SabineEstimator, beta_SabineEstimation, simulateRIR, t2
 from nemo.collections.asr.parts.utils.speaker_utils import labels_to_rttmfile
 
 #######################################################################
-from nemo.utils import logging
 from collections import Counter
 from collections import OrderedDict as od
 from nemo.collections.asr.parts.utils.speaker_utils import (
@@ -54,8 +53,6 @@ def write_file(name, lines, idx):
             dic = lines[i]
             json.dump(dic, fout)
             fout.write('\n')
-    logging.info("wrote", name)
-
 
 def read_file(pathlist):
     pathlist = open(pathlist, 'r').readlines()
@@ -95,14 +92,6 @@ def get_path_dict(data_path, uniqids, len_wavs=None):
 def rreplace(s, old, new):
     li = s.rsplit(old, 1)
     return new.join(li)
-
-def write_file(name, lines, idx):
-    with open(name, 'w') as fout:
-        for i in idx:
-            dic = lines[i]
-            json.dump(dic, fout)
-            fout.write('\n')
-    logging.info("wrote", name)
 
 def get_uniq_id_with_period(path):
     split_path = os.path.basename(path).split('.')[:-1]
