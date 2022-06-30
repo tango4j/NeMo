@@ -731,7 +731,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         # )
 
         self.synthetic=True
-        self.synthetic_cfg_path='/home/chooper/projects/chooper-dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml'
+        self.synthetic_cfg_path='/home/chooper/projects/chooper_dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml'
 
         dataset = AudioToSpeechMSDDSyntheticTrainDataset(
             manifest_filepath=config['manifest_filepath'],
