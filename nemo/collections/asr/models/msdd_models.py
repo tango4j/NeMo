@@ -719,31 +719,30 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
-        # dataset = AudioToSpeechMSDDTrainDataset(
-        #     manifest_filepath=config['manifest_filepath'],
-        #     multiscale_args_dict=self.multiscale_args_dict,
-        #     multiscale_timestamp_dict=multiscale_timestamp_dict,
-        #     soft_label_thres=config.soft_label_thres,
-        #     featurizer=featurizer,
-        #     window_stride=self.cfg_msdd_model.preprocessor.window_stride,
-        #     emb_batch_size=config['emb_batch_size'],
-        #     pairwise_infer=False,
-        # )
-
-        self.synthetic_cfg_path='/home/chooper/projects/chooper_dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml'
-
-        dataset = AudioToSpeechMSDDSyntheticTrainDataset(
-            manifest_filepath=config['manifest_filepath'],
-            multiscale_args_dict=self.multiscale_args_dict,
-            multiscale_timestamp_dict=multiscale_timestamp_dict,
-            soft_label_thres=config.soft_label_thres,
-            featurizer=featurizer,
-            window_stride=self.cfg_msdd_model.preprocessor.window_stride,
-            emb_batch_size=config['emb_batch_size'],
-            pairwise_infer=False,
-            synthetic_cfg_path=self.synthetic_cfg_path,
-            emb_dir=self.cfg_msdd_model.train_ds.emb_dir,
-        )
+        if self.cfg_msdd_model.trainer.synthetic:
+            dataset = AudioToSpeechMSDDSyntheticTrainDataset(
+                manifest_filepath=config['manifest_filepath'],
+                multiscale_args_dict=self.multiscale_args_dict,
+                multiscale_timestamp_dict=multiscale_timestamp_dict,
+                soft_label_thres=config.soft_label_thres,
+                featurizer=featurizer,
+                window_stride=self.cfg_msdd_model.preprocessor.window_stride,
+                emb_batch_size=config['emb_batch_size'],
+                pairwise_infer=False,
+                synthetic_cfg_path=self.cfg_msdd_model.trainer.synthetic_cfg_path,
+                emb_dir=self.cfg_msdd_model.train_ds.emb_dir,
+            )
+        else:
+            dataset = AudioToSpeechMSDDTrainDataset(
+                manifest_filepath=config['manifest_filepath'],
+                multiscale_args_dict=self.multiscale_args_dict,
+                multiscale_timestamp_dict=multiscale_timestamp_dict,
+                soft_label_thres=config.soft_label_thres,
+                featurizer=featurizer,
+                window_stride=self.cfg_msdd_model.preprocessor.window_stride,
+                emb_batch_size=config['emb_batch_size'],
+                pairwise_infer=False,
+            )
 
         self.data_collection = dataset.collection
         collate_ds = dataset
