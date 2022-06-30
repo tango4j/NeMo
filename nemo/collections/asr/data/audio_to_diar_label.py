@@ -952,26 +952,26 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         synthetic_cfg_path: str,
         emb_dir: str,
     ):
+        super().__init__()
+        self.emb_dict = emb_dict
+        self.emb_seq = emb_seq
+        self.clus_label_dict = clus_label_dict
+        self.round_digits = 2
+        self.decim = 10 ** self.round_digits
+        self.frame_per_sec = int(1 / window_stride)
+        self.soft_label_thres = soft_label_thres
+        self.pairwise_infer = pairwise_infer
+        self.max_spks = 2
+        self.use_single_scale_clus = use_single_scale_clus
+        self.seq_eval_mode = seq_eval_mode
 
-        self.synthetic = synthetic
-        if synthetic:
-            with open(synthetic_cfg_path, 'r') as f:
-                self._params = OmegaConf.load(f)
-            self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
+        with open(synthetic_cfg_path, 'r') as f:
+            self._params = OmegaConf.load(f)
+        self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
         self._sample_counter = 0
         self._samples_per_refresh = 100
         self.emb_dir = emb_dir
 
-        super().__init__(
-            manifest_filepath=manifest_filepath,
-            multiscale_args_dict=multiscale_args_dict,
-            multiscale_timestamp_dict=multiscale_timestamp_dict,
-            soft_label_thres=soft_label_thres,
-            featurizer=featurizer,
-            window_stride=window_stride,
-            emb_batch_size=emb_batch_size,
-            pairwise_infer=pairwise_infer,
-        )
         self.regenerate_dataset()
 
     def _extract_timestamps(self, manifest_file: str):
@@ -1080,36 +1080,35 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         return multiscale_timestamps_dict
 
     def regenerate_dataset(self): #TODO replace with once per epoch????
-        if self.synthetic and self._sample_counter % self._samples_per_refresh == 0:
-            #generate sessions
-            print('audio2diarlabel: Generate Session')
-            self.data_simulator.generate_session()
+        # if self.synthetic and self._sample_counter % self._samples_per_refresh == 0:
+        #generate sessions
+        print('audio2diarlabel: Generate Session')
+        self.data_simulator.generate_session()
 
-            #update manifest_files using tmp dir
-            self.data_simulator.create_base_manifest()
-            segment_manifest_path = self.data_simulator.create_segment_manifest()
+        #update manifest_files using tmp dir
+        self.data_simulator.create_base_manifest()
+        segment_manifest_path = self.data_simulator.create_segment_manifest()
 
-            #reresh diarization session manifest
-            self.collection = DiarizationSpeechLabel(
-                manifests_files=segment_manifest_path,
-                emb_dict=None,
-                clus_label_dict=None,
-                pairwise_infer=self.pairwise_infer,
-            )
+        #reresh diarization session manifest
+        self.collection = DiarizationSpeechLabel(
+            manifests_files=segment_manifest_path,
+            emb_dict=None,
+            clus_label_dict=None,
+            pairwise_infer=self.pairwise_infer,
+        )
 
-            #regenerate segments
-            tmp_dir = self.emb_dir
-            emb_batch_size = self.emb_batch_size
-            self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
+        #regenerate segments
+        tmp_dir = self.emb_dir
+        emb_batch_size = self.emb_batch_size
+        self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
 
             #reset counter
-            self._sample_counter = 1
-        elif self.synthetic:
-            self._sample_counter += 1
+        #     self._sample_counter = 1
+        # elif self.synthetic:
+        #     self._sample_counter += 1
 
     def __getitem__(self, index):
         sample = self.collection[index]
-        # print(sample)
         if sample.offset is None:
             sample.offset = 0
         clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(sample)
@@ -1122,6 +1121,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             clus_label_index, targets = flip[clus_label_index], targets[:, flip[:self.max_spks]]
 
         #TODO move somewhere else?
-        self.regenerate_dataset()
+        # self.regenerate_dataset()
 
         return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets

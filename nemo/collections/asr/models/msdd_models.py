@@ -730,7 +730,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         #     pairwise_infer=False,
         # )
 
-        self.synthetic=True
         self.synthetic_cfg_path='/home/chooper/projects/chooper_dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml'
 
         dataset = AudioToSpeechMSDDSyntheticTrainDataset(
@@ -742,7 +741,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             window_stride=self.cfg_msdd_model.preprocessor.window_stride,
             emb_batch_size=config['emb_batch_size'],
             pairwise_infer=False,
-            synthetic=self.synthetic,
             synthetic_cfg_path=self.synthetic_cfg_path,
             emb_dir=self.cfg_msdd_model.train_ds.emb_dir,
         )
