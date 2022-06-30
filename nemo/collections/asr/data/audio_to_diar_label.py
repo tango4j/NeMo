@@ -951,7 +951,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         synthetic_cfg_path: str,
         emb_dir: str,
     ):
-        super().__init__()
+        # super().__init__()
         self.emb_dict = emb_dict
         self.emb_seq = emb_seq
         self.clus_label_dict = clus_label_dict
