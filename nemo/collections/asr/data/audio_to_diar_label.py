@@ -32,6 +32,8 @@ from nemo.core.neural_types import (
 
 from omegaconf import OmegaConf
 from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGenerator
+from nemo.collections.asr.parts.models.msdd_models import get_audio_rttm_map
+from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest
 
 
 def get_scale_mapping_list(uniq_timestamps):
@@ -255,8 +257,6 @@ class _AudioMSDDTrainDataset(Dataset):
         emb_batch_size,
         pairwise_infer: bool,
         random_flip: bool = True,
-        synthetic: bool,
-        synthetic_cfg_path: str,
     ):
         super().__init__()
         self.collection = DiarizationSpeechLabel(
@@ -276,15 +276,6 @@ class _AudioMSDDTrainDataset(Dataset):
         self.frame_per_sec = int(1 / window_stride)
         self.emb_batch_size = emb_batch_size
         self.random_flip = random_flip
-
-        self.synthetic = synthetic
-        if synthetic:
-            with open(synthetic_cfg_path, 'r') as f:
-                self._params = OmegaConf.load(f)
-            self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
-        self._sample_counter = 0
-        self._samples_per_refresh = 10000
-
 
     def __len__(self):
         return len(self.collection)
@@ -459,28 +450,6 @@ class _AudioMSDDTrainDataset(Dataset):
         return ms_seg_timestamps, ms_seg_counts
 
     def __getitem__(self, index):
-        if self.synthetic and self._sample_counter % self._samples_per_refresh == 0:
-            #regenerate dataset - replace with once per epoch
-            #generate sessions
-            print('audio2diarlabel: Generate Session')
-            self.data_simulator.generate_session()
-
-            #update manifest_files using tmp dir
-            self.data_simulator.create_base_manifest()
-            segment_manifest_path = self.data_simulator.create_segment_manifest()
-
-            #reresh diarization session manifest
-            self.collection = DiarizationSpeechLabel(
-                manifests_files=segment_manifest_path,
-                emb_dict=None,
-                clus_label_dict=None,
-                pairwise_infer=self.pairwise_infer,
-            )
-
-            self._sample_counter = 1
-        elif self.synthetic:
-            self._sample_counter += 1
-
         sample = self.collection[index]
         if sample.offset is None:
             sample.offset = 0
@@ -841,8 +810,6 @@ class AudioToSpeechMSDDTrainDataset(_AudioMSDDTrainDataset):
         window_stride,
         emb_batch_size,
         pairwise_infer: bool,
-        synthetic: bool,
-        synthetic_cfg_path: str,
     ):
         super().__init__(
             manifest_filepath=manifest_filepath,
@@ -853,8 +820,6 @@ class AudioToSpeechMSDDTrainDataset(_AudioMSDDTrainDataset):
             window_stride=window_stride,
             emb_batch_size=emb_batch_size,
             pairwise_infer=pairwise_infer,
-            synthetic=synthetic,
-            synthetic_cfg_path=synthetic_cfg_path,
         )
 
     def msdd_train_collate_fn(self, batch):
@@ -924,3 +889,195 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
 
     def msdd_infer_collate_fn(self, batch):
         return _msdd_infer_collate_fn(self, batch)
+
+
+class AudioToSpeechMSDDSyntheticTrainDataset(Dataset):
+    '''
+    Online Synthetic Diarization Session Generator
+    '''
+
+    def __init__(
+        self,
+        *,
+        manifest_filepath: str,
+        multiscale_args_dict: Dict,
+        multiscale_timestamp_dict: Dict,
+        soft_label_thres: float,
+        featurizer,
+        window_stride,
+        emb_batch_size,
+        pairwise_infer: bool,
+        synthetic: bool,
+        synthetic_cfg_path: str,
+        emb_dir: str,
+    ):
+
+        self.synthetic = synthetic
+        if synthetic:
+            with open(synthetic_cfg_path, 'r') as f:
+                self._params = OmegaConf.load(f)
+            self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
+        self._sample_counter = 0
+        self._samples_per_refresh = 10000
+        self.emb_dir = emb_dir
+
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            multiscale_args_dict=multiscale_args_dict,
+            multiscale_timestamp_dict=multiscale_timestamp_dict,
+            soft_label_thres=soft_label_thres,
+            featurizer=featurizer,
+            window_stride=window_stride,
+            emb_batch_size=emb_batch_size,
+            pairwise_infer=pairwise_infer,
+        )
+
+    def _extract_timestamps(self, manifest_file: str):
+        """
+        This method extracts speaker embeddings from segments passed through manifest_file
+        Optionally you may save the intermediate speaker embeddings for debugging or any use.
+        """
+        logging.info("Extracting only timestamps for multiscale segmentation")
+        time_stamps = {}
+        with open(manifest_file, 'r', encoding='utf-8') as manifest:
+            for i, line in enumerate(manifest.readlines()):
+                line = line.strip()
+                dic = json.loads(line)
+
+                uniq_name = dic['uniq_id']
+                if uniq_name not in time_stamps:
+                    time_stamps[uniq_name] = []
+                start = dic['offset']
+                end = start + dic['duration']
+                stamp = '{:.3f} {:.3f} '.format(start, end)
+                time_stamps[uniq_name].append(stamp)
+        return time_stamps
+
+    def get_timestamps(self, multiscale_and_timestamps, multiscale_args_dict):
+        """
+        import ipdb; ipdb.set_trace()
+        The embeddings and timestamps in multiscale_embeddings_and_timestamps dictionary are
+        indexed by scale index. This function rearranges the extracted speaker embedding and
+        timestamps by unique ID to make the further processing more convenient.
+
+        Args:
+            multiscale_embeddings_and_timestamps (dict):
+                Dictionary of timestamps for each scale.
+            multiscale_args_dict (dict):
+                Dictionary of scale information: window, shift and multiscale weights.
+
+        Returns:
+            timestamps_dict (dict)
+                A dictionary containing embeddings and timestamps of each scale, indexed by unique ID.
+        """
+        timestamps_dict = {
+            uniq_id: {'multiscale_weights': [], 'scale_dict': {}}
+            for uniq_id in multiscale_and_timestamps[0].keys()
+        }
+        for scale_idx in sorted(multiscale_args_dict['scale_dict'].keys()):
+            time_stamps = multiscale_and_timestamps[scale_idx]
+            for uniq_id in time_stamps.keys():
+                timestamps_dict[uniq_id]['multiscale_weights'] = (
+                    torch.tensor(multiscale_args_dict['multiscale_weights']).unsqueeze(0).half()
+                )
+                timestamps_dict[uniq_id]['scale_dict'][scale_idx] = {
+                    'time_stamps': time_stamps[uniq_id],
+                }
+
+        return timestamps_dict
+
+    def _run_segmentation(self, window: float, shift: float, _speaker_dir: str, _speaker_manifest_path: str, scale_tag: str = ''):
+
+        subsegments_manifest_path = os.path.join(_speaker_dir, f'subsegments{scale_tag}.json')
+        logging.info(
+            f"Subsegmentation for embedding extraction:{scale_tag.replace('_',' ')}, {subsegments_manifest_path}"
+        )
+        subsegments_manifest_path = segments_manifest_to_subsegments_manifest(
+            segments_manifest_file=_speaker_manifest_path,
+            subsegments_manifest_file=subsegments_manifest_path,
+            window=window,
+            shift=shift,
+            include_uniq_id=True,
+        )
+        return subsegments_manifest_path
+
+    def prepare_split_data(self, manifest_filepath, _out_dir, batch_size):
+        _speaker_dir = os.path.join(_out_dir, 'speaker_outputs')
+        if not os.path.exists(_speaker_dir):
+            os.makedirs(_speaker_dir)
+        if not os.path.exists(f'{_out_dir}/speaker_outputs/embeddings'):
+            os.makedirs(f'{_out_dir}/speaker_outputs/embeddings')
+
+        split_audio_rttm_map = get_audio_rttm_map(manifest_filepath)
+
+        out_rttm_dir = os.path.join(_out_dir, 'pred_rttms')
+        os.makedirs(out_rttm_dir, exist_ok=True)
+
+        # Speech Activity Detection part
+        _speaker_manifest_path = os.path.join(_speaker_dir, 'oracle_vad_manifest.json')
+        _speaker_manifest_path = write_rttm2manifest(split_audio_rttm_map,
+                                                     _speaker_manifest_path,
+                                                     include_uniq_id=True)
+
+        multiscale_and_timestamps = {}
+        # Segmentation
+        for scale_idx, (window, shift) in self.multiscale_args_dict['scale_dict'].items():
+
+            # Segmentation for the current scale (scale_idx)
+            subsegments_manifest_path = self._run_segmentation(window,
+                                                               shift,
+                                                               _speaker_dir,
+                                                               _speaker_manifest_path,
+                                                               scale_tag=f'_scale{scale_idx}')
+            multiscale_timestamps = self._extract_timestamps(subsegments_manifest_path)
+            multiscale_and_timestamps[scale_idx] = multiscale_timestamps
+
+        multiscale_timestamps_dict = self.get_timestamps(
+            multiscale_and_timestamps, self.multiscale_args_dict
+        )
+        return multiscale_timestamps_dict
+
+    def regenerate_dataset(self): #TODO replace with once per epoch????
+        if self.synthetic and self._sample_counter % self._samples_per_refresh == 0:
+            #generate sessions
+            print('audio2diarlabel: Generate Session')
+            self.data_simulator.generate_session()
+
+            #update manifest_files using tmp dir
+            self.data_simulator.create_base_manifest()
+            segment_manifest_path = self.data_simulator.create_segment_manifest()
+
+            #reresh diarization session manifest
+            self.collection = DiarizationSpeechLabel(
+                manifests_files=segment_manifest_path,
+                emb_dict=None,
+                clus_label_dict=None,
+                pairwise_infer=self.pairwise_infer,
+            )
+
+            #regenerate segments
+            tmp_dir = self.emb_dir
+            emb_batch_size = self.emb_batch_size
+            self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size):
+
+            #reset counter
+            self._sample_counter = 1
+        elif self.synthetic:
+            self._sample_counter += 1
+
+    def __getitem__(self, index):
+        #TODO move somewhere else?
+        self.regenerate_dataset()
+
+        sample = self.collection[index]
+        if sample.offset is None:
+            sample.offset = 0
+        clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(sample)
+        features = self.featurizer.process(sample.audio_file, offset=sample.offset, duration=sample.duration)
+        feature_length = torch.tensor(features.shape[0]).long()
+        ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(sample)
+        if self.random_flip:
+            torch.manual_seed(index)
+            flip = torch.cat([torch.randperm(self.max_spks), torch.tensor(-1).unsqueeze(0)])
+            clus_label_index, targets = flip[clus_label_index], targets[:, flip[:self.max_spks]]
+        return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets

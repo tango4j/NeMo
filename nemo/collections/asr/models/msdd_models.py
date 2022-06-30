@@ -36,7 +36,7 @@ from pytorch_lightning.utilities import rank_zero_only
 from torch.utils.data import ChainDataset
 from collections import OrderedDict
 from nemo.collections.asr.models import ClusteringDiarizer
-from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset
+from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset, AudioToSpeechMSDDSyntheticTrainDataset
 from nemo.collections.asr.data.audio_to_text_dataset import convert_to_config_list
 from nemo.collections.asr.losses.angularloss import AngularSoftmaxLoss
 from nemo.collections.asr.losses.bce_loss import BCELoss
@@ -74,21 +74,6 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
 
 
 )
-from nemo.collections.asr.parts.utils.speaker_utils import (
-    labels_to_pyannote_object,
-    labels_to_rttmfile,
-    rttm_to_labels,
-    merge_stamps,
-    audio_rttm_map,
-    get_embs_and_timestamps,
-    get_uniqname_from_filepath,
-    parse_scale_configs,
-    perform_clustering,
-    score_labels,
-    segments_manifest_to_subsegments_manifest,
-    write_rttm2manifest,
-)
-
 from nemo.core.neural_types import (
     AcousticEncodedRepresentation,
     LengthsType,
@@ -734,10 +719,21 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
+        # dataset = AudioToSpeechMSDDTrainDataset(
+        #     manifest_filepath=config['manifest_filepath'],
+        #     multiscale_args_dict=self.multiscale_args_dict,
+        #     multiscale_timestamp_dict=multiscale_timestamp_dict,
+        #     soft_label_thres=config.soft_label_thres,
+        #     featurizer=featurizer,
+        #     window_stride=self.cfg_msdd_model.preprocessor.window_stride,
+        #     emb_batch_size=config['emb_batch_size'],
+        #     pairwise_infer=False,
+        # )
+
         self.synthetic=True
         self.synthetic_cfg_path='/home/chooper/projects/chooper-dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml'
 
-        dataset = AudioToSpeechMSDDTrainDataset(
+        dataset = AudioToSpeechMSDDSyntheticTrainDataset(
             manifest_filepath=config['manifest_filepath'],
             multiscale_args_dict=self.multiscale_args_dict,
             multiscale_timestamp_dict=multiscale_timestamp_dict,
@@ -748,6 +744,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             pairwise_infer=False,
             synthetic=self.synthetic,
             synthetic_cfg_path=self.synthetic_cfg_path,
+            emb_dir=self.cfg_msdd_model.train_ds.emb_dir,
         )
 
         self.data_collection = dataset.collection
