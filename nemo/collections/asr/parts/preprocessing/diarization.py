@@ -726,9 +726,11 @@ class LibriSpeechGenerator(object):
         text_path = os.path.join(basepath, 'synthetic_txt.list')
         rttm_path = os.path.join(basepath, 'synthetic_rttm.list')
         ctm_path = os.path.join(basepath, 'synthetic_ctm.list')
+        uem_path = None
         manifest_filepath = os.path.join(basepath, 'base_manifest.json')
 
         ###################################### create_base_manifest(wav_path, text_path=text_path, rttm_path=rttm_path, ctm_path=ctm_path, manifest_filepath=manifest_filepath)
+
         if os.path.exists(manifest_filepath):
             os.remove(manifest_filepath)
         wav_pathlist = read_file(wav_path)
