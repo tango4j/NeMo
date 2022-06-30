@@ -32,7 +32,7 @@ from nemo.core.neural_types import (
 
 from omegaconf import OmegaConf
 from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGenerator
-from nemo.collections.asr.parts.models.msdd_models import get_audio_rttm_map
+from nemo.collections.asr.models.msdd_models import get_audio_rttm_map
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest
 
 
