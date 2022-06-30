@@ -948,7 +948,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         window_stride,
         emb_batch_size,
         pairwise_infer: bool,
-        synthetic: bool,
         synthetic_cfg_path: str,
         emb_dir: str,
     ):
