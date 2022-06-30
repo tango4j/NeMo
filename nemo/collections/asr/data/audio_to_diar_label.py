@@ -448,7 +448,7 @@ class _AudioMSDDTrainDataset(Dataset):
         sample = self.collection[index]
         if sample.offset is None:
             sample.offset = 0
-        #print('sample: ', sample)
+        print('sample: ', sample)
         clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(sample)
         features = self.featurizer.process(sample.audio_file, offset=sample.offset, duration=sample.duration)
         #print('offset: ', sample.offset)
