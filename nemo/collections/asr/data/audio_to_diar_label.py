@@ -1109,8 +1109,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             self._sample_counter += 1
 
     def __getitem__(self, index):
-        #TODO move somewhere else?
-        self.regenerate_dataset()
         sample = self.collection[index]
         print(sample)
         if sample.offset is None:
@@ -1123,4 +1121,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             torch.manual_seed(index)
             flip = torch.cat([torch.randperm(self.max_spks), torch.tensor(-1).unsqueeze(0)])
             clus_label_index, targets = flip[clus_label_index], targets[:, flip[:self.max_spks]]
+
+        #TODO move somewhere else?
+        self.regenerate_dataset()
+
         return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets
