@@ -30,6 +30,8 @@ from nemo.core.neural_types import (
     NeuralType,
 )
 
+from omegaconf import OmegaConf
+
 
 def get_scale_mapping_list(uniq_timestamps):
     """
