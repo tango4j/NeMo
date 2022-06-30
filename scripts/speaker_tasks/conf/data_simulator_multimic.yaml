@@ -1,0 +1,67 @@
+data_simulator:
+  manifest_path: ./dev-clean-align.json
+  sr: 16000
+  num_speakers: 4
+  session_length: 600
+  output_dir: test
+  output_filename: diarization_session
+  overwrite_output: true
+  sentence_length_params:
+  - 0.4
+  - 0.05
+  alignment_type: end
+  dominance_var: 0.11
+  min_dominance: 0.05
+  turn_prob: 0.875
+  mean_overlap: 0.19
+  mean_silence: 0.15
+  overlap_prob: 0.7
+  outputs: rjctl
+  enforce_num_speakers: false
+  num_sessions: 40
+  random_seed: 43
+  window_type: hamming
+  window_size: 0.15
+  normalization: equal
+  normalization_var: 0.1
+  num_channels: 2
+  rir_generation:
+    room_sz:
+    - 3
+    - 3
+    - 2.5
+    nb_src: 4
+    pos_src:
+    - - 0.6
+      - 1.1
+      - 0.5
+    - - 1
+      - 2
+      - 0.5
+    - - 0.4
+      - 1.1
+      - 0.5
+    - - 1
+      - 2.1
+      - 0.5
+    nb_rcv: 2
+    pos_rcv:
+    - - 0.5
+      - 1
+      - 0.5
+    - - 1
+      - 1
+      - 0.5
+    orV_rcv: null
+    mic_pattern: omni
+    abs_weights:
+    - 0.9
+    - 0.9
+    - 0.9
+    - 0.9
+    - 0.9
+    - 0.9
+    T60: 0.1
+    att_diff: 15.0
+    att_max: 60.0
+    fs: 16000.0
