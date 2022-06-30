@@ -1109,8 +1109,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
     def __getitem__(self, index):
         #TODO move somewhere else?
         self.regenerate_dataset()
-
         sample = self.collection[index]
+        print(sample)
         if sample.offset is None:
             sample.offset = 0
         clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(sample)
