@@ -462,6 +462,7 @@ class _AudioMSDDTrainDataset(Dataset):
         if self.synthetic and self._sample_counter % self._samples_per_refresh == 0:
             #regenerate dataset - replace with once per epoch
             #generate sessions
+            print('audio2diarlabel: Generate Session')
             self.data_simulator.generate_session()
 
             #update manifest_files using tmp dir
