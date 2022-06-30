@@ -796,7 +796,7 @@ class LibriSpeechGenerator(object):
     def create_segment_manifest(self):
         basepath = self._params.data_simulator.output_dir
         output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
-        input_manifest_path = self.base_manifest_path
+        input_manifest_path = self.base_manifest_filepath
         window = self._params.data_simulator.segment_manifest_window
         shift = self._params.data_simulator.segment_manifest_shift
         step_count = self._params.data_simulator.segment_manifest_step_count
