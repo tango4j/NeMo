@@ -111,7 +111,7 @@ def get_uniq_id_with_period(path):
 def get_subsegment_dict(subsegments_manifest_file, window, shift, deci):
     _subsegment_dict = {}
     with open(subsegments_manifest_file, 'r') as subsegments_manifest:
-        print(f"Reading subsegments_manifest_file: {subsegments_manifest_file}")
+        # print(f"Reading subsegments_manifest_file: {subsegments_manifest_file}")
         segments = subsegments_manifest.readlines()
         for segment in segments:
             segment = segment.strip()
@@ -141,7 +141,7 @@ def get_input_manifest_dict(input_manifest_path):
 def write_truncated_subsegments(input_manifest_dict, _subsegment_dict, output_manifest_path, step_count, deci):
     with open(output_manifest_path, 'w') as output_manifest_fp:
         for uniq_id, subseg_dict in _subsegment_dict.items():
-            print(f"Writing {uniq_id}")
+            # print(f"Writing {uniq_id}")
             subseg_array = np.array(subseg_dict['ts'])
             subseg_array_idx = np.argsort(subseg_array, axis=0)
             chunked_set_count = subseg_array_idx.shape[0] // step_count
@@ -508,6 +508,7 @@ class LibriSpeechGenerator(object):
     Generate diarization session
     """
     def generate_session(self):
+        print(f"Generating Diarization Sessions")
         np.random.seed(self._params.data_simulator.random_seed)
 
         #delete output directory if it exists or throw warning
@@ -704,8 +705,8 @@ class LibriSpeechGenerator(object):
             double_overlap = np.sum(timeline > 2)
             overlap_percent = overlap_time / speaking_time
 
-            print('self._overlap_percent: ', 1.0*(self._overlap_amount + self._total_missing_overlap) / self._speaking_time)
-            print('self._desired_overlap_amount: ', 1.0*self._desired_overlap_amount / self._speaking_time)
+            # print('self._overlap_percent: ', 1.0*(self._overlap_amount + self._total_missing_overlap) / self._speaking_time)
+            # print('self._desired_overlap_amount: ', 1.0*self._desired_overlap_amount / self._speaking_time)
             #END CHECK OVERLAP
 
         if 'l' in self._params.data_simulator.outputs:
@@ -816,7 +817,7 @@ class LibriSpeechGenerator(object):
         input_manifest_file = sorted(input_manifest_file)
         AUDIO_RTTM_MAP = audio_rttm_map(input_manifest_path)
         segments_manifest_file = write_rttm2manifest(AUDIO_RTTM_MAP, segment_manifest_path, deci)
-        print(segments_manifest_file)
+        # print(segments_manifest_file)
         subsegments_manifest_file = subsegment_manifest_path
         segments_manifest_to_subsegments_manifest(
             segments_manifest_file,
@@ -887,6 +888,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     Generate diarization session
     """
     def generate_session(self):
+        print("Generating Diarization Sessions")
         np.random.seed(self._params.data_simulator.random_seed)
 
         #delete output directory if it exists or throw warning
@@ -911,7 +913,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
 
         for i in range(0, self._params.data_simulator.num_sessions):
-            print(f"Generating Session Number {i}")
+            # print(f"Generating Session Number {i}")
             speaker_ids = self._get_speaker_ids()  # randomly select speaker ids
             speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
             base_speaker_dominance = np.copy(speaker_dominance)
