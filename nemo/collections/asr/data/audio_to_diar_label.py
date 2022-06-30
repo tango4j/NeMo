@@ -930,7 +930,7 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
         return _msdd_infer_collate_fn(self, batch)
 
 
-class AudioToSpeechMSDDSyntheticTrainDataset(Dataset):
+class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
     '''
     Online Synthetic Diarization Session Generator
     '''
