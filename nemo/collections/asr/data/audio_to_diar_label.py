@@ -959,7 +959,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
                 self._params = OmegaConf.load(f)
             self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
         self._sample_counter = 0
-        self._samples_per_refresh = 10000
+        self._samples_per_refresh = 100
         self.emb_dir = emb_dir
 
         super().__init__(
