@@ -824,6 +824,8 @@ class LibriSpeechGenerator(object):
         os.remove(subsegment_manifest_path)
         ##############################
 
+        print('len subsegments_dict: ', len(subsegments_dict))
+
         self.segment_manifest_filepath = output_manifest_path
         return self.segment_manifest_filepath
 
