@@ -2,7 +2,7 @@ data_simulator:
   manifest_path: /home/chooper/projects/branch_nemo/NeMo/scripts/speaker_tasks/dev-clean-align.json
   sr: 16000
   num_speakers: 4
-  session_length: 3000
+  session_length: 300
   output_dir: /home/chooper/projects/chooper_dl/NeMo/examples/speaker_tasks/diarization/test
   output_filename: diarization_session
   overwrite_output: true
@@ -18,7 +18,7 @@ data_simulator:
   overlap_prob: 0.5
   outputs: rjctl
   enforce_num_speakers: false
-  num_sessions: 2
+  num_sessions: 1
   random_seed: 42
   window_type: hamming
   window_size: 0.1
