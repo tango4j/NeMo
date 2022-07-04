@@ -971,6 +971,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self._sample_counter = 0
         self._samples_per_refresh = 100
         self.emb_dir = emb_dir
+        self.count = 0
 
         self.regenerate_dataset()
 
@@ -1102,10 +1103,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         emb_batch_size = self.emb_batch_size
         self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
 
-            #reset counter
-        #     self._sample_counter = 1
-        # elif self.synthetic:
-        #     self._sample_counter += 1
+        self.count = 0
 
     def __getitem__(self, index):
         sample = self.collection[index]
@@ -1121,6 +1119,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             clus_label_index, targets = flip[clus_label_index], targets[:, flip[:self.max_spks]]
 
         #TODO move somewhere else?
-        # self.regenerate_dataset()
+        self.count += 1
+        if self.count == len(self.collection):
+            self.regenerate_dataset()
 
         return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets
