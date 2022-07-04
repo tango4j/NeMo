@@ -749,6 +749,9 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         collate_fn = collate_ds.msdd_train_collate_fn
         batch_size = config['batch_size']
 
+        print('len dataset: ', len(dataset))
+        print('batch_size: ', batch_size)
+
         return torch.utils.data.DataLoader(
             dataset=dataset,
             batch_size=batch_size,
