@@ -1120,6 +1120,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
 
         #TODO move somewhere else?
         self.count += 1
+        print('count: ', self.count)
+        print(' len(self.collection): ',  len(self.collection))
         if self.count == len(self.collection):
             self.regenerate_dataset()
 
