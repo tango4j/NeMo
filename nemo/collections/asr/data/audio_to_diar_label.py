@@ -1122,7 +1122,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.count += 1
         print('count: ', self.count)
         print(' len(self.collection): ',  len(self.collection))
-        if self.count == len(self.collection):
+        if self.count == len(self.collection)*2:
             self.regenerate_dataset()
 
         return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets
