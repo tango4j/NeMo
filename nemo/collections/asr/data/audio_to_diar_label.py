@@ -949,8 +949,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         emb_batch_size,
         pairwise_infer: bool,
         random_flip: bool = True,
-        synthetic_cfg_path: str,
         emb_dir: str,
+        ds_config,
     ):
 
         self.featurizer = featurizer
@@ -965,9 +965,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.emb_batch_size = emb_batch_size
         self.random_flip = random_flip
 
-        with open(synthetic_cfg_path, 'r') as f:
-            self._params = OmegaConf.load(f)
-        self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
+        self.data_simulator = LibriSpeechGenerator(ds_config) #includes tmp dir
         self.emb_dir = emb_dir
 
         self.regenerate_dataset()
