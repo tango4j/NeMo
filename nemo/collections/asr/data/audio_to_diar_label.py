@@ -970,8 +970,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
         self.emb_dir = emb_dir
 
-        # self.regenerate_dataset()
-        self.collection = None
+        self.regenerate_dataset()
+        # self.collection = None
 
     def _extract_timestamps(self, manifest_file: str):
         """

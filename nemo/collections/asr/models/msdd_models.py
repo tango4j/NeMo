@@ -515,9 +515,14 @@ class ClusterEmbedding:
         return emb_scale_seq_dict
 
 class DataLoader(torch.utils.data.dataloader.DataLoader):
+
+    init = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dataset.regenerate_dataset()
+        print(self.init)
+        self.init = True
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
     """Encoder decoder class for multiscale speaker diarization decoder.
