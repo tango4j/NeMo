@@ -516,7 +516,10 @@ class ClusterEmbedding:
 
 class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
+        print('DL SELF: ', self)
         print('DL ARGS: ', args)
+        print('DL kwargs: ', kwargs)
+
         super().__init__(*args, **kwargs)
         self.dataset.regenerate_dataset()
 
