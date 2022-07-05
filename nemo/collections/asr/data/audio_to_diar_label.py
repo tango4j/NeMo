@@ -37,7 +37,7 @@ from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGene
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest, get_uniq_id_with_dur
 from nemo.utils import logging
 
-from multiprocessing import Condition
+from multiprocessing import Condition, Pipe
 
 def get_audio_rttm_map(manifest):
     """
@@ -953,6 +953,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         random_flip: bool = True,
         synthetic_cfg_path: str,
         emb_dir: str,
+        num_devices: int,
     ):
 
         self.featurizer = featurizer
@@ -974,7 +975,11 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
 
         #TODO check for cuda
         # self.data_simulator.device = torch.cuda.current_device()
-        self.lock = Condition()
+        # self.lock = Condition()
+        self.pipe = []
+        self.num_devices = num_devices
+        for i in range(0,self.num_devices-1):
+            self.pipe.append(Pipe())
         self.regenerate_dataset()
         self.regen = False
 
