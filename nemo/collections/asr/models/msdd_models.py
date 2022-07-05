@@ -516,8 +516,9 @@ class ClusterEmbedding:
 
 class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
+        self.dataset.regenerate_dataset()
         super().__init__(*args, **kwargs)
-        print('RELOAD DATALOADER!!!')
+        print('RELOADED DATALOADER')
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
     """Encoder decoder class for multiscale speaker diarization decoder.
