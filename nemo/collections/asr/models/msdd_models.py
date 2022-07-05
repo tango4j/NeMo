@@ -521,6 +521,7 @@ class DataLoader(torch.utils.data.dataloader.DataLoader):
             print('start regen: ', torch.cuda.current_device())
             if torch.cuda.current_device() == 0:
                 self.dataset.regenerate_dataset()
+                self.dataset.lock.acquire()
                 self.dataset.lock.notify_all()
             else:
                 self.dataset.lock.wait()
