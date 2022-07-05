@@ -506,7 +506,7 @@ class LibriSpeechGenerator(object):
 
         output_dir = self._params.data_simulator.output_dir
         if self.device != None:
-            output_dir += f" {self.device}"
+            output_dir += f"_{self.device}"
 
         #delete output directory if it exists or throw warning
         if os.path.isdir(output_dir) and os.listdir(output_dir):
@@ -720,7 +720,7 @@ class LibriSpeechGenerator(object):
     def create_base_manifest(self):
         basepath = self._params.data_simulator.output_dir
         if self.device != None:
-            basepath += f" {self.device}"
+            basepath += f"_{self.device}"
         wav_path = os.path.join(basepath, 'synthetic_wav.list')
         text_path = os.path.join(basepath, 'synthetic_txt.list')
         rttm_path = os.path.join(basepath, 'synthetic_rttm.list')
@@ -794,7 +794,7 @@ class LibriSpeechGenerator(object):
     def create_segment_manifest(self):
         basepath = self._params.data_simulator.output_dir
         if self.device != None:
-            basepath += f" {self.device}"
+            basepath += f"_{self.device}"
         output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
         input_manifest_path = self.base_manifest_filepath
         window = self._params.data_simulator.segment_manifest_window
