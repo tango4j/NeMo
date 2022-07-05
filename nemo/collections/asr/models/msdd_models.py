@@ -516,7 +516,10 @@ class ClusterEmbedding:
 
 class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
+        print('DATALOADER')
+        print('device: ', torch.cuda.current_device())
         print(kwargs)
+
         super().__init__(*args, **kwargs)
         if kwargs['dataset'].regen:
             self.dataset.regenerate_dataset()
@@ -726,9 +729,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         if 'manifest_filepath' in config and config['manifest_filepath'] is None:
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
-
-        print(self)
-        print('device: ', torch.cuda.current_device())
 
         if config['synthetic'] == True:
             dataset = AudioToSpeechMSDDSyntheticTrainDataset(
