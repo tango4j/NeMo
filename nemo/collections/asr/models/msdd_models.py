@@ -727,7 +727,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
-        print(config)
+        print(self)
+        print('device: ', torch.cuda.current_device())
 
         if config['synthetic'] == True:
             dataset = AudioToSpeechMSDDSyntheticTrainDataset(
