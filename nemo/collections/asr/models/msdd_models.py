@@ -514,6 +514,11 @@ class ClusterEmbedding:
             emb_scale_seq_dict[scale_index] = emb_dict
         return emb_scale_seq_dict
 
+class DataLoader(torch.utils.data.dataloader.DataLoader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print('RELOAD DATALOADER!!!')
+
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
     """Encoder decoder class for multiscale speaker diarization decoder.
     Model class creates training, validation methods for setting up data
@@ -752,15 +757,26 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         print('len dataset: ', len(dataset))
         print('batch_size: ', batch_size)
 
-        return torch.utils.data.DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            collate_fn=collate_fn,
-            drop_last=config.get('drop_last', False),
-            shuffle=False,
-            num_workers=config.get('num_workers', 0),
-            pin_memory=config.get('pin_memory', False),
-        )
+        if self.cfg_msdd_model.training_args.synthetic:
+            return DataLoader(
+                dataset=dataset,
+                batch_size=batch_size,
+                collate_fn=collate_fn,
+                drop_last=config.get('drop_last', False),
+                shuffle=False,
+                num_workers=config.get('num_workers', 0),
+                pin_memory=config.get('pin_memory', False),
+            )
+        else:
+            return torch.utils.data.DataLoader(
+                dataset=dataset,
+                batch_size=batch_size,
+                collate_fn=collate_fn,
+                drop_last=config.get('drop_last', False),
+                shuffle=False,
+                num_workers=config.get('num_workers', 0),
+                pin_memory=config.get('pin_memory', False),
+            )
 
     def __setup_dataloader_from_config_infer(self, config: Optional[Dict], emb_dict: Dict, emb_seq: Dict, clus_label_dict: Dict, pairwise_infer=False):
         featurizer = WaveformFeaturizer(
