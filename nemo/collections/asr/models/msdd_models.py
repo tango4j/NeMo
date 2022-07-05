@@ -518,8 +518,11 @@ class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if kwargs['dataset'].regen:
-            self.dataset.data_simulator.device = torch.cuda.current_device()
-            self.dataset.regenerate_dataset()
+            if torch.cuda.current_device() == 0:
+                self.dataset.data_simulator.regenerate_dataset()
+                self.dataset.lock.notify_all()
+            else:
+                self.dataset.lock.wait()
         kwargs['dataset'].regen = True
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):

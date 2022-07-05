@@ -37,6 +37,8 @@ from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGene
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest, get_uniq_id_with_dur
 from nemo.utils import logging
 
+from multiprocessing import Condition
+
 def get_audio_rttm_map(manifest):
     """
     This function creates AUDIO_RTTM_MAP which is used by all diarization components to extract embeddings,
@@ -971,7 +973,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.emb_dir = emb_dir
 
         #TODO check for cuda
-        self.data_simulator.device = torch.cuda.current_device()
+        # self.data_simulator.device = torch.cuda.current_device()
+        self.lock = Condition()
         self.regenerate_dataset()
         self.regen = False
 
@@ -1083,7 +1086,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
     def regenerate_dataset(self):
         #generate sessions
         print('audio2diarlabel: Generate Session')
-        print('DEVICE: ', self.data_simulator.device)
+        # print('DEVICE: ', self.data_simulator.device)
         self.data_simulator.generate_session()
 
         #update manifest_files using tmp dir
@@ -1099,6 +1102,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         )
 
         #regenerate segments
-        tmp_dir = self.emb_dir + f"_{self.data_simulator.device}"
+        tmp_dir = self.emb_dir # + f"_{self.data_simulator.device}"
         emb_batch_size = self.emb_batch_size
         self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
