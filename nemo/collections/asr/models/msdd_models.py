@@ -516,12 +516,9 @@ class ClusterEmbedding:
 
 class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
-        print('DATALOADER')
-        print('device: ', torch.cuda.current_device())
-        print(kwargs)
-
         super().__init__(*args, **kwargs)
         if kwargs['dataset'].regen:
+            self.dataset.data_simulator.device = torch.cuda.current_device()
             self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
 

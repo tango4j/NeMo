@@ -970,6 +970,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
         self.emb_dir = emb_dir
 
+        #TODO check for cuda
+        self.data_simulator.device = torch.cuda.current_device()
         self.regenerate_dataset()
         self.regen = False
 

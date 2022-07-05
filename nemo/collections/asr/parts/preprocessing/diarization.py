@@ -235,6 +235,9 @@ class LibriSpeechGenerator(object):
         self.base_manifest_filepath = None
         self.segment_manifest_filepath = None
 
+        #for multidevice training
+        self.device = None
+
     # randomly select speaker ids from loaded dict
     def _get_speaker_ids(self):
         speaker_ids = []
@@ -500,6 +503,10 @@ class LibriSpeechGenerator(object):
     def generate_session(self):
         print(f"Generating Diarization Sessions")
         np.random.seed(self._params.data_simulator.random_seed)
+
+        output_dir = self._params.data_simulator.output_dir
+        if self.device != None:
+            output_dir += f" {self.device}"
 
         #delete output directory if it exists or throw warning
         if os.path.isdir(self._params.data_simulator.output_dir) and os.listdir(self._params.data_simulator.output_dir):
