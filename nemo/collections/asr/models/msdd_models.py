@@ -724,6 +724,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
+        print(config)
+
         if config['synthetic'] == True:
             dataset = AudioToSpeechMSDDSyntheticTrainDataset(
                 manifest_filepath=config['manifest_filepath'],
