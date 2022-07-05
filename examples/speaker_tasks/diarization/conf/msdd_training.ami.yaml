@@ -125,7 +125,7 @@ msdd_model:
     sched:
       name: CosineAnnealing
       min_lr: 0.00001
-      
+
   training_args:
     synthetic: True
     synthetic_cfg_path: /home/chooper/projects/chooper_dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml
@@ -142,7 +142,7 @@ trainer:
   logger: False
   log_every_n_steps: 1  # Interval of logging.
   val_check_interval: 1.0  # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
-  reload_dataloaders_every_n_epochs: 1
+  reload_dataloaders_every_n_epochs: 2
 
 exp_manager:
   exp_dir: null

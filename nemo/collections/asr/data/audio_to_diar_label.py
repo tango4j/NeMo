@@ -952,6 +952,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         synthetic_cfg_path: str,
         emb_dir: str,
     ):
+        print('initialize dataset! ')
 
         self.featurizer = featurizer
         self.multiscale_args_dict = multiscale_args_dict
@@ -1119,10 +1120,10 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             clus_label_index, targets = flip[clus_label_index], targets[:, flip[:self.max_spks]]
 
         #TODO move somewhere else?
-        self.count += 1
-        print('count: ', self.count)
-        print(' len(self.collection): ',  len(self.collection))
-        if self.count == len(self.collection)*2:
-            self.regenerate_dataset()
+        # self.count += 1
+        # print('count: ', self.count)
+        # print(' len(self.collection): ',  len(self.collection))
+        # if self.count == len(self.collection)*2:
+        #     self.regenerate_dataset()
 
         return features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets
