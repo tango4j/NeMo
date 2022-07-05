@@ -972,7 +972,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
 
         self.regenerate_dataset()
         self.regen = False
-        # self.collection = None
 
     def _extract_timestamps(self, manifest_file: str):
         """
