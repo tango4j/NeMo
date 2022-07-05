@@ -1083,6 +1083,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
     def regenerate_dataset(self):
         #generate sessions
         print('audio2diarlabel: Generate Session')
+        print('DEVICE: ', self.data_simulator.device)
         self.data_simulator.generate_session()
 
         #update manifest_files using tmp dir
