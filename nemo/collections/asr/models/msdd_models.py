@@ -518,19 +518,7 @@ class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if kwargs['dataset'].regen:
-            if self.dataset.num_devices > 1:
-                print('start regen: ', torch.cuda.current_device())
-                if torch.cuda.current_device() == 0:
-                    self.dataset.regenerate_dataset()
-                    # for i in range(0, self.dataset.num_devices - 1):
-                    #     print('i: ', i)
-                    #     self.dataset.pipe[i][0].send(1)
-                # else:
-                #     device = torch.cuda.current_device()
-                #     print('device: ', device)
-                #     self.dataset.pipe[device-1][1].recv()
-                print('end regen: ', torch.cuda.current_device())
-            else:
+            if torch.cuda.current_device() == 0:
                 self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
 
@@ -751,7 +739,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
                 pairwise_infer=False,
                 synthetic_cfg_path=config['synthetic_cfg_path'],
                 emb_dir=self.cfg_msdd_model.train_ds.emb_dir,
-                num_devices=self.trainer.gpus,
             )
         else:
             dataset = AudioToSpeechMSDDTrainDataset(

@@ -953,7 +953,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         random_flip: bool = True,
         synthetic_cfg_path: str,
         emb_dir: str,
-        num_devices: int,
     ):
 
         self.featurizer = featurizer
@@ -973,13 +972,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.data_simulator = LibriSpeechGenerator(self._params) #includes tmp dir
         self.emb_dir = emb_dir
 
-        #TODO check for cuda
-        # self.data_simulator.device = torch.cuda.current_device()
-        # self.lock = Condition()
-        self.pipe = []
-        self.num_devices = num_devices
-        for i in range(0,self.num_devices-1):
-            self.pipe.append(Pipe())
         self.regenerate_dataset()
         self.regen = False
 
