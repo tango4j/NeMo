@@ -516,9 +516,8 @@ class ClusterEmbedding:
 
 class DataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
-        print(self)
-        self.dataset.regenerate_dataset()
         super().__init__(*args, **kwargs)
+        self.dataset.regenerate_dataset()
         print('RELOADED DATALOADER')
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
