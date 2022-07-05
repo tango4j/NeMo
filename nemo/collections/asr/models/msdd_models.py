@@ -523,9 +523,11 @@ class DataLoader(torch.utils.data.dataloader.DataLoader):
                 if torch.cuda.current_device() == 0:
                     self.dataset.regenerate_dataset()
                     for i in range(0, self.dataset.num_devices - 1):
+                        print('i: ', i)
                         self.dataset.pipe[i][0].send(1)
                 else:
                     device = torch.cuda.current_device()
+                    print('device: ', device)
                     self.dataset.pipe[device-1][1].recv()
                 print('end regen: ', torch.cuda.current_device())
             else:
