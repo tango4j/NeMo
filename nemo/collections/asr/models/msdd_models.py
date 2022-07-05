@@ -723,7 +723,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             sample_rate=config['sample_rate'], int_values=config.get('int_values', False), augmentor=None
         )
 
-        if 'manifest_filepath' in config and config['manifest_filepath'] is None:
+        if 'manifest_filepath' in config and config['manifest_filepath'] is None and config['synthetic'] == False:
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
