@@ -214,6 +214,8 @@ class LibriSpeechGenerator(object):
     def __init__(self, cfg):
         self._params = cfg
 
+        print(self._params.data_simulator)
+
         # internal params
         self._manifest = read_manifest(self._params.data_simulator.manifest_path)
         self._sentence = None
