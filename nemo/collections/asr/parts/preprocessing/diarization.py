@@ -509,14 +509,14 @@ class LibriSpeechGenerator(object):
             output_dir += f" {self.device}"
 
         #delete output directory if it exists or throw warning
-        if os.path.isdir(self._params.data_simulator.output_dir) and os.listdir(self._params.data_simulator.output_dir):
+        if os.path.isdir(output_dir) and os.listdir(output_dir):
             if self._params.data_simulator.overwrite_output:
-                shutil.rmtree(self._params.data_simulator.output_dir)
-                os.mkdir(self._params.data_simulator.output_dir)
+                shutil.rmtree(output_dir)
+                os.mkdir(output_dir)
             else:
                 raise Exception("Output directory is nonempty and overwrite_output = false")
-        elif not os.path.isdir(self._params.data_simulator.output_dir):
-            os.mkdir(self._params.data_simulator.output_dir)
+        elif not os.path.isdir(output_dir):
+            os.mkdir(output_dir)
 
         self._speaking_time = 0
         self._overlap_amount = 0
@@ -524,11 +524,11 @@ class LibriSpeechGenerator(object):
         self._total_missing_overlap = 0
 
         # only add root if paths are relative?
-        if not os.path.isabs(self._params.data_simulator.output_dir):
+        if not os.path.isabs(output_dir):
             ROOT = os.getcwd()
-            basepath = os.path.join(ROOT, self._params.data_simulator.output_dir)
+            basepath = os.path.join(ROOT, output_dir)
         else:
-            basepath = self._params.data_simulator.output_dir
+            basepath = output_dir
 
         if 'l' in self._params.data_simulator.outputs:
             wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
@@ -674,7 +674,7 @@ class LibriSpeechGenerator(object):
             array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file
             sf.write(wavpath, array, self._params.data_simulator.sr)
             if 'r' in self._params.data_simulator.outputs:
-                labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.output_dir)
+                labels_to_rttmfile(rttm_list, filename, output_dir)
             if 'j' in self._params.data_simulator.outputs:
                 write_manifest(json_filepath, json_list)
             if 'c' in self._params.data_simulator.outputs:
@@ -719,6 +719,8 @@ class LibriSpeechGenerator(object):
 
     def create_base_manifest(self):
         basepath = self._params.data_simulator.output_dir
+        if self.device != None:
+            basepath += f" {self.device}"
         wav_path = os.path.join(basepath, 'synthetic_wav.list')
         text_path = os.path.join(basepath, 'synthetic_txt.list')
         rttm_path = os.path.join(basepath, 'synthetic_rttm.list')
@@ -791,6 +793,8 @@ class LibriSpeechGenerator(object):
 
     def create_segment_manifest(self):
         basepath = self._params.data_simulator.output_dir
+        if self.device != None:
+            basepath += f" {self.device}"
         output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
         input_manifest_path = self.base_manifest_filepath
         window = self._params.data_simulator.segment_manifest_window
