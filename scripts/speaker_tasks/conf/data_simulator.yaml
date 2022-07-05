@@ -2,7 +2,7 @@ data_simulator:
   manifest_path: /home/chooper/projects/branch_nemo/NeMo/scripts/speaker_tasks/dev-clean-align.json
   sr: 16000
   num_speakers: 4
-  num_sessions: 50
+  num_sessions: 1
   session_length: 1800
   output_dir: /home/chooper/projects/chooper_dl/NeMo/examples/speaker_tasks/diarization/test
   output_filename: diarization_session
