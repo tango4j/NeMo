@@ -621,9 +621,12 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
 
     def prepare_train_split(self):
         device = torch.cuda.current_device()
-        self.train_multiscale_timestamp_dict = self.prepare_split_data(self.cfg_msdd_model.train_ds.manifest_filepath,
-                                                        self.cfg_msdd_model.train_ds.emb_dir,
-                                                        self.cfg_msdd_model.train_ds.batch_size)
+        if self.cfg_msdd_model.train_ds.synthetic:
+            self.train_multiscale_timestamp_dict = None
+        else:
+            self.train_multiscale_timestamp_dict = self.prepare_split_data(self.cfg_msdd_model.train_ds.manifest_filepath,
+                                                            self.cfg_msdd_model.train_ds.emb_dir,
+                                                            self.cfg_msdd_model.train_ds.batch_size)
         self.validation_multiscale_timestamp_dict = self.prepare_split_data(self.cfg_msdd_model.validation_ds.manifest_filepath,
                                                              self.cfg_msdd_model.validation_ds.emb_dir,
                                                              self.cfg_msdd_model.validation_ds.batch_size)
