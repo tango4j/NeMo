@@ -37,8 +37,6 @@ from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGene
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest, get_uniq_id_with_dur
 from nemo.utils import logging
 
-from multiprocessing import Condition, Pipe
-
 def get_audio_rttm_map(manifest):
     """
     This function creates AUDIO_RTTM_MAP which is used by all diarization components to extract embeddings,

@@ -514,10 +514,10 @@ class ClusterEmbedding:
             emb_scale_seq_dict[scale_index] = emb_dict
         return emb_scale_seq_dict
 
-class DataLoader(torch.utils.data.dataloader.DataLoader):
+class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if kwargs['dataset'].regen:
+        if kwargs['dataset'].regen: #avoid regenerating post-initialization
             if torch.cuda.current_device() == 0:
                 self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
@@ -761,7 +761,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         print('batch_size: ', batch_size)
 
         if config['synthetic'] == True:
-            return DataLoader(
+            return SyntheticDataLoader(
                 dataset=dataset,
                 batch_size=batch_size,
                 collate_fn=collate_fn,
