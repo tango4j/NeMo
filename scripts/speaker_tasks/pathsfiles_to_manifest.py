@@ -25,7 +25,7 @@ from nemo.collections.asr.parts.utils.speaker_utils import rttm_to_labels
 random.seed(42)
 
 """
-This script creates manifest file for speaker diarization inference purposes. 
+This script creates manifest file for speaker diarization inference purposes.
 Useful to get manifest when you have list of audio files and optionally rttm and uem files for evaluation
 
 Note: make sure basename for each file is unique and rttm files also has the corresponding base name for mapping
@@ -133,7 +133,8 @@ def main(wav_path, text_path=None, rttm_path=None, uem_path=None, ctm_path=None,
                 "ctm_filepath": ctm,
             }
         ]
-        lines.extend(meta)
+        if 'ES2010d.Mix-Headset.wav' not in audio_line:
+            lines.extend(meta)
 
     write_file(manifest_filepath, lines, range(len(lines)))
 
