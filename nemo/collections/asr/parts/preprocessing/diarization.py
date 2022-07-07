@@ -787,7 +787,7 @@ class LibriSpeechGenerator(object):
             lines.extend(meta)
 
         write_file(manifest_filepath, lines, range(len(lines)))
-        #####################################3
+        #####################################
         self.base_manifest_filepath = manifest_filepath
         return self.base_manifest_filepath
 
@@ -835,8 +835,6 @@ class LibriSpeechGenerator(object):
         os.remove(subsegment_manifest_path)
         ##############################
 
-        print('len subsegments_dict: ', len(subsegments_dict))
-
         self.segment_manifest_filepath = output_manifest_path
         return self.segment_manifest_filepath
 
@@ -848,7 +846,6 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
     def __init__(self, cfg):
         self._params = cfg
-
         # internal params
         self._manifest = read_manifest(self._params.data_simulator.manifest_path)
         self._sentence = None

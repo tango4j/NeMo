@@ -31,7 +31,7 @@ diarizer: &diarizer
       filter_speech_first: True
 
   speaker_embeddings:
-    model_path: "/home/chooper/Downloads/titanet-m.nemo"  # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
+    model_path: null  # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
     parameters:
       window_length_in_sec: [3.0, 2.5, 2.0, 1.5, 1.0, 0.5]
       shift_length_in_sec: [1.5, 1.25, 1.0, 0.75, 0.5, 0.25]
@@ -79,12 +79,12 @@ msdd_model:
     synthetic: True
 
   data_simulator:
-    manifest_path: /home/chooper/projects/branch_nemo/NeMo/scripts/speaker_tasks/dev-clean-align.json
+    manifest_path: null
     sr: 16000
     num_speakers: 4
     num_sessions: 20
     session_length: 1800
-    output_dir: /home/chooper/projects/chooper_dl/NeMo/examples/speaker_tasks/diarization/test
+    output_dir: null
     output_filename: diarization_session
     overwrite_output: true
     sentence_length_params:

@@ -18,18 +18,18 @@ diarizer: &diarizer
     model_path: null # .nemo local model path or pretrained model name or none
     external_vad_manifest: null # This option is provided to use external vad and provide its speech activity labels for speaker embeddings extraction. Only one of model_path or external_vad_manifest should be set
 
-    parameters: # Tuned parameter for CH109 (using the 11 multi-speaker sessions as dev set) 
-      window_length_in_sec: 0.15  # Window length in sec for VAD context input 
+    parameters: # Tuned parameter for CH109 (using the 11 multi-speaker sessions as dev set)
+      window_length_in_sec: 0.15  # Window length in sec for VAD context input
       shift_length_in_sec: 0.01 # Shift length in sec for generate frame level VAD prediction
       smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.875 # Overlap ratio for overlapped mean/median smoothing filter
-      onset: 0.4 # Onset threshold for detecting the beginning and end of a speech 
+      onset: 0.4 # Onset threshold for detecting the beginning and end of a speech
       offset: 0.7 # Offset threshold for detecting the end of a speech
-      pad_onset: 0.05 # Adding durations before each speech segment 
-      pad_offset: -0.1 # Adding durations after each speech segment 
+      pad_onset: 0.05 # Adding durations before each speech segment
+      pad_offset: -0.1 # Adding durations after each speech segment
       min_duration_on: 0.2 # Threshold for small non_speech deletion
       min_duration_off: 0.2 # Threshold for short speech segment deletion
-      filter_speech_first: True 
+      filter_speech_first: True
 
   speaker_embeddings:
     model_path: "titanet_large"
@@ -38,18 +38,18 @@ diarizer: &diarizer
       shift_length_in_sec: [1.5,1.25,1.0,0.75,0.5,0.25]
       multiscale_weights: [0.1,0.1,0.1,0.1,0.1,0.1]
       save_embeddings: True # Save embeddings as pickle file for each audio input.
-  
+
   clustering:
     parameters:
       oracle_num_speakers: True  # If True, use num of speakers value provided in manifest file.
       max_num_speakers: 2 # Max number of speakers for each recording. If oracle num speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
-      max_rp_threshold: 0.15 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
-      sparse_search_volume: 30 # The higher the number, the more values will be examined with more time. 
+      max_rp_threshold: 0.15 # Determines the range of p-value search: 0 < p <= max_rp_threshold.
+      sparse_search_volume: 30 # The higher the number, the more values will be examined with more time.
 
-ts_vad_model: 
+ts_vad_model:
   base:
-    name: *name 
+    name: *name
     sample_rate: *sample_rate
     repeat: *rep
     dropout: *drop
@@ -83,7 +83,7 @@ ts_vad_model:
     labels: null
     batch_size: 2
     shuffle: False
-  
+
   test_ds:
     manifest_filepath: ???
     emb_dir: ???
@@ -105,7 +105,7 @@ ts_vad_model:
     n_fft: 512
     frame_splicing: 1
     dither: 0.00001
-  
+
   tsvad_module:
     _target_: nemo.collections.asr.modules.tsvad_diarizer.TSVAD_module
     num_spks: *max_num_of_spks
@@ -120,7 +120,7 @@ ts_vad_model:
   loss:
     scale: 30
     margin: 0.2
-  
+
   optim:
     name: novograd
     # _target_: nemo.core.optim.optimizers.Novograd
