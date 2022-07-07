@@ -933,9 +933,34 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
 
 
 class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
-    '''
-    Online Synthetic Diarization Session Generator
-    '''
+    """
+    Dataset class that is designed for training or fine-tuning speaker embedding
+    extractor and diarization decoder at the same time using synthetic data
+
+    Args:
+        manifest_filepath (str):
+            Path to input manifest json files.
+        multiscale_args_dict (dict):
+            Dictionary containing the parameters for multiscale segmentation and clustering.
+        multiscale_timestamp_dict (dict):
+            Dictionary containing timestamps and speaker embedding sequence for each scale.
+        soft_label_thres (float):
+            A threshold that determines the label of each segment based on RTTM file information.
+        featurizer:
+            Featurizer instance for generating features from the raw waveform.
+        window_stride (float):
+            Window stride for acoustic feature. This value is used for calculating the numbers of feature-level frames.
+        emb_batch_size (int):
+            Number of embedding vectors that are trained with attached computational graphs.
+        pairwise_infer (bool):
+            This variable should be True if dataloader is created for an inference task.
+        random_flip (bool):
+            If True, the two labels and input signals are randomly flipped per every epoch while training.
+        emb_dir (str):
+            Directory for generating speaker embeddings 
+        ds_config (dict):
+            Model config used to access data simulator parameters
+    """
 
     def __init__(
         self,
@@ -1078,16 +1103,14 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         return multiscale_timestamps_dict
 
     def regenerate_dataset(self):
-        #generate sessions
-        print('audio2diarlabel: Generate Session')
-        # print('DEVICE: ', self.data_simulator.device)
+        #Regenerate synthetic diarization sessions
         self.data_simulator.generate_session()
 
-        #update manifest_files using tmp dir
+        #update manifest_files
         self.data_simulator.create_base_manifest()
         segment_manifest_path = self.data_simulator.create_segment_manifest()
 
-        #reresh diarization session manifest
+        #reresh diarization session collection
         self.collection = DiarizationSpeechLabel(
             manifests_files=segment_manifest_path,
             emb_dict=None,
@@ -1096,6 +1119,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         )
 
         #regenerate segments
-        tmp_dir = self.emb_dir # + f"_{self.data_simulator.device}"
+        tmp_dir = self.emb_dir
         emb_batch_size = self.emb_batch_size
         self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)

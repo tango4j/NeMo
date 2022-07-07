@@ -77,7 +77,6 @@ msdd_model:
     emb_batch_size: 0
     shuffle: True
     synthetic: False
-    # synthetic_cfg_path: /home/chooper/projects/chooper_dl/NeMo/scripts/speaker_tasks/conf/data_simulator.yaml
 
   validation_ds:
     manifest_filepath: ???

@@ -133,8 +133,8 @@ def main(wav_path, text_path=None, rttm_path=None, uem_path=None, ctm_path=None,
                 "ctm_filepath": ctm,
             }
         ]
-        if 'ES2010d.Mix-Headset.wav' not in audio_line:
-            lines.extend(meta)
+        
+        lines.extend(meta)
 
     write_file(manifest_filepath, lines, range(len(lines)))
 

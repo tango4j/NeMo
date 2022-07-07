@@ -515,9 +515,14 @@ class ClusterEmbedding:
         return emb_scale_seq_dict
 
 class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
+    """
+    Modified dataloader for refreshing synthetic dataset
+    after a specified number of epochs.
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if kwargs['dataset'].regen: #avoid regenerating post-initialization
+        #avoid regenerating post-initialization
+        if kwargs['dataset'].regen:
             if torch.cuda.current_device() == 0:
                 self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
@@ -726,11 +731,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             sample_rate=config['sample_rate'], int_values=config.get('int_values', False), augmentor=None
         )
 
-        if 'manifest_filepath' in config and config['manifest_filepath'] is None and config['synthetic'] == False:
+        if 'manifest_filepath' in config and config['manifest_filepath'] is None and ('synthetic' not in config or config['synthetic'] == False):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
-        if config['synthetic'] == True:
+        if 'synthetic' in config and config['synthetic'] == True:
             dataset = AudioToSpeechMSDDSyntheticTrainDataset(
                 manifest_filepath=config['manifest_filepath'],
                 multiscale_args_dict=self.multiscale_args_dict,
@@ -760,10 +765,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         collate_fn = collate_ds.msdd_train_collate_fn
         batch_size = config['batch_size']
 
-        print('len dataset: ', len(dataset))
-        print('batch_size: ', batch_size)
-
-        if config['synthetic'] == True:
+        if 'synthetic' in config and config['synthetic'] == True:
             return SyntheticDataLoader(
                 dataset=dataset,
                 batch_size=batch_size,
