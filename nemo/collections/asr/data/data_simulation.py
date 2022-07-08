@@ -565,7 +565,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     """
     def _convolve_rir(self, speaker_turn, RIR):
         output_sound = []
-        for channel in range(0,self._params.data_simulator.mic_config.num_channels):
+        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
             output_sound.append(out_channel)
         output_sound = np.array(output_sound).T
@@ -656,7 +656,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                     textlist.write(text_filepath + '\n')
 
             session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
-            array = np.zeros((session_length_sr, self._params.data_simulator.mic_config.num_channels))
+            array = np.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
 
             while running_length_sr < session_length_sr or enforce:
                 #enforce num_speakers
