@@ -76,38 +76,47 @@ msdd_model:
     batch_size: 15
     emb_batch_size: 0
     shuffle: True
-    synthetic: True
+    synthetic: True #whether to generate synthetic data online
 
   data_simulator:
-    manifest_path: null
-    sr: 16000
-    num_speakers: 4
-    num_sessions: 20
-    session_length: 1800
-    output_dir: null
-    output_filename: diarization_session
-    overwrite_output: true
-    sentence_length_params:
-    - 0.4
-    - 0.05
-    alignment_type: end
-    dominance_var: 0.11
-    min_dominance: 0.05
-    turn_prob: 0.875
-    mean_overlap: 0.19
-    mean_silence: 0.15
-    overlap_prob: 0.5
-    outputs: rjctl
-    enforce_num_speakers: false
+    manifest_path: null # Manifest file with paths to librispeech audio files
+
+    alignment_type: end # input alignment format (start, end, or tuple alignments in (start,end) pairs)
+    enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
+    sr: 16000 # sampling rate of the audio files
     random_seed: 42
-    window_type: hamming
-    window_size: 0.1
-    normalization: equal
-    normalization_var: 0.1
-    segment_manifest_window: 0.5
-    segment_manifest_shift: 0.25
-    segment_manifest_step_count: 50
-    segment_manifest_deci: 3
+
+    session_config:
+      num_speakers: 4 # number of unique speakers per diarization session
+      num_sessions: 10 # number of sessions
+      session_length: 1800 # length of each diarization session (seconds)
+
+    session_params:
+      sentence_length_params: # k,p values for negative_binomial distribution
+      - 0.4
+      - 0.05
+      dominance_var: 0.11 # variance in speaker dominance
+      min_dominance: 0.05 # minimum percentage of speaking time per speaker
+      turn_prob: 0.875 # probability of switching speakers
+      mean_overlap: 0.19 # mean proportion of overlap to speaking time
+      mean_silence: 0.15 # mean proportion of silence to speaking time
+      overlap_prob: 0.5 # proportion of overlap occurences versus silence between utterances
+      window_type: hamming # type of windowing used when segmenting utterances (hamming, hann, cosine)
+      window_size: 0.1 # length of window at end of segmented utterance (seconds)
+      normalization: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
+      normalization_var: 0.1 # variance in speaker volume
+
+    outputs:
+      output_dir: null # output directory
+      output_filename: diarization_session # output filename for the wav and rttm files
+      overwrite_output: true
+      output_files: rjctl # which files to output (r - rttm, j - json, c - ctm, t - text, l - list)
+
+    segment_manifest:
+      window: 0.5
+      shift: 0.25
+      step_count: 50
+      deci: 3
 
   validation_ds:
     manifest_filepath: ???

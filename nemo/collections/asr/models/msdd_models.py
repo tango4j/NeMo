@@ -36,7 +36,13 @@ from pytorch_lightning.utilities import rank_zero_only
 from torch.utils.data import ChainDataset
 from collections import OrderedDict
 from nemo.collections.asr.models import ClusteringDiarizer
-from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset, AudioToSpeechMSDDSyntheticTrainDataset
+from nemo.collections.asr.data.audio_to_diar_label import (
+    AudioToSpeechMSDDInferDataset,
+    AudioToSpeechMSDDTrainDataset,
+    AudioToSpeechMSDDSyntheticTrainDataset,
+    get_audio_rttm_map,
+
+)
 from nemo.collections.asr.data.audio_to_text_dataset import convert_to_config_list
 from nemo.collections.asr.losses.angularloss import AngularSoftmaxLoss
 from nemo.collections.asr.losses.bce_loss import BCELoss
@@ -71,8 +77,6 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
     write_rttm2manifest,
     rttm_to_labels,
     labels_to_pyannote_object
-
-
 )
 from nemo.core.neural_types import (
     AcousticEncodedRepresentation,
@@ -109,7 +113,6 @@ def write_json_file(name, lines):
             json.dump(dic, fout)
             fout.write('\n')
     logging.info("wrote", name)
-
 
 def get_audio_rttm_map(manifest):
     """

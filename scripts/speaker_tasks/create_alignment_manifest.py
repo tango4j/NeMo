@@ -17,6 +17,7 @@ import json
 import os
 import random
 import shutil
+from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
 
 random.seed(42)
 
@@ -25,23 +26,6 @@ This script creates a manifest file containing word alignments.
 
 The alignments are obtained from: https://github.com/CorentinJ/librispeech-alignments
 """
-
-# from scripts/speaker_tasks/filelist_to_manifest.py - move function?
-def read_manifest(manifest):
-    data = []
-    with open(manifest, 'r', encoding='utf-8') as f:
-        for line in f:
-            item = json.loads(line)
-            data.append(item)
-    return data
-
-
-def write_manifest(output_path, target_manifest):
-    with open(output_path, "w") as outfile:
-        for tgt in target_manifest:
-            json.dump(tgt, outfile)
-            outfile.write('\n')
-
 
 # get librispeech examples without alignments for the desired dataset
 def get_unaligned_examples(unaligned_path, dataset):
@@ -58,7 +42,6 @@ def get_unaligned_examples(unaligned_path, dataset):
                 skip_files.append(unaligned_file)
             i += 1
     return skip_files
-
 
 def main():
     input_manifest_filepath = args.input_manifest_filepath

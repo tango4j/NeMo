@@ -17,6 +17,7 @@ from collections import OrderedDict
 from statistics import mode
 from typing import Dict, Optional
 import json
+from omegaconf import OmegaConf
 
 import torch
 
@@ -31,9 +32,7 @@ from nemo.core.neural_types import (
     NeuralType,
 )
 
-from omegaconf import OmegaConf
-from nemo.collections.asr.parts.preprocessing.diarization import LibriSpeechGenerator
-# from nemo.collections.asr.models.msdd_models import get_audio_rttm_map
+from nemo.collections.asr.data.data_simulator import LibriSpeechGenerator
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest, get_uniq_id_with_dur
 from nemo.utils import logging
 
@@ -957,7 +956,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         random_flip (bool):
             If True, the two labels and input signals are randomly flipped per every epoch while training.
         emb_dir (str):
-            Directory for generating speaker embeddings 
+            Directory for generating speaker embeddings
         ds_config (dict):
             Model config used to access data simulator parameters
     """
@@ -1107,8 +1106,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.data_simulator.generate_session()
 
         #update manifest_files
-        self.data_simulator.create_base_manifest()
-        segment_manifest_path = self.data_simulator.create_segment_manifest()
+        self.data_simulator.create_base_manifest_ds()
+        segment_manifest_path = self.data_simulator.create_segment_manifest_ds()
 
         #reresh diarization session collection
         self.collection = DiarizationSpeechLabel(
