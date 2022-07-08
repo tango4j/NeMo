@@ -21,7 +21,7 @@ from collections import OrderedDict as od
 from nemo.collections.asr.parts.utils.speaker_utils import (
     rttm_to_labels,
     get_subsegments,
-    get_uniqname_from_filepath
+    get_uniqname_from_filepath,
     audio_rttm_map,
     segments_manifest_to_subsegments_manifest,
     write_rttm2manifest
