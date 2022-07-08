@@ -13,4 +13,4 @@ python create_alignment_manifest.py \
 python create_diarization_dataset_librispeech_multimic.py \
   data_simulator.random_seed=42 \
   data_simulator.manifest_path=./train-clean-100-align.json \
-  data_simulator.output_dir=./test
+  data_simulator.outputs.output_dir=./test
