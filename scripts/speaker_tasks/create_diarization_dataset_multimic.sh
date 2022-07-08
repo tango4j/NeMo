@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export PYTHONPATH=/home/chooper/projects/chooper_dl/NeMo:$PYTHONPATH
+
 # Create manifest file with alignments
 python create_alignment_manifest.py \
   --input_manifest_filepath /home/chooper/projects/datasets/LibriSpeech/dev_clean.json \

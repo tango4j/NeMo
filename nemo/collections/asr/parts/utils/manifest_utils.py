@@ -24,7 +24,7 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
     get_uniqname_from_filepath
     audio_rttm_map,
     segments_manifest_to_subsegments_manifest,
-    write_rttm2manifest,
+    write_rttm2manifest
 )
 
 def rreplace(s, old, new):
