@@ -73,7 +73,6 @@ class LibriSpeechGenerator(object):
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         #use to ensure overlap percentage is correct
         self._missing_overlap = 0
-
         #creating manifests
         self.base_manifest_filepath = None
         self.segment_manifest_filepath = None
@@ -154,6 +153,7 @@ class LibriSpeechGenerator(object):
             return prev_speaker
         else:
             speaker_turn = prev_speaker
+            #ensure another speaker goes next
             while speaker_turn == prev_speaker:
                 rand = np.random.uniform(0, 1)
                 speaker_turn = 0
@@ -178,14 +178,7 @@ class LibriSpeechGenerator(object):
             word = file['words'][i]
             self._words.append(word)
 
-            if self._params.data_simulator.alignment_type == 'start':
-                self._alignments.append(int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i])
-            elif self._params.data_simulator.alignment_type == 'end':
-                self._alignments.append(int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i])
-            elif self._params.data_simulator.alignment_type == 'tuple':
-                start = int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i][0]
-                end = int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i][1]
-                self._alignments.append((start,end))
+            self._alignments.append(int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i])
 
             if word == "":
                 i+=1
@@ -317,15 +310,8 @@ class LibriSpeechGenerator(object):
         start = float(round(start,3))
         for i in range(0, len(self._words)):
             word = self._words[i]
-            if self._params.data_simulator.alignment_type == 'start':
-                align1 = float(round(self._alignments[i] + start, 3))
-                align2 = float(round(self._alignments[i+1] - self._alignments[i], 3))
-            elif self._params.data_simulator.alignment_type == 'end':
-                align1 = float(round(self._alignments[i-1] + start, 3))
-                align2 = float(round(self._alignments[i] - self._alignments[i-1], 3))
-            elif self._params.data_simulator.alignment_type == 'tuple':
-                align1 = float(round(self._alignments[i][0] + start, 3))
-                align2 = float(round(self._alignments[i][1] - self._alignments[i][0], 3))
+            align1 = float(round(self._alignments[i-1] + start, 3))
+            align2 = float(round(self._alignments[i] - self._alignments[i-1], 3))
             if word != "": #note that using the current alignments the first word is always empty, so there is no error from indexing the array with i-1
                 text = str(session_name) + ' ' + str(speaker_id) + ' ' + str(align1) + ' ' + str(align2) + ' ' + str(word) + ' ' + '0' + '\n'
                 arr.append((align1, text))
