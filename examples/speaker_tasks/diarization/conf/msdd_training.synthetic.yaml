@@ -88,8 +88,8 @@ msdd_model:
 
     session_config:
       num_speakers: 4 # number of unique speakers per diarization session
-      num_sessions: 10 # number of sessions
-      session_length: 1800 # length of each diarization session (seconds)
+      num_sessions: 5 # number of sessions
+      session_length: 300 # length of each diarization session (seconds)
 
     session_params:
       sentence_length_params: # k,p values for negative_binomial distribution
