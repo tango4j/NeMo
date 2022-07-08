@@ -81,7 +81,7 @@ msdd_model:
   data_simulator:
     manifest_path: null # Manifest file with paths to librispeech audio files
 
-    alignment_type: end # input alignment format (start, end, or tuple alignments in (start,end) pairs)
+    # alignment_type: end # input alignment format (start, end, or tuple alignments in (start,end) pairs)
     enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
     sr: 16000 # sampling rate of the audio files
     random_seed: 42

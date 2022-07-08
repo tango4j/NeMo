@@ -177,7 +177,6 @@ class LibriSpeechGenerator(object):
 
             word = file['words'][i]
             self._words.append(word)
-
             self._alignments.append(int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i])
 
             if word == "":
@@ -216,7 +215,8 @@ class LibriSpeechGenerator(object):
 
     # returns new overlapped (or shifted) start position
     def _add_silence_or_overlap(self, speaker_turn, prev_speaker, start, length, session_length_sr, prev_length_sr, enforce):
-        overlap_prob = self._params.data_simulator.session_params.overlap_prob / (self._params.data_simulator.session_params.turn_prob)  # accounting for not overlapping the same speaker
+        #NOTE: turn_prob & overlap_prob should be restricted so that overlap_prob/turn_prob <= 1
+        overlap_prob = self._params.data_simulator.session_params.overlap_prob / (self._params.data_simulator.session_params.turn_prob)  #accounting for not overlapping the same speaker
         mean_overlap_percent = (self._params.data_simulator.session_params.mean_overlap / (1+self._params.data_simulator.session_params.mean_overlap)) /  self._params.data_simulator.session_params.overlap_prob
         mean_silence_percent = self._params.data_simulator.session_params.mean_silence / (1-self._params.data_simulator.session_params.overlap_prob)
         orig_end = start + length
@@ -249,9 +249,6 @@ class LibriSpeechGenerator(object):
                 desired_overlap_amount -= self._furthest_sample[speaker_turn] - new_start
                 self._missing_overlap += self._furthest_sample[speaker_turn] - new_start
                 new_start = self._furthest_sample[speaker_turn]
-
-            if desired_overlap_amount < 0:
-                desired_overlap_amount = 0
 
             prev_start = start - prev_length_sr
             prev_end = start
@@ -323,7 +320,6 @@ class LibriSpeechGenerator(object):
     def generate_session(self):
         print(f"Generating Diarization Sessions")
         np.random.seed(self._params.data_simulator.random_seed)
-
         output_dir = self._params.data_simulator.outputs.output_dir
 
         #delete output directory if it exists or throw warning
@@ -336,13 +332,14 @@ class LibriSpeechGenerator(object):
         elif not os.path.isdir(output_dir):
             os.mkdir(output_dir)
 
-        # only add root if paths are relative?
+        # only add root if paths are relative
         if not os.path.isabs(output_dir):
             ROOT = os.getcwd()
             basepath = os.path.join(ROOT, output_dir)
         else:
             basepath = output_dir
 
+        #create output files
         if 'l' in self._params.data_simulator.outputs.output_files:
             wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
             if 'r' in self._params.data_simulator.outputs.output_files:
