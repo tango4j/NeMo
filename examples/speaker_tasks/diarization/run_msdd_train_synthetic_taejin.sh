@@ -31,7 +31,7 @@ MAX_NUM_OF_SPKS=2
 export CUDA_VISIBLE_DEVICES="0,1"
 export PYTHONPATH=/home/taejin/projects/$branch_name/NeMo:$PYTHONPATH
 MEMO=$emb_tag
-python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name='msdd_training.synthetic.yaml'\
+python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name='msdd_training.synthetic.yaml' \
     diarizer.speaker_embeddings.model_path="<path to titanet-m.nemo>" \
     diarizer.speaker_embeddings.parameters.save_embeddings=True \
     diarizer.clustering.parameters.oracle_num_speakers=True \

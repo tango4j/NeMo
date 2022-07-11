@@ -1103,7 +1103,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
 
     def regenerate_dataset(self):
         #Regenerate synthetic diarization sessions
-        self.data_simulator.generate_session()
+        self.data_simulator.generate_sessions()
 
         #update manifest_files
         self.data_simulator.create_base_manifest_ds()
