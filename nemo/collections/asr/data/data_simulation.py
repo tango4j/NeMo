@@ -478,7 +478,7 @@ class LibriSpeechGenerator(object):
             self._missing_overlap = 0
 
             filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
-            array = self.generate_session(i, filename)
+            array = self._generate_session(i, filename)
 
             wavpath = os.path.join(basepath, filename + '.wav')
             rttm_filepath = os.path.join(basepath, filename + '.rttm')
