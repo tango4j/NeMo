@@ -587,197 +587,132 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     """
     Generate diarization session
     """
-    def generate_session(self):
-        print("Generating Diarization Sessions")
-        np.random.seed(self._params.data_simulator.random_seed)
+    def _generate_session(self, idx, basepath, filename):
+        speaker_ids = self._get_speaker_ids()  # randomly select speaker ids
+        speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
+        base_speaker_dominance = np.copy(speaker_dominance)
+        speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
 
-        output_dir = self._params.data_simulator.outputs.output_dir
+        filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
+        speaker_turn = 0  # assume alternating between speakers 1 & 2
+        running_length_sr = 0  # starting point for each sentence
+        prev_length_sr = 0  # for overlap
+        start = end = 0
+        prev_speaker = None
+        rttm_list = []
+        json_list = []
+        ctm_list = []
+        self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
+        self._missing_overlap = 0
 
-        #delete output directory if it exists or throw warning
-        if os.path.isdir(output_dir) and os.listdir(output_dir):
-            if self._params.data_simulator.outputs.overwrite_output:
-                shutil.rmtree(output_dir)
-                os.mkdir(output_dir)
-            else:
-                raise Exception("Output directory is nonempty and overwrite_output = false")
-        elif not os.path.isdir(output_dir):
-            os.mkdir(output_dir)
+        #Room Impulse Response Generation (performed once per batch of sessions)
+        RIR = self._generate_rir()
 
-        # only add root if paths are relative?
-        if not os.path.isabs(output_dir):
-            ROOT = os.getcwd()
-            basepath = os.path.join(ROOT, output_dir)
+        #hold enforce until all speakers have spoken
+        enforce_counter = 2
+        enforce_time = np.random.uniform(0.25, 0.75)
+        if self._params.data_simulator.enforce_num_speakers:
+            enforce = True
         else:
-            basepath = output_dir
+            enforce = False
 
-        if 'l' in self._params.data_simulator.outputs.output_files:
-            wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
+        wavpath = os.path.join(basepath, filename + '.wav')
+        rttm_filepath = os.path.join(basepath, filename + '.rttm')
+        json_filepath = os.path.join(basepath, filename + '.json')
+        ctm_filepath = os.path.join(basepath, filename + '.ctm')
+        text_filepath = os.path.join(basepath, filename + '.txt')
+
+        session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
+        array = np.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
+
+        while running_length_sr < session_length_sr or enforce:
+            #enforce num_speakers
+            if running_length_sr > enforce_time*session_length_sr and enforce:
+                increase_percent = []
+                for i in range(0,self._params.data_simulator.session_config.num_speakers):
+                    if self._furthest_sample[i] == 0:
+                        increase_percent.append(i)
+                #ramp up enforce counter until speaker is sampled, then reset once all speakers have spoken
+                if len(increase_percent) > 0:
+                    speaker_dominance = self._increase_speaker_dominance(increase_percent, base_speaker_dominance, enforce_counter)
+                    enforce_counter += 1
+                else:
+                    enforce = False
+                    speaker_dominance = base_speaker_dominance
+
+            # select speaker
+            speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
+
+            # select speaker length
+            sl = np.random.negative_binomial(
+                self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
+            ) + 1
+
+            #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
+            RIR_pad = (RIR.shape[2] - 1)
+            max_sentence_duration_sr = session_length_sr - running_length_sr - RIR_pad
+
+            # only add if remaining length > 0.5 second
+            if max_sentence_duration_sr < 0.5 * self._params.data_simulator.sr and not enforce:
+                break
+            if enforce:
+                max_sentence_duration_sr = float('inf')
+
+            # initialize sentence, text, words, alignments
+            self._sentence = np.zeros(0)
+            self._text = ""
+            self._words = []
+            self._alignments = []
+            sentence_duration = sentence_duration_sr = 0
+
+            # build sentence
+            while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
+                file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
+                audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
+                sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+
+            #augment sentence
+            augmented_sentence = self._convolve_rir(speaker_turn, RIR)
+
+            #per-speaker normalization
+            if self._params.data_simulator.session_params.normalization == 'equal':
+                if  np.max(np.abs(augmented_sentence)) > 0:
+                    augmented_sentence = augmented_sentence / (1.0 * np.max(np.abs(augmented_sentence)))
+
+            length = augmented_sentence.shape[0]
+            start = self._add_silence_or_overlap(
+                speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce
+            )
+            end = start + length
+            if end > len(array):
+                array = np.pad(array, (0, end - len(array)))
+
+            array[start:end, :] += augmented_sentence
+
+            #build entries for output files
             if 'r' in self._params.data_simulator.outputs.output_files:
-                rttmlist = open(os.path.join(basepath, "synthetic_rttm.list"), "w")
+                new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
+                rttm_list.append(new_rttm_entry)
             if 'j' in self._params.data_simulator.outputs.output_files:
-                jsonlist = open(os.path.join(basepath, "synthetic_json.list"), "w")
+                new_json_entry = self._create_new_json_entry(wavpath, start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
+                json_list.append(new_json_entry)
             if 'c' in self._params.data_simulator.outputs.output_files:
-                ctmlist = open(os.path.join(basepath, "synthetic_ctm.list"), "w")
-            if 't' in self._params.data_simulator.outputs.output_files:
-                textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
+                new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
+                for entry in new_ctm_entries:
+                    ctm_list.append(entry)
 
-        for i in range(0, self._params.data_simulator.session_config.num_sessions):
-            print(f"Generating Session Number {i}")
-            speaker_ids = self._get_speaker_ids()  # randomly select speaker ids
-            speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
-            base_speaker_dominance = np.copy(speaker_dominance)
-            speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
+            running_length_sr = np.maximum(running_length_sr, end)
+            self._furthest_sample[speaker_turn] = running_length_sr
+            prev_speaker = speaker_turn
+            prev_length_sr = length
 
-            filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
-            speaker_turn = 0  # assume alternating between speakers 1 & 2
-            running_length_sr = 0  # starting point for each sentence
-            prev_length_sr = 0  # for overlap
-            start = end = 0
-            prev_speaker = None
-            rttm_list = []
-            json_list = []
-            ctm_list = []
-            self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
-            self._missing_overlap = 0
-
-            #Room Impulse Response Generation (performed once per batch of sessions)
-            RIR = self._generate_rir()
-
-            #hold enforce until all speakers have spoken
-            enforce_counter = 2
-            enforce_time = np.random.uniform(0.25, 0.75)
-            if self._params.data_simulator.enforce_num_speakers:
-                enforce = True
-            else:
-                enforce = False
-
-            wavpath = os.path.join(basepath, filename + '.wav')
-            rttm_filepath = os.path.join(basepath, filename + '.rttm')
-            json_filepath = os.path.join(basepath, filename + '.json')
-            ctm_filepath = os.path.join(basepath, filename + '.ctm')
-            text_filepath = os.path.join(basepath, filename + '.txt')
-
-            if 'l' in self._params.data_simulator.outputs.output_files:
-                wavlist.write(wavpath + '\n')
-                if 'r' in self._params.data_simulator.outputs.output_files:
-                    rttmlist.write(rttm_filepath + '\n')
-                if 'j' in self._params.data_simulator.outputs.output_files:
-                    jsonlist.write(json_filepath + '\n')
-                if 'c' in self._params.data_simulator.outputs.output_files:
-                    ctmlist.write(ctm_filepath + '\n')
-                if 't' in self._params.data_simulator.outputs.output_files:
-                    textlist.write(text_filepath + '\n')
-
-            session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
-            array = np.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
-
-            while running_length_sr < session_length_sr or enforce:
-                #enforce num_speakers
-                if running_length_sr > enforce_time*session_length_sr and enforce:
-                    increase_percent = []
-                    for i in range(0,self._params.data_simulator.session_config.num_speakers):
-                        if self._furthest_sample[i] == 0:
-                            increase_percent.append(i)
-                    #ramp up enforce counter until speaker is sampled, then reset once all speakers have spoken
-                    if len(increase_percent) > 0:
-                        speaker_dominance = self._increase_speaker_dominance(increase_percent, base_speaker_dominance, enforce_counter)
-                        enforce_counter += 1
-                    else:
-                        enforce = False
-                        speaker_dominance = base_speaker_dominance
-
-                # select speaker
-                speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
-
-                # select speaker length
-                sl = np.random.negative_binomial(
-                    self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
-                ) + 1
-
-                #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
-                RIR_pad = (RIR.shape[2] - 1)
-                max_sentence_duration_sr = session_length_sr - running_length_sr - RIR_pad
-
-                # only add if remaining length > 0.5 second
-                if max_sentence_duration_sr < 0.5 * self._params.data_simulator.sr and not enforce:
-                    break
-                if enforce:
-                    max_sentence_duration_sr = float('inf')
-
-                # initialize sentence, text, words, alignments
-                self._sentence = np.zeros(0)
-                self._text = ""
-                self._words = []
-                self._alignments = []
-                sentence_duration = sentence_duration_sr = 0
-
-                # build sentence
-                while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
-                    file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
-                    audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
-                    sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
-
-                #augment sentence
-                augmented_sentence = self._convolve_rir(speaker_turn, RIR)
-
-                #per-speaker normalization
-                if self._params.data_simulator.session_params.normalization == 'equal':
-                    if  np.max(np.abs(augmented_sentence)) > 0:
-                        augmented_sentence = augmented_sentence / (1.0 * np.max(np.abs(augmented_sentence)))
-
-                length = augmented_sentence.shape[0]
-                start = self._add_silence_or_overlap(
-                    speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce
-                )
-                end = start + length
-                if end > len(array):
-                    array = np.pad(array, (0, end - len(array)))
-
-                array[start:end, :] += augmented_sentence
-
-                #build entries for output files
-                if 'r' in self._params.data_simulator.outputs.output_files:
-                    new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
-                    rttm_list.append(new_rttm_entry)
-                if 'j' in self._params.data_simulator.outputs.output_files:
-                    new_json_entry = self._create_new_json_entry(wavpath, start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
-                    json_list.append(new_json_entry)
-                if 'c' in self._params.data_simulator.outputs.output_files:
-                    new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
-                    for entry in new_ctm_entries:
-                        ctm_list.append(entry)
-
-                running_length_sr = np.maximum(running_length_sr, end)
-                self._furthest_sample[speaker_turn] = running_length_sr
-                prev_speaker = speaker_turn
-                prev_length_sr = length
-
-            #throw error if number of speakers is less than requested
-            num_missing = 0
-            for k in range(0,len(self._furthest_sample)):
-                if self._furthest_sample[k] == 0:
-                    num_missing += 1
-            if num_missing != 0:
-                warnings.warn(f"{self._params.data_simulator.session_config.num_speakers-num_missing} speakers were included in the clip instead of the requested amount of {self._params.data_simulator.session_config.num_speakers}")
-
-            array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file
-            sf.write(wavpath, array, self._params.data_simulator.sr)
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                write_manifest(json_filepath, json_list)
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                write_ctm(ctm_filepath, ctm_list)
-            if 't' in self._params.data_simulator.outputs.output_files:
-                write_text(text_filepath, ctm_list)
-
-        if 'l' in self._params.data_simulator.outputs.output_files:
-            wavlist.close()
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                rttmlist.close()
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                jsonlist.close()
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                ctmlist.close()
-            if 't' in self._params.data_simulator.outputs.output_files:
-                textlist.close()
+        array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file
+        sf.write(wavpath, array, self._params.data_simulator.sr)
+        if 'r' in self._params.data_simulator.outputs.output_files:
+            labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
+        if 'j' in self._params.data_simulator.outputs.output_files:
+            write_manifest(json_filepath, json_list)
+        if 'c' in self._params.data_simulator.outputs.output_files:
+            write_ctm(ctm_filepath, ctm_list)
+        if 't' in self._params.data_simulator.outputs.output_files:
+            write_text(text_filepath, ctm_list)
