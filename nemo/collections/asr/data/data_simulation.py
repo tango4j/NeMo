@@ -317,7 +317,7 @@ class LibriSpeechGenerator(object):
     """
     Generate diarization session
     """
-    def _generate_session(self, idx, filename):
+    def _generate_session(self, idx, basepath, filename):
         wavpath = os.path.join(basepath, filename + '.wav')
         rttm_filepath = os.path.join(basepath, filename + '.rttm')
         json_filepath = os.path.join(basepath, filename + '.json')
@@ -478,7 +478,7 @@ class LibriSpeechGenerator(object):
 
             print(f"Generating Session Number {i}")
             filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
-            array = self._generate_session(i, filename)
+            array = self._generate_session(i, basepath, filename)
 
             wavpath = os.path.join(basepath, filename + '.wav')
             rttm_filepath = os.path.join(basepath, filename + '.rttm')
