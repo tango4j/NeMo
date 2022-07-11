@@ -593,7 +593,6 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         base_speaker_dominance = np.copy(speaker_dominance)
         speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
 
-        filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
         speaker_turn = 0  # assume alternating between speakers 1 & 2
         running_length_sr = 0  # starting point for each sentence
         prev_length_sr = 0  # for overlap
