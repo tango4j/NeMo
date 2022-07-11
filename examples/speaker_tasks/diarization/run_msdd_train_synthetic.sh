@@ -28,7 +28,7 @@ MAX_NUM_OF_SPKS=2
 export CUDA_VISIBLE_DEVICES="0,1"
 export PYTHONPATH=/home/chooper/projects/$branch_name/NeMo:$PYTHONPATH
 MEMO=$emb_tag
-python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name='msdd_training.synthetic.yaml'\
+python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name='msdd_training.synthetic.yaml' \
     diarizer.speaker_embeddings.model_path="/home/chooper/Downloads/titanet-m.nemo" \
     diarizer.speaker_embeddings.parameters.save_embeddings=True \
     diarizer.clustering.parameters.oracle_num_speakers=True \
@@ -58,8 +58,8 @@ python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name
     trainer.gpus=2\
     exp_manager.name=$EXP_NAME \
     +exp_manager.use_datetime_version=False \
-    exp_manager.create_wandb_logger=False \
-    exp_manager.wandb_logger_kwargs.name="taejinp" \
+    exp_manager.create_wandb_logger=True \
+    exp_manager.wandb_logger_kwargs.name="chooper" \
     exp_manager.wandb_logger_kwargs.project=$EXP_NAME \
     exp_manager.exp_dir=$emb_tag \
     msdd_model.base.diarizer.speaker_embeddings.model_path="/home/chooper/Downloads/titanet-m.nemo" \
