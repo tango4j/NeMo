@@ -427,7 +427,7 @@ class LibriSpeechGenerator(object):
         array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file
         sf.write(wavpath, array, self._params.data_simulator.sr)
         if 'r' in self._params.data_simulator.outputs.output_files:
-            labels_to_rttmfile(rttm_list, filename, output_dir)
+            labels_to_rttmfile(rttm_list, filename, basepath)
         if 'j' in self._params.data_simulator.outputs.output_files:
             write_manifest(json_filepath, json_list)
         if 'c' in self._params.data_simulator.outputs.output_files:
