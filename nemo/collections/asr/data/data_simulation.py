@@ -478,7 +478,7 @@ class LibriSpeechGenerator(object):
 
             print(f"Generating Session Number {i}")
             filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
-            array = self._generate_session(i, basepath, filename)
+            self._generate_session(i, basepath, filename)
 
             wavpath = os.path.join(basepath, filename + '.wav')
             rttm_filepath = os.path.join(basepath, filename + '.rttm')
