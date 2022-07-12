@@ -19,7 +19,7 @@ import shutil
 
 from omegaconf import OmegaConf
 from nemo.core.config import hydra_runner
-from nemo.collections.asr.data.data_simulation import LibriSpeechGenerator
+from nemo.collections.asr.data.data_simulation import LibriSpeechGenerator, MultiMicLibriSpeechGenerator
 
 """
 This script creates a synthetic diarization session using the LibriSpeech dataset.
