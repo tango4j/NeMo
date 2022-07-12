@@ -8,9 +8,6 @@ The speech data simulator generates synthetic multispeaker audio sessions for tr
 
 The simulator loads audio files from different speakers from the LibriSpeech dataset as well as forced alignments for each sentence and concatenates the audio files together to build a synthetic multispeaker audio session. The simulator uses the word alignments to segment the audio from each speaker to produce utterances of the desired length. The simulator also incorporates synthetic room impulse response generation in order to simulate multi-microphone multispeaker sessions.
 
-
-The example at the bottom is a visualization of the speaker labels for a synthetic session with four speakers.
-
 Features
 ------------
 
