@@ -29,7 +29,7 @@ Required Datasets
 ------------
 
 * LibriSpeech
-* LibriSpeech word alignments from https://github.com/CorentinJ/librispeech-alignments
+* LibriSpeech word alignments from [here](https://github.com/CorentinJ/librispeech-alignments)
 
 Installation
 ------------
@@ -56,7 +56,7 @@ Scripts
     --data_sets ALL
 ```
 
-2. Download LibriSpeech alignments from https://drive.google.com/file/d/1WYfgr31T-PPwMcxuAq09XZfHQO5Mw8fE/view?usp=sharing (the base directory is the LibriSpeech-Alignments directory)
+2. Download LibriSpeech alignments from [here](https://drive.google.com/file/d/1WYfgr31T-PPwMcxuAq09XZfHQO5Mw8fE/view?usp=sharing) (the base directory is the LibriSpeech-Alignments directory)
 
 3. Create manifest file with alignments
 
