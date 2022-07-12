@@ -1,0 +1,83 @@
+data_simulator:
+  manifest_path: null # Manifest file with paths to librispeech audio files
+
+  # alignment_type: end # input alignment format (start, end, or tuple alignments in (start,end) pairs)
+  enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
+  sr: 16000 # sampling rate of the audio files
+  random_seed: 42
+
+  session_config:
+    num_speakers: 4 # number of unique speakers per diarization session
+    num_sessions: 5 # number of sessions
+    session_length: 600 # length of each diarization session (seconds)
+
+  session_params:
+    sentence_length_params: # k,p values for negative_binomial distribution
+    - 0.4
+    - 0.05
+    dominance_var: 0.11 # variance in speaker dominance
+    min_dominance: 0.05 # minimum percentage of speaking time per speaker
+    turn_prob: 0.875 # probability of switching speakers
+    mean_overlap: 0.19 # mean proportion of overlap to speaking time
+    mean_silence: 0.15 # mean proportion of silence to speaking time
+    overlap_prob: 0.5 # proportion of overlap occurences versus silence between utterances
+    window_type: hamming # type of windowing used when segmenting utterances (hamming, hann, cosine)
+    window_size: 0.1 # length of window at end of segmented utterance (seconds)
+    normalization: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
+    normalization_var: 0.1 # variance in speaker volume
+
+  outputs:
+    output_dir: null # output directory
+    output_filename: diarization_session # output filename for the wav and rttm files
+    overwrite_output: true
+    output_files: rjctl # which files to output (r - rttm, j - json, c - ctm, t - text, l - list)
+
+  segment_manifest:
+    window: 0.5
+    shift: 0.25
+    step_count: 50
+    deci: 3
+
+  rir_generation: #whether to generate synthetic RIR
+    use_rir: true
+    #parameters match those used by https://github.com/DavidDiazGuerra/gpuRIR
+    room_config:
+      room_sz: # size of the shoebox room environment
+      - 3
+      - 3
+      - 2.5
+      pos_src: # positions of the speakers in the simulated room environment
+      - - 0.6
+        - 1.1
+        - 0.5
+      - - 1
+        - 2
+        - 0.5
+      - - 0.4
+        - 1.1
+        - 0.5
+      - - 1
+        - 2.1
+        - 0.5
+    mic_config:
+      num_channels: 2 # number of output audio channels
+      pos_rcv: # microphone positions in the simulated room environment
+      - - 0.5
+        - 1
+        - 0.5
+      - - 1
+        - 1
+        - 0.5
+      orV_rcv: null # microphone orientations (needed for non-omnidirectional microphones)
+      mic_pattern: omni # microphone type (eg. omnidirectional)
+    absorbtion_params:
+      abs_weights: # absorption coefficient ratios for each surface
+      - 0.9
+      - 0.9
+      - 0.9
+      - 0.9
+      - 0.9
+      - 0.9
+      T60: 0.1 # room reverberation time
+      att_diff: 15.0 # starting attenuation (if this is different than att_max, the diffuse reverberation model is used)
+      att_max: 60.0 # end attenuation
