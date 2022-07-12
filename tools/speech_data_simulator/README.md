@@ -51,7 +51,8 @@ Running the data simulator
 1. Download the LibriSpeech dataset
 
 ```bash
-python scripts/dataset_processing/get_librispeech_data.py \
+export PYTHONPATH=<NeMo base path>:$PYTHONPATH \
+&& python scripts/dataset_processing/get_librispeech_data.py \
   --data_root <path to download LibriSpeech dataset to> \
   --data_sets ALL
 ```
@@ -61,7 +62,8 @@ python scripts/dataset_processing/get_librispeech_data.py \
 3. Create the manifest file with alignments
 
 ```bash
-python <NeMo base path>/scripts/speaker_tasks/create_alignment_manifest.py \
+export PYTHONPATH=<NeMo base path>:$PYTHONPATH \
+&& python <NeMo base path>/scripts/speaker_tasks/create_alignment_manifest.py \
   --input_manifest_filepath <Path to train_clean_100.json manifest file> \
   --base_alignment_path <Path to LibriSpeech_Alignments directory> \
   --dataset train-clean-100 \
@@ -71,7 +73,8 @@ python <NeMo base path>/scripts/speaker_tasks/create_alignment_manifest.py \
 4. Create audio sessions (close talk)
 
 ```bash
-python multispeaker_simulator.py --config-path='conf' --config-name='data_simulator.yaml' \
+export PYTHONPATH=<NeMo base path>:$PYTHONPATH \
+&& python multispeaker_simulator.py --config-path='conf' --config-name='data_simulator.yaml' \
   data_simulator.random_seed=42 \
   data_simulator.manifest_path=./train-clean-100-align.json \
   data_simulator.outputs.output_dir=./test_closetalk
@@ -80,7 +83,8 @@ python multispeaker_simulator.py --config-path='conf' --config-name='data_simula
 5. Create multi-microphone audio sessions (with synthetic RIR generation)
 
 ```bash
-python multispeaker_simulator.py --config-path='conf' --config-name='data_simulator_multimic.yaml' \
+export PYTHONPATH=<NeMo base path>:$PYTHONPATH \
+&& python multispeaker_simulator.py --config-path='conf' --config-name='data_simulator_multimic.yaml' \
   data_simulator.random_seed=42 \
   data_simulator.manifest_path=./train-clean-100-align.json \
   data_simulator.outputs.output_dir=./test_multimic
