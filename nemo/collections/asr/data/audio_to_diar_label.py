@@ -990,7 +990,10 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.random_flip = random_flip
 
         cfg = OmegaConf.create(ds_config)
-        self.data_simulator = LibriSpeechGenerator(cfg) #includes tmp dir
+        if cfg.data_simulator.rir_generation.use_rir:
+            self.data_simulator = MultiMicLibriSpeechGenerator(cfg) #includes tmp dir
+        else:
+            self.data_simulator = LibriSpeechGenerator(cfg) #includes tmp dir
         self.emb_dir = emb_dir
 
         self.regenerate_dataset()
