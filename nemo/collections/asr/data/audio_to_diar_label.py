@@ -32,7 +32,7 @@ from nemo.core.neural_types import (
     NeuralType,
 )
 
-from nemo.collections.asr.data.data_simulation import LibriSpeechGenerator
+from nemo.collections.asr.data.data_simulation import LibriSpeechGenerator, MultiMicLibriSpeechGenerator
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest, get_uniq_id_with_dur
 from nemo.utils import logging
 
