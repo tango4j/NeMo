@@ -739,7 +739,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         if self._params.data_simulator.session_config.num_speakers != len(self._params.data_simulator.rir_generation.room_config.pos_src):
             raise Exception("Number of speakers is not equal to the number of provided source positions")
-        elif self._params.data_simulator.rir_generation.mic_config.num_channels != len(self._params.data_simulator.rir_generation.room_config.pos_rcv):
+        elif self._params.data_simulator.rir_generation.mic_config.num_channels != len(self._params.data_simulator.rir_generation.mic_config.pos_rcv):
             raise Exception("Number of channels is not equal to the number of provided microphone positions")
 
         # only add root if paths are relative
