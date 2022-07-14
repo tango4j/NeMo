@@ -589,12 +589,12 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     Create simulated RIR
     """
     def _generate_rir(self):
-        room_sz = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
-        pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
-        pos_rcv = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
+        room_sz = torch.tensor(self._params.data_simulator.rir_generation.room_config.room_sz)
+        pos_src = torch.tensor(self._params.data_simulator.rir_generation.room_config.pos_src)
+        pos_rcv = torch.tensor(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
         orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
         if orV_rcv: #not needed for omni mics
-            orV_rcv = np.array(orV_rcv)
+            orV_rcv = torch.tensor(orV_rcv)
         mic_pattern = self._params.data_simulator.rir_generation.mic_config.mic_pattern
         abs_weights = self._params.data_simulator.rir_generation.absorbtion_params.abs_weights
         T60 = self._params.data_simulator.rir_generation.absorbtion_params.T60
