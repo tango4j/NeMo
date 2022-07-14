@@ -82,7 +82,7 @@ class LibriSpeechGenerator(object):
         self.segment_manifest_filepath = None
 
     def _check_args(self):
-        if self._params.data_simulator.session_config.num_speakers > 2:
+        if self._params.data_simulator.session_config.num_speakers < 2:
             raise Exception("Atleast two speakers are required for multispeaker audio sessions (num_speakers < 2)")
         if self._params.data_simulator.session_params.turn_prob < 0 or self._params.data_simulator.session_params.turn_prob > 1:
             raise Exception("Turn probability is outside of [0,1]")
