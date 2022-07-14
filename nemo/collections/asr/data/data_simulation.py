@@ -81,7 +81,7 @@ class LibriSpeechGenerator(object):
         self.base_manifest_filepath = None
         self.segment_manifest_filepath = None
 
-    def _check_args():
+    def _check_args(self):
         if self._params.data_simulator.session_config.num_speakers > 2:
             raise Exception("Atleast two speakers are required for multispeaker audio sessions (num_speakers < 2)")
         if self._params.data_simulator.session_params.turn_prob < 0 or self._params.data_simulator.session_params.turn_prob > 1:
@@ -548,7 +548,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     Multi Microphone Librispeech Diarization Session Generator.
     """
 
-    def _check_args():
+    def _check_args(self):
         #check base arguments
         super()._check_args()
 
