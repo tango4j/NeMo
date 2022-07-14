@@ -134,18 +134,29 @@ class LibriSpeechGenerator(object):
             dominance[i] = dominance[i] + dominance[i-1]
         return dominance
 
-    def _increase_speaker_dominance(self, increase_percent, base_speaker_dominance, factor):
-        #extract original per-speaker probabilities
-        dominance = np.copy(base_speaker_dominance)
-        for i in range(len(dominance)-1,0,-1):
-            dominance[i] = dominance[i] - dominance[i-1]
-        #increase specified speakers by the desired factor and renormalize
-        for i in increase_percent:
-            dominance[i] = dominance[i] * factor
-        dominance = dominance / np.sum(dominance)
-        for i in range(1,len(dominance)):
-            dominance[i] = dominance[i] + dominance[i-1]
-        return dominance
+    def _increase_speaker_dominance(self, base_speaker_dominance, factor):
+
+        increase_percent = []
+        for i in range(0,self._params.data_simulator.session_config.num_speakers):
+            if self._furthest_sample[i] == 0:
+                increase_percent.append(i)
+        #ramp up enforce counter until speaker is sampled, then reset once all speakers have spoken
+        if len(increase_percent) > 0:
+            #extract original per-speaker probabilities
+            dominance = np.copy(base_speaker_dominance)
+            for i in range(len(dominance)-1,0,-1):
+                dominance[i] = dominance[i] - dominance[i-1]
+            #increase specified speakers by the desired factor and renormalize
+            for i in increase_percent:
+                dominance[i] = dominance[i] * factor
+            dominance = dominance / np.sum(dominance)
+            for i in range(1,len(dominance)):
+                dominance[i] = dominance[i] + dominance[i-1]
+            enforce = True
+        else:
+            dominance = base_speaker_dominance
+            enforce = False
+        return dominance, enforce
 
     # get next speaker (accounting for turn probability, dominance distribution)
     def _get_next_speaker(self, prev_speaker, dominance):
@@ -282,14 +293,14 @@ class LibriSpeechGenerator(object):
 
     # add new entry to dict (to write to output rttm file)
     def _create_new_rttm_entry(self, start, dur, speaker_id):
-        start = float(round(start,3))
-        dur = float(round(dur,3))
-        return str(start) + ' ' + str(dur) + ' ' + str(speaker_id)
+        start = float(round(start,self._params.data_simulator.outputs.output_precision))
+        dur = float(round(dur,self._params.data_simulator.outputs.output_precision))
+        return f"{start} {dur} {speaker_id}"
 
     # add new entry to dict (to write to output json file)
     def _create_new_json_entry(self, wav_filename, start, dur, speaker_id, text, rttm_filepath, ctm_filepath):
-        start = float(round(start,3))
-        dur = float(round(dur,3))
+        start = float(round(start,self._params.data_simulator.outputs.output_precision))
+        dur = float(round(dur,self._params.data_simulator.outputs.output_precision))
         dict = {"audio_filepath": wav_filename,
                 "offset": start,
                 "duration": dur,
@@ -304,26 +315,46 @@ class LibriSpeechGenerator(object):
     # add new entry to dict (to write to output ctm file)
     def _create_new_ctm_entry(self, session_name, speaker_id, start):
         arr = []
-        start = float(round(start,3))
+        start = float(round(start,self._params.data_simulator.outputs.output_precision))
         for i in range(0, len(self._words)):
             word = self._words[i]
-            align1 = float(round(self._alignments[i-1] + start, 3))
-            align2 = float(round(self._alignments[i] - self._alignments[i-1], 3))
+            align1 = float(round(self._alignments[i-1] + start, self._params.data_simulator.outputs.output_precision))
+            align2 = float(round(self._alignments[i] - self._alignments[i-1], self._params.data_simulator.outputs.output_precision))
             if word != "": #note that using the current alignments the first word is always empty, so there is no error from indexing the array with i-1
-                text = str(session_name) + ' ' + str(speaker_id) + ' ' + str(align1) + ' ' + str(align2) + ' ' + str(word) + ' ' + '0' + '\n'
+                text = f"{session_name} {speaker_id} {align1} {align2} {word} 0\n"
                 arr.append((align1, text))
         return arr
+
+    def _build_sentence(self, speaker_turn, max_sentence_duration_sr):
+        # select speaker length
+        sl = np.random.negative_binomial(
+            self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
+        ) + 1
+
+        # initialize sentence, text, words, alignments
+        self._sentence = np.zeros(0)
+        self._text = ""
+        self._words = []
+        self._alignments = []
+        sentence_duration = sentence_duration_sr = 0
+
+        # build sentence
+        while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
+            file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
+            audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+
+        #per-speaker normalization
+        if self._params.data_simulator.session_params.normalization == 'equal':
+            if np.max(np.abs(self._sentence)) > 0:
+                average_rms = np.average(np.sqrt(np.mean(self._sentence**2)))
+                self._sentence = self._sentence / (1.0 * average_rms)
+        #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
     """
     Generate diarization session
     """
     def _generate_session(self, idx, basepath, filename):
-        wavpath = os.path.join(basepath, filename + '.wav')
-        rttm_filepath = os.path.join(basepath, filename + '.rttm')
-        json_filepath = os.path.join(basepath, filename + '.json')
-        ctm_filepath = os.path.join(basepath, filename + '.ctm')
-        text_filepath = os.path.join(basepath, filename + '.txt')
-
         speaker_ids = self._get_speaker_ids()  # randomly select speaker ids
         speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
         base_speaker_dominance = np.copy(speaker_dominance)
@@ -334,17 +365,12 @@ class LibriSpeechGenerator(object):
         prev_length_sr = 0  # for overlap
         start = end = 0
         prev_speaker = None
-        rttm_list = []
-        json_list = []
-        ctm_list = []
+        rttm_list = [], json_list = [], ctm_list = []
 
         #hold enforce until all speakers have spoken
-        enforce_counter = 2
-        enforce_time = np.random.uniform(0.25, 0.75)
-        if self._params.data_simulator.enforce_num_speakers:
-            enforce = True
-        else:
-            enforce = False
+        enforce_counter = 2 # dominance is increased by a factor of enforce_counter
+        enforce_time = np.random.uniform(self._params.data_simulator.speaker_enforcement.enforce_time[0], self._params.data_simulator.speaker_enforcement.enforce_time[1])
+        enforce = self._params.data_simulator.speaker_enforcement.enforce_num_speakers
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
         array = np.zeros(session_length_sr)
@@ -352,73 +378,37 @@ class LibriSpeechGenerator(object):
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
             if running_length_sr > enforce_time*session_length_sr and enforce:
-                increase_percent = []
-                for i in range(0,self._params.data_simulator.session_config.num_speakers):
-                    if self._furthest_sample[i] == 0:
-                        increase_percent.append(i)
-                #ramp up enforce counter until speaker is sampled, then reset once all speakers have spoken
-                if len(increase_percent) > 0:
-                    speaker_dominance = self._increase_speaker_dominance(increase_percent, base_speaker_dominance, enforce_counter)
+                speaker_dominance, enforce = self._increase_speaker_dominance(base_speaker_dominance, enforce_counter)
+                if enforce:
                     enforce_counter += 1
-                else:
-                    enforce = False
-                    speaker_dominance = base_speaker_dominance
 
             # select speaker
             speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
 
-            # select speaker length
-            sl = np.random.negative_binomial(
-                self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
-            ) + 1
-            max_sentence_duration_sr = session_length_sr - running_length_sr
-
-            # only add if remaining length > 0.5 second
-            if max_sentence_duration_sr < 0.5 * self._params.data_simulator.sr and not enforce:
-                break
+            # build sentence (only add if remaining length >  specific time)
             if enforce:
                 max_sentence_duration_sr = float('inf')
-
-            # initialize sentence, text, words, alignments
-            self._sentence = np.zeros(0)
-            self._text = ""
-            self._words = []
-            self._alignments = []
-            sentence_duration = sentence_duration_sr = 0
-
-            # build sentence
-            while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
-                file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
-                audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
-                sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
-
-            #per-speaker normalization
-            if self._params.data_simulator.session_params.normalization == 'equal':
-                if np.max(np.abs(self._sentence)) > 0:
-                    average_rms = np.average(np.sqrt(np.mean(self._sentence**2)))
-                    self._sentence = self._sentence / (1.0 * average_rms)
-            #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
+            elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
+                break
+            else:
+                max_sentence_duration_sr = session_length_sr - running_length_sr
+            self._build_sentence(speaker_turn, max_sentence_duration_sr)
 
             length = len(self._sentence)
-            start = self._add_silence_or_overlap(
-                speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce
-            )
+            start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
-            if end > len(array):
+            if end > len(array): #only occurs in enforce mode
                 array = np.pad(array, (0, end - len(array)))
             array[start:end] += self._sentence
 
             #build entries for output files
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
-                rttm_list.append(new_rttm_entry)
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                new_json_entry = self._create_new_json_entry(wavpath, start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
-                json_list.append(new_json_entry)
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
-                for entry in new_ctm_entries:
-                    ctm_list.append(entry)
+            new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
+            rttm_list.append(new_rttm_entry)
+            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
+            json_list.append(new_json_entry)
+            new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
+            for entry in new_ctm_entries:
+                ctm_list.append(entry)
 
             running_length_sr = np.maximum(running_length_sr, end)
             self._furthest_sample[speaker_turn] = running_length_sr
@@ -426,15 +416,11 @@ class LibriSpeechGenerator(object):
             prev_length_sr = length
 
         array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file to avoid clipping
-        sf.write(wavpath, array, self._params.data_simulator.sr)
-        if 'r' in self._params.data_simulator.outputs.output_files:
-            labels_to_rttmfile(rttm_list, filename, basepath)
-        if 'j' in self._params.data_simulator.outputs.output_files:
-            write_manifest(json_filepath, json_list)
-        if 'c' in self._params.data_simulator.outputs.output_files:
-            write_ctm(ctm_filepath, ctm_list)
-        if 't' in self._params.data_simulator.outputs.output_files:
-            write_text(text_filepath, ctm_list)
+        sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
+        labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
+        write_manifest(os.path.join(basepath, filename + '.json'), json_list)
+        write_ctm(os.path.join(basepath, filename + '.ctm'), ctm_list)
+        write_text(os.path.join(basepath, filename + '.txt'), ctm_list)
 
     """
     Generate diarization sessions
@@ -461,17 +447,11 @@ class LibriSpeechGenerator(object):
         else:
             basepath = output_dir
 
-        #create output files
-        if 'l' in self._params.data_simulator.outputs.output_files:
-            wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                rttmlist = open(os.path.join(basepath, "synthetic_rttm.list"), "w")
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                jsonlist = open(os.path.join(basepath, "synthetic_json.list"), "w")
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                ctmlist = open(os.path.join(basepath, "synthetic_ctm.list"), "w")
-            if 't' in self._params.data_simulator.outputs.output_files:
-                textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
+        wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
+        rttmlist = open(os.path.join(basepath, "synthetic_rttm.list"), "w")
+        jsonlist = open(os.path.join(basepath, "synthetic_json.list"), "w")
+        ctmlist = open(os.path.join(basepath, "synthetic_ctm.list"), "w")
+        textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
 
         for i in range(0, self._params.data_simulator.session_config.num_sessions):
             self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
@@ -481,22 +461,11 @@ class LibriSpeechGenerator(object):
             filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
             self._generate_session(i, basepath, filename)
 
-            wavpath = os.path.join(basepath, filename + '.wav')
-            rttm_filepath = os.path.join(basepath, filename + '.rttm')
-            json_filepath = os.path.join(basepath, filename + '.json')
-            ctm_filepath = os.path.join(basepath, filename + '.ctm')
-            text_filepath = os.path.join(basepath, filename + '.txt')
-
-            if 'l' in self._params.data_simulator.outputs.output_files:
-                wavlist.write(wavpath + '\n')
-                if 'r' in self._params.data_simulator.outputs.output_files:
-                    rttmlist.write(rttm_filepath + '\n')
-                if 'j' in self._params.data_simulator.outputs.output_files:
-                    jsonlist.write(json_filepath + '\n')
-                if 'c' in self._params.data_simulator.outputs.output_files:
-                    ctmlist.write(ctm_filepath + '\n')
-                if 't' in self._params.data_simulator.outputs.output_files:
-                    textlist.write(text_filepath + '\n')
+            wavlist.write(os.path.join(basepath, filename + '.wav\n'))
+            rttmlist.write(os.path.join(basepath, filename + '.rttm\n'))
+            jsonlist.write(os.path.join(basepath, filename + '.json\n'))
+            ctmlist.write(os.path.join(basepath, filename + '.ctm\n'))
+            textlist.write(os.path.join(basepath, filename + '.txt\n'))
 
             #throw error if number of speakers is less than requested
             num_missing = 0
@@ -506,16 +475,11 @@ class LibriSpeechGenerator(object):
             if num_missing != 0:
                 warnings.warn(f"{self._params.data_simulator.session_config.num_speakers-num_missing} speakers were included in the clip instead of the requested amount of {self._params.data_simulator.session_config.num_speakers}")
 
-        if 'l' in self._params.data_simulator.outputs.output_files:
-            wavlist.close()
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                rttmlist.close()
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                jsonlist.close()
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                ctmlist.close()
-            if 't' in self._params.data_simulator.outputs.output_files:
-                textlist.close()
+        wavlist.close()
+        rttmlist.close()
+        jsonlist.close()
+        ctmlist.close()
+        textlist.close()
 
     def create_base_manifest_ds(self):
         basepath = self._params.data_simulator.outputs.output_dir
@@ -599,9 +563,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         prev_length_sr = 0  # for overlap
         start = end = 0
         prev_speaker = None
-        rttm_list = []
-        json_list = []
-        ctm_list = []
+        rttm_list = [], json_list = [], ctm_list = []
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
@@ -610,17 +572,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
-        enforce_time = np.random.uniform(0.25, 0.75)
-        if self._params.data_simulator.enforce_num_speakers:
-            enforce = True
-        else:
-            enforce = False
-
-        wavpath = os.path.join(basepath, filename + '.wav')
-        rttm_filepath = os.path.join(basepath, filename + '.rttm')
-        json_filepath = os.path.join(basepath, filename + '.json')
-        ctm_filepath = os.path.join(basepath, filename + '.ctm')
-        text_filepath = os.path.join(basepath, filename + '.txt')
+        enforce_time = np.random.uniform(self._params.data_simulator.speaker_enforcement.enforce_time[0], self._params.data_simulator.speaker_enforcement.enforce_time[1])
+        enforce = self._params.data_simulator.speaker_enforcement.enforce_num_speakers
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
         array = np.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
@@ -628,17 +581,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
             if running_length_sr > enforce_time*session_length_sr and enforce:
-                increase_percent = []
-                for i in range(0,self._params.data_simulator.session_config.num_speakers):
-                    if self._furthest_sample[i] == 0:
-                        increase_percent.append(i)
-                #ramp up enforce counter until speaker is sampled, then reset once all speakers have spoken
-                if len(increase_percent) > 0:
-                    speaker_dominance = self._increase_speaker_dominance(increase_percent, base_speaker_dominance, enforce_counter)
+                speaker_dominance, enforce = self._increase_speaker_dominance(base_speaker_dominance, enforce_counter)
+                if enforce:
                     enforce_counter += 1
-                else:
-                    enforce = False
-                    speaker_dominance = base_speaker_dominance
 
             # select speaker
             speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
@@ -652,8 +597,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             RIR_pad = (RIR.shape[2] - 1)
             max_sentence_duration_sr = session_length_sr - running_length_sr - RIR_pad
 
-            # only add if remaining length > 0.5 second
-            if max_sentence_duration_sr < 0.5 * self._params.data_simulator.sr and not enforce:
+            # only add if remaining length > specific time
+            if max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr and not enforce:
                 break
             if enforce:
                 max_sentence_duration_sr = float('inf')
@@ -692,16 +637,13 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             array[start:end, :] += augmented_sentence
 
             #build entries for output files
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
-                rttm_list.append(new_rttm_entry)
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                new_json_entry = self._create_new_json_entry(wavpath, start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
-                json_list.append(new_json_entry)
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
-                for entry in new_ctm_entries:
-                    ctm_list.append(entry)
+            new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
+            rttm_list.append(new_rttm_entry)
+            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
+            json_list.append(new_json_entry)
+            new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
+            for entry in new_ctm_entries:
+                ctm_list.append(entry)
 
             running_length_sr = np.maximum(running_length_sr, end)
             self._furthest_sample[speaker_turn] = running_length_sr
@@ -709,15 +651,11 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             prev_length_sr = length
 
         array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file to avoid clipping
-        sf.write(wavpath, array, self._params.data_simulator.sr)
-        if 'r' in self._params.data_simulator.outputs.output_files:
-            labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
-        if 'j' in self._params.data_simulator.outputs.output_files:
-            write_manifest(json_filepath, json_list)
-        if 'c' in self._params.data_simulator.outputs.output_files:
-            write_ctm(ctm_filepath, ctm_list)
-        if 't' in self._params.data_simulator.outputs.output_files:
-            write_text(text_filepath, ctm_list)
+        sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
+        labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
+        write_manifest(os.path.join(basepath, filename + '.json'), json_list)
+        write_ctm(os.path.join(basepath, filename + '.ctm'), ctm_list)
+        write_text(os.path.join(basepath, filename + '.txt'), ctm_list)
 
     """
     Generate diarization sessions
@@ -750,16 +688,11 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             basepath = output_dir
 
         #create output files
-        if 'l' in self._params.data_simulator.outputs.output_files:
-            wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                rttmlist = open(os.path.join(basepath, "synthetic_rttm.list"), "w")
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                jsonlist = open(os.path.join(basepath, "synthetic_json.list"), "w")
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                ctmlist = open(os.path.join(basepath, "synthetic_ctm.list"), "w")
-            if 't' in self._params.data_simulator.outputs.output_files:
-                textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
+        wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
+        rttmlist = open(os.path.join(basepath, "synthetic_rttm.list"), "w")
+        jsonlist = open(os.path.join(basepath, "synthetic_json.list"), "w")
+        ctmlist = open(os.path.join(basepath, "synthetic_ctm.list"), "w")
+        textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
 
         for i in range(0, self._params.data_simulator.session_config.num_sessions):
             self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
@@ -769,22 +702,11 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
             self._generate_session(i, basepath, filename)
 
-            wavpath = os.path.join(basepath, filename + '.wav')
-            rttm_filepath = os.path.join(basepath, filename + '.rttm')
-            json_filepath = os.path.join(basepath, filename + '.json')
-            ctm_filepath = os.path.join(basepath, filename + '.ctm')
-            text_filepath = os.path.join(basepath, filename + '.txt')
-
-            if 'l' in self._params.data_simulator.outputs.output_files:
-                wavlist.write(wavpath + '\n')
-                if 'r' in self._params.data_simulator.outputs.output_files:
-                    rttmlist.write(rttm_filepath + '\n')
-                if 'j' in self._params.data_simulator.outputs.output_files:
-                    jsonlist.write(json_filepath + '\n')
-                if 'c' in self._params.data_simulator.outputs.output_files:
-                    ctmlist.write(ctm_filepath + '\n')
-                if 't' in self._params.data_simulator.outputs.output_files:
-                    textlist.write(text_filepath + '\n')
+            wavlist.write(os.path.join(basepath, filename + '.wav\n'))
+            rttmlist.write(os.path.join(basepath, filename + '.rttm\n'))
+            jsonlist.write(os.path.join(basepath, filename + '.json\n'))
+            ctmlist.write(os.path.join(basepath, filename + '.ctm\n'))
+            textlist.write(os.path.join(basepath, filename + '.txt\n'))
 
             #throw error if number of speakers is less than requested
             num_missing = 0
@@ -794,13 +716,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             if num_missing != 0:
                 warnings.warn(f"{self._params.data_simulator.session_config.num_speakers-num_missing} speakers were included in the clip instead of the requested amount of {self._params.data_simulator.session_config.num_speakers}")
 
-        if 'l' in self._params.data_simulator.outputs.output_files:
-            wavlist.close()
-            if 'r' in self._params.data_simulator.outputs.output_files:
-                rttmlist.close()
-            if 'j' in self._params.data_simulator.outputs.output_files:
-                jsonlist.close()
-            if 'c' in self._params.data_simulator.outputs.output_files:
-                ctmlist.close()
-            if 't' in self._params.data_simulator.outputs.output_files:
-                textlist.close()
+        wavlist.close()
+        rttmlist.close()
+        jsonlist.close()
+        ctmlist.close()
+        textlist.close()

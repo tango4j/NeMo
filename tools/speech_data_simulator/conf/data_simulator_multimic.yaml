@@ -30,7 +30,7 @@ data_simulator:
     output_dir: null # output directory
     output_filename: diarization_session # output filename for the wav and rttm files
     overwrite_output: true
-    output_files: rjctl # which files to output (r - rttm, j - json, c - ctm, t - text, l - list)
+    output_precision: 3 # number of decimal places in output files
 
   segment_manifest:
     window: 0.5
