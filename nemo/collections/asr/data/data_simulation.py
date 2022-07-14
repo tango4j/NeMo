@@ -384,7 +384,7 @@ class LibriSpeechGenerator(object):
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
             if torch.max(torch.abs(self._sentence)) > 0:
-                average_rms = torch.average(torch.sqrt(torch.mean(self._sentence**2)))
+                average_rms = torch.sqrt(torch.mean(self._sentence**2))
                 self._sentence = self._sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
