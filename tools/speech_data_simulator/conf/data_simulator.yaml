@@ -24,7 +24,7 @@ data_simulator:
     window_size: 0.1 # length of window at end of segmented utterance (seconds)
     normalization: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
     normalization_var: 0.1 # variance in speaker volume
-    end_buffer: 0.5 # buffer at the end of the session to leave blank 
+    end_buffer: 0.5 # buffer at the end of the session to leave blank
 
   outputs:
     output_dir: null # output directory
@@ -35,8 +35,8 @@ data_simulator:
   speaker_enforcement:
     enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
     enforce_time:  # percentage of the way through the audio session that enforcement mode is triggered
-    - 0.4
-    - 0.05
+    - 0.25
+    - 0.75
 
   segment_manifest:
     window: 0.5

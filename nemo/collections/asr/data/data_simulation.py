@@ -62,9 +62,13 @@ class LibriSpeechGenerator(object):
 
     def __init__(self, cfg):
         self._params = cfg
-
+        #error check arguments
+        self._check_args()
         # internal params
-        self._manifest = read_manifest(self._params.data_simulator.manifest_path)
+        try:
+            self._manifest = read_manifest(self._params.data_simulator.manifest_path)
+        except:
+            raise Exception("Manifest file could not be opened")
         self._sentence = None
         self._text = ""
         self._words = []
@@ -76,6 +80,36 @@ class LibriSpeechGenerator(object):
         #creating manifests
         self.base_manifest_filepath = None
         self.segment_manifest_filepath = None
+
+    def _check_args():
+        if self._params.data_simulator.session_config.num_speakers > 2:
+            raise Exception("Atleast two speakers are required for multispeaker audio sessions (num_speakers < 2)")
+        if self._params.data_simulator.session_params.turn_prob < 0 or self._params.data_simulator.session_params.turn_prob > 1:
+            raise Exception("Turn probability is outside of [0,1]")
+        if self._params.data_simulator.session_params.overlap_prob < 0 or self._params.data_simulator.session_params.overlap_prob > 1:
+            raise Exception("Overlap probability is outside of [0,1]")
+
+        if self._params.data_simulator.session_params.mean_overlap < 0 or self._params.data_simulator.session_params.mean_overlap > 1:
+            raise Exception("Mean overlap is outside of [0,1]")
+        if self._params.data_simulator.session_params.mean_silence < 0 or self._params.data_simulator.session_params.mean_silence > 1:
+            raise Exception("Mean silence is outside of [0,1]")
+        if self._params.data_simulator.session_params.min_dominance < 0 or self._params.data_simulator.session_params.min_dominance > 1:
+            raise Exception("Minimum dominance is outside of [0,1]")
+        if self._params.data_simulator.speaker_enforcement.enforce_time[0] < 0 or self._params.data_simulator.speaker_enforcement.enforce_time[0] > 1:
+            raise Exception("Speaker enforcement start is outside of [0,1]")
+        if self._params.data_simulator.speaker_enforcement.enforce_time[1] < 0 or self._params.data_simulator.speaker_enforcement.enforce_time[1] > 1:
+            raise Exception("Speaker enforcement end is outside of [0,1]")
+
+        if self._params.data_simulator.session_params.min_dominance*self._params.data_simulator.session_config.num_speakers > 1:
+            raise Exception("Number of speakers times minimum dominance is greater than 1")
+
+        if self._params.data_simulator.session_params.overlap_prob / self._params.data_simulator.session_params.turn_prob > 1:
+            raise Exception("Overlap probability / turn probability is greater than 1")
+        if self._params.data_simulator.session_params.overlap_prob / self._params.data_simulator.session_params.turn_prob == 1 and self._params.data_simulator.session_params.mean_silence > 0:
+            raise Exception("Overlap probability / turn probability is equal to 1 and mean silence is greater than 0")
+
+        if self._params.data_simulator.session_params.window_type not in ['hamming', 'hann', 'cosine']:
+            raise Exception("Incorrect window type provided")
 
     # randomly select speaker ids from loaded dict
     def _get_speaker_ids(self):
@@ -215,6 +249,8 @@ class LibriSpeechGenerator(object):
                 window = hann(window_amount*2)[window_amount:]
             elif self._params.data_simulator.session_params.window_type == 'cosine':
                 window = cosine(window_amount*2)[window_amount:]
+            else:
+                raise Exception("Incorrect window type provided")
             if len(audio_file[prev_dur_sr:]) < window_amount:
                 audio_file = np.pad(audio_file, (0, window_amount - len(audio_file[prev_dur_sr:])))
             self._sentence = np.append(self._sentence, np.multiply(audio_file[prev_dur_sr:prev_dur_sr+window_amount], window))
@@ -226,7 +262,6 @@ class LibriSpeechGenerator(object):
 
     # returns new overlapped (or shifted) start position
     def _add_silence_or_overlap(self, speaker_turn, prev_speaker, start, length, session_length_sr, prev_length_sr, enforce):
-        #NOTE: turn_prob & overlap_prob should be restricted so that overlap_prob/turn_prob <= 1
         overlap_prob = self._params.data_simulator.session_params.overlap_prob / (self._params.data_simulator.session_params.turn_prob)  #accounting for not overlapping the same speaker
         mean_overlap_percent = (self._params.data_simulator.session_params.mean_overlap / (1+self._params.data_simulator.session_params.mean_overlap)) /  self._params.data_simulator.session_params.overlap_prob
         mean_silence_percent = self._params.data_simulator.session_params.mean_silence / (1-self._params.data_simulator.session_params.overlap_prob)
@@ -360,14 +395,12 @@ class LibriSpeechGenerator(object):
         base_speaker_dominance = np.copy(speaker_dominance)
         speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
 
-        speaker_turn = 0  # assume alternating between speakers 1 & 2
-        running_length_sr = 0  # starting point for each sentence
-        prev_length_sr = 0  # for overlap
+        running_length_sr = prev_length_sr = 0  # starting point for each sentence
         start = end = 0
         prev_speaker = None
-        rttm_list = []
-        json_list = []
-        ctm_list = []
+        rttm_list = json_list = ctm_list = []
+        self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
+        self._missing_overlap = 0
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2 # dominance is increased by a factor of enforce_counter
@@ -515,6 +548,39 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     Multi Microphone Librispeech Diarization Session Generator.
     """
 
+    def _check_args():
+        #check base arguments
+        super()._check_args()
+
+        if len(self._params.data_simulator.rir_generation.room_config.room_sz) != 3:
+            raise Exception("Incorrect room dimensions provided")
+        if len(self._params.data_simulator.rir_generation.mic_config.num_channels) == 0:
+            raise Exception("Number of channels should be greater or equal to 1")
+        if len(self._params.data_simulator.rir_generation.room_config.pos_src) < 2:
+            raise Exception("Less than 2 provided source positions")
+        for sublist in self._params.data_simulator.rir_generation.room_config.pos_src:
+            if len(sublist) != 3:
+                raise Exception("Three coordinates must be provided for sources positions")
+        if len(self._params.data_simulator.rir_generation.mic_config.pos_rcv) == 0:
+            raise Exception("No provided mic positions")
+        for sublist in self._params.data_simulator.rir_generation.mic_config.pos_src:
+            if len(sublist) != 3:
+                raise Exception("Three coordinates must be provided for mic positions")
+
+        if self._params.data_simulator.session_config.num_speakers != len(self._params.data_simulator.rir_generation.room_config.pos_src):
+            raise Exception("Number of speakers is not equal to the number of provided source positions")
+        if self._params.data_simulator.rir_generation.mic_config.num_channels != len(self._params.data_simulator.rir_generation.mic_config.pos_rcv):
+            raise Exception("Number of channels is not equal to the number of provided microphone positions")
+
+        if not self._params.data_simulator.rir_generation.mic_config.orV_rcv and self._params.data_simulator.rir_generation.mic_config.mic_pattern != 'omni':
+            raise Exception("Microphone orientations must be provided if mic_pattern != omni")
+        if self._params.data_simulator.rir_generation.mic_config.orV_rcv != None:
+            if len(self._params.data_simulator.rir_generation.mic_config.orV_rcv) != len(self._params.data_simulator.rir_generation.mic_config.pos_rcv):
+                raise Exception("A different number of microphone orientations and microphone positions were provided")
+            for sublist in self._params.data_simulator.rir_generation.mic_config.orV_rcv:
+                if len(sublist) != 3:
+                    raise Exception("Three coordinates must be provided for orientations")
+
     """
     Create simulated RIR
     """
@@ -550,6 +616,35 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         output_sound = np.array(output_sound).T
         return output_sound
 
+    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
+        # select speaker length
+        sl = np.random.negative_binomial(
+            self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
+        ) + 1
+
+        # initialize sentence, text, words, alignments
+        self._sentence = np.zeros(0)
+        self._text = ""
+        self._words = []
+        self._alignments = []
+        sentence_duration = sentence_duration_sr = 0
+
+        # build sentence
+        while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
+            file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
+            audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+
+        #augment sentence
+        augmented_sentence = self._convolve_rir(speaker_turn, RIR)
+
+        #per-speaker normalization
+        if self._params.data_simulator.session_params.normalization == 'equal':
+            if np.max(np.abs(self._sentence)) > 0:
+                average_rms = np.average(np.sqrt(np.mean(self._sentence**2)))
+                self._sentence = self._sentence / (1.0 * average_rms)
+        #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
+
     """
     Generate diarization session
     """
@@ -559,14 +654,10 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         base_speaker_dominance = np.copy(speaker_dominance)
         speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
 
-        speaker_turn = 0  # assume alternating between speakers 1 & 2
-        running_length_sr = 0  # starting point for each sentence
-        prev_length_sr = 0  # for overlap
+        running_length_sr = prev_length_sr = 0  # starting point for each sentence
         start = end = 0
         prev_speaker = None
-        rttm_list = []
-        json_list = []
-        ctm_list = []
+        rttm_list = json_list = ctm_list = []
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
@@ -591,48 +682,16 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             # select speaker
             speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
 
-            # select speaker length
-            sl = np.random.negative_binomial(
-                self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
-            ) + 1
-
-            #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
-            RIR_pad = (RIR.shape[2] - 1)
-            max_sentence_duration_sr = session_length_sr - running_length_sr - RIR_pad
-
-            # only add if remaining length > specific time
-            if max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr and not enforce:
-                break
+            # build sentence (only add if remaining length >  specific time)
+            max_sentence_duration_sr = session_length_sr - running_length_sr - (RIR.shape[2] - 1) #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
             if enforce:
                 max_sentence_duration_sr = float('inf')
-
-            # initialize sentence, text, words, alignments
-            self._sentence = np.zeros(0)
-            self._text = ""
-            self._words = []
-            self._alignments = []
-            sentence_duration = sentence_duration_sr = 0
-
-            # build sentence
-            while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
-                file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
-                audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
-                sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
-
-            #augment sentence
-            augmented_sentence = self._convolve_rir(speaker_turn, RIR)
-
-            #per-speaker normalization
-            if self._params.data_simulator.session_params.normalization == 'equal':
-                if  np.max(np.abs(augmented_sentence)) > 0:
-                    average_rms = np.average(np.sqrt(np.mean(augmented_sentence**2)))
-                    augmented_sentence = augmented_sentence / (1.0 * average_rms)
-            #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
+            elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
+                break
+            self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR)
 
             length = augmented_sentence.shape[0]
-            start = self._add_silence_or_overlap(
-                speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce
-            )
+            start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
             if end > len(array):
                 array = np.pad(array, (0, end - len(array)))
@@ -659,68 +718,3 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         write_manifest(os.path.join(basepath, filename + '.json'), json_list)
         write_ctm(os.path.join(basepath, filename + '.ctm'), ctm_list)
         write_text(os.path.join(basepath, filename + '.txt'), ctm_list)
-
-    """
-    Generate diarization sessions
-    """
-    def generate_sessions(self):
-        print(f"Generating Diarization Sessions")
-        np.random.seed(self._params.data_simulator.random_seed)
-        output_dir = self._params.data_simulator.outputs.output_dir
-
-        #delete output directory if it exists or throw warning
-        if os.path.isdir(output_dir) and os.listdir(output_dir):
-            if self._params.data_simulator.outputs.overwrite_output:
-                shutil.rmtree(output_dir)
-                os.mkdir(output_dir)
-            else:
-                raise Exception("Output directory is nonempty and overwrite_output = false")
-        elif not os.path.isdir(output_dir):
-            os.mkdir(output_dir)
-
-        if self._params.data_simulator.session_config.num_speakers != len(self._params.data_simulator.rir_generation.room_config.pos_src):
-            raise Exception("Number of speakers is not equal to the number of provided source positions")
-        elif self._params.data_simulator.rir_generation.mic_config.num_channels != len(self._params.data_simulator.rir_generation.mic_config.pos_rcv):
-            raise Exception("Number of channels is not equal to the number of provided microphone positions")
-
-        # only add root if paths are relative
-        if not os.path.isabs(output_dir):
-            ROOT = os.getcwd()
-            basepath = os.path.join(ROOT, output_dir)
-        else:
-            basepath = output_dir
-
-        #create output files
-        wavlist = open(os.path.join(basepath, "synthetic_wav.list"), "w")
-        rttmlist = open(os.path.join(basepath, "synthetic_rttm.list"), "w")
-        jsonlist = open(os.path.join(basepath, "synthetic_json.list"), "w")
-        ctmlist = open(os.path.join(basepath, "synthetic_ctm.list"), "w")
-        textlist = open(os.path.join(basepath,"synthetic_txt.list"), "w")
-
-        for i in range(0, self._params.data_simulator.session_config.num_sessions):
-            self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
-            self._missing_overlap = 0
-
-            print(f"Generating Session Number {i}")
-            filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
-            self._generate_session(i, basepath, filename)
-
-            wavlist.write(os.path.join(basepath, filename + '.wav\n'))
-            rttmlist.write(os.path.join(basepath, filename + '.rttm\n'))
-            jsonlist.write(os.path.join(basepath, filename + '.json\n'))
-            ctmlist.write(os.path.join(basepath, filename + '.ctm\n'))
-            textlist.write(os.path.join(basepath, filename + '.txt\n'))
-
-            #throw error if number of speakers is less than requested
-            num_missing = 0
-            for k in range(0,len(self._furthest_sample)):
-                if self._furthest_sample[k] == 0:
-                    num_missing += 1
-            if num_missing != 0:
-                warnings.warn(f"{self._params.data_simulator.session_config.num_speakers-num_missing} speakers were included in the clip instead of the requested amount of {self._params.data_simulator.session_config.num_speakers}")
-
-        wavlist.close()
-        rttmlist.close()
-        jsonlist.close()
-        ctmlist.close()
-        textlist.close()
