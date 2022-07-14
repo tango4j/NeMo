@@ -405,7 +405,7 @@ class LibriSpeechGenerator(object):
             #build entries for output files
             new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
             rttm_list.append(new_rttm_entry)
-            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
+            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
             json_list.append(new_json_entry)
             new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
             for entry in new_ctm_entries:
@@ -642,7 +642,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             #build entries for output files
             new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
             rttm_list.append(new_rttm_entry)
-            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, rttm_filepath, ctm_filepath)
+            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
             json_list.append(new_json_entry)
             new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
             for entry in new_ctm_entries:
