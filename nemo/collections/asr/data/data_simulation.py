@@ -365,7 +365,9 @@ class LibriSpeechGenerator(object):
         prev_length_sr = 0  # for overlap
         start = end = 0
         prev_speaker = None
-        rttm_list = [], json_list = [], ctm_list = []
+        rttm_list = []
+        json_list = []
+        ctm_list = []
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2 # dominance is increased by a factor of enforce_counter
@@ -563,7 +565,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         prev_length_sr = 0  # for overlap
         start = end = 0
         prev_speaker = None
-        rttm_list = [], json_list = [], ctm_list = []
+        rttm_list = []
+        json_list = []
+        ctm_list = []
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
