@@ -383,7 +383,7 @@ class LibriSpeechGenerator(object):
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
-            if np.max(np.abs(self._sentence)) > 0:
+            if torch.max(torch.abs(self._sentence)) > 0:
                 average_rms = np.average(np.sqrt(np.mean(self._sentence**2)))
                 self._sentence = self._sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
@@ -453,7 +453,7 @@ class LibriSpeechGenerator(object):
             prev_speaker = speaker_turn
             prev_length_sr = length
 
-        array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file to avoid clipping
+        array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
         labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
         write_manifest(os.path.join(basepath, filename + '.json'), json_list)
@@ -646,7 +646,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
-            if np.max(np.abs(augmented_sentence)) > 0:
+            if torch.max(torch.abs(augmented_sentence)) > 0:
                 average_rms = np.average(np.sqrt(np.mean(augmented_sentence**2)))
                 augmented_sentence = augmented_sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
@@ -722,7 +722,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             prev_speaker = speaker_turn
             prev_length_sr = length
 
-        array = array / (1.0 * np.max(np.abs(array)))  # normalize wav file to avoid clipping
+        array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
         labels_to_rttmfile(rttm_list, filename, self._params.data_simulator.outputs.output_dir)
         write_manifest(os.path.join(basepath, filename + '.json'), json_list)
