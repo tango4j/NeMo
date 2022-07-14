@@ -236,7 +236,7 @@ class LibriSpeechGenerator(object):
             prev_dur_sr = dur_sr
 
         # add audio clip up to the final alignment
-        self._sentence = np.append(self._sentence, audio_file[:prev_dur_sr])
+        self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
 
         #windowing
         if i < len(file['words']) and self._params.data_simulator.session_params.window_type != None:
@@ -252,12 +252,12 @@ class LibriSpeechGenerator(object):
             else:
                 raise Exception("Incorrect window type provided")
             if len(audio_file[prev_dur_sr:]) < window_amount:
-                audio_file = np.pad(audio_file, (0, window_amount - len(audio_file[prev_dur_sr:])))
-            self._sentence = np.append(self._sentence, np.multiply(audio_file[prev_dur_sr:prev_dur_sr+window_amount], window))
+                audio_file = torch.nn.functional.pad(audio_file, (0, window_amount - len(audio_file[prev_dur_sr:])))
+            self._sentence = torch.cat((self._sentence, np.multiply(audio_file[prev_dur_sr:prev_dur_sr+window_amount], window)), 0)
 
         #zero pad if close to end of the clip
         if dur_sr > remaining_duration_sr:
-            self._sentence = np.pad(self._sentence, (0, max_sentence_duration_sr - len(self._sentence)))
+            self._sentence = torch.nn.functional.pad(self._sentence, (0, max_sentence_duration_sr - len(self._sentence)))
         return sentence_duration+nw, len(self._sentence)
 
     # returns new overlapped (or shifted) start position
@@ -367,7 +367,7 @@ class LibriSpeechGenerator(object):
         ) + 1
 
         # initialize sentence, text, words, alignments
-        self._sentence = np.zeros(0)
+        self._sentence = torch.zeros(0)
         self._text = ""
         self._words = []
         self._alignments = []
@@ -410,7 +410,7 @@ class LibriSpeechGenerator(object):
         enforce = self._params.data_simulator.speaker_enforcement.enforce_num_speakers
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
-        array = np.zeros(session_length_sr)
+        array = torch.zeros(session_length_sr)
 
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
@@ -434,7 +434,7 @@ class LibriSpeechGenerator(object):
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
             if end > len(array): #only occurs in enforce mode
-                array = np.pad(array, (0, end - len(array)))
+                array = torch.nn.functional.pad(array, (0, end - len(array)))
             array[start:end] += self._sentence
 
             #build entries for output files
@@ -615,7 +615,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
             output_sound.append(out_channel)
-        output_sound = np.array(output_sound).T
+        output_sound = torch.tensor(output_sound)
+        torch.transpose(output_sound, 0, 1)
         return output_sound
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR):
@@ -625,7 +626,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         ) + 1
 
         # initialize sentence, text, words, alignments
-        self._sentence = np.zeros(0)
+        self._sentence = torch.zeros(0)
         self._text = ""
         self._words = []
         self._alignments = []
@@ -676,7 +677,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         enforce = self._params.data_simulator.speaker_enforcement.enforce_num_speakers
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
-        array = np.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
+        array = np.torch((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
 
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
@@ -700,7 +701,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
             if end > len(array):
-                array = np.pad(array, (0, end - len(array)))
+                array = torch.nn.functional.pad(array, (0, end - len(array)))
 
             array[start:end, :] += augmented_sentence
 
