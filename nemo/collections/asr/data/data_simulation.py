@@ -378,6 +378,7 @@ class LibriSpeechGenerator(object):
         while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
             file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
             audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
+            audio_file = torch.from_numpy(audio_file)
             sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
         #per-speaker normalization
@@ -637,6 +638,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
             file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
             audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
+            audio_file = torch.from_numpy(audio_file)
             sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
         #augment sentence
