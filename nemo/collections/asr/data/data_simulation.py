@@ -565,7 +565,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 raise Exception("Three coordinates must be provided for sources positions")
         if len(self._params.data_simulator.rir_generation.mic_config.pos_rcv) == 0:
             raise Exception("No provided mic positions")
-        for sublist in self._params.data_simulator.rir_generation.mic_config.pos_src:
+        for sublist in self._params.data_simulator.rir_generation.room_config.pos_src:
             if len(sublist) != 3:
                 raise Exception("Three coordinates must be provided for mic positions")
 
