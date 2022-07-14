@@ -398,7 +398,9 @@ class LibriSpeechGenerator(object):
         running_length_sr = prev_length_sr = 0  # starting point for each sentence
         start = end = 0
         prev_speaker = None
-        rttm_list = json_list = ctm_list = []
+        rttm_list = []
+        json_list = []
+        ctm_list = []
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
@@ -657,7 +659,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         running_length_sr = prev_length_sr = 0  # starting point for each sentence
         start = end = 0
         prev_speaker = None
-        rttm_list = json_list = ctm_list = []
+        rttm_list = []
+        json_list = []
+        ctm_list = []
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
