@@ -618,7 +618,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         output_sound = np.array(output_sound).T
         return output_sound
 
-    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
+    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR):
         # select speaker length
         sl = np.random.negative_binomial(
             self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
