@@ -556,7 +556,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         if len(self._params.data_simulator.rir_generation.room_config.room_sz) != 3:
             raise Exception("Incorrect room dimensions provided")
-        if len(self._params.data_simulator.rir_generation.mic_config.num_channels) == 0:
+        if self._params.data_simulator.rir_generation.mic_config.num_channels == 0:
             raise Exception("Number of channels should be greater or equal to 1")
         if len(self._params.data_simulator.rir_generation.room_config.pos_src) < 2:
             raise Exception("Less than 2 provided source positions")
