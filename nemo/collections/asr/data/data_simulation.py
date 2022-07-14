@@ -647,7 +647,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
             if torch.max(torch.abs(augmented_sentence)) > 0:
-                average_rms = torch.average(torch.sqrt(torch.mean(augmented_sentence**2)))
+                average_rms = torch.sqrt(torch.mean(augmented_sentence**2))
                 augmented_sentence = augmented_sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
