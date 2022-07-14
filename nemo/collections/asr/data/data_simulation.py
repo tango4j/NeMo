@@ -642,10 +642,12 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
-            if np.max(np.abs(self._sentence)) > 0:
-                average_rms = np.average(np.sqrt(np.mean(self._sentence**2)))
-                self._sentence = self._sentence / (1.0 * average_rms)
+            if np.max(np.abs(augmented_sentence)) > 0:
+                average_rms = np.average(np.sqrt(np.mean(augmented_sentence**2)))
+                augmented_sentence = augmented_sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
+
+        return augmented_sentence
 
     """
     Generate diarization session
@@ -692,7 +694,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 max_sentence_duration_sr = float('inf')
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
                 break
-            self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR)
+            augmented_sentence = self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR)
 
             length = augmented_sentence.shape[0]
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
