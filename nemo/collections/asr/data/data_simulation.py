@@ -325,7 +325,7 @@ class LibriSpeechGenerator(object):
                 arr.append((align1, text))
         return arr
 
-    def _build_sentence(self, speaker_turn, max_sentence_duration_sr, speaker_lists):
+    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
         # select speaker length
         sl = np.random.negative_binomial(
             self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
@@ -393,7 +393,7 @@ class LibriSpeechGenerator(object):
                 max_sentence_duration_sr = float('inf')
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
                 break
-            self._build_sentence(speaker_turn, max_sentence_duration_sr, speaker_lists)
+            self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr)
 
             length = len(self._sentence)
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
