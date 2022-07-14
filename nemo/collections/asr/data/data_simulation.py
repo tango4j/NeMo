@@ -83,6 +83,9 @@ class LibriSpeechGenerator(object):
         self.segment_manifest_filepath = None
 
     def _check_args(self):
+        """
+        Checks arguments to ensure they are within valid ranges
+        """
         if self._params.data_simulator.session_config.num_speakers < 2:
             raise Exception("Atleast two speakers are required for multispeaker audio sessions (num_speakers < 2)")
         if self._params.data_simulator.session_params.turn_prob < 0 or self._params.data_simulator.session_params.turn_prob > 1:
@@ -112,8 +115,10 @@ class LibriSpeechGenerator(object):
         if self._params.data_simulator.session_params.window_type not in ['hamming', 'hann', 'cosine']:
             raise Exception("Incorrect window type provided")
 
-    # randomly select speaker ids from loaded dict
     def _get_speaker_ids(self):
+        """
+        Randomly select speaker IDs from loaded dict
+        """
         speaker_ids = []
         s = 0
         while s < self._params.data_simulator.session_config.num_speakers:
@@ -126,8 +131,13 @@ class LibriSpeechGenerator(object):
                 s += 1
         return speaker_ids
 
-    # get a list of the samples for the specified speakers
     def _get_speaker_samples(self, speaker_ids):
+        """
+        Get a list of the samples for the specified speakers
+
+        Args:
+            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
+        """
         speaker_lists = {}
         for i in range(0, self._params.data_simulator.session_config.num_speakers):
             spid = speaker_ids[i]
@@ -142,15 +152,24 @@ class LibriSpeechGenerator(object):
 
         return speaker_lists
 
-    # load a sample for the selected speaker id
     def _load_speaker_sample(self, speaker_lists, speaker_ids, speaker_turn):
+        """
+        Load a sample for the selected speaker id
+
+        Args:
+            speaker_lists (list): List of samples for each speaker in the session.
+            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
+            speaker_turn (int): Current speaker turn.
+        """
         speaker_id = speaker_ids[speaker_turn]
         file_id = np.random.randint(0, len(speaker_lists[str(speaker_id)]) - 1)
         file = speaker_lists[str(speaker_id)][file_id]
         return file
 
-    # get dominance for each speaker
     def _get_speaker_dominance(self):
+        """
+        Get the dominance value for each speaker
+        """
         dominance_mean = 1.0/self._params.data_simulator.session_config.num_speakers
         dominance = np.random.normal(loc=dominance_mean, scale=self._params.data_simulator.session_params.dominance_var, size=self._params.data_simulator.session_config.num_speakers)
         for i in range(0,len(dominance)):
@@ -170,7 +189,13 @@ class LibriSpeechGenerator(object):
         return dominance
 
     def _increase_speaker_dominance(self, base_speaker_dominance, factor):
+        """
+        Increase speaker dominance (used only in enforce mode)
 
+        Args:
+            base_speaker_dominance (list): Dominance values for each speaker.
+            factor (int): Factor to increase dominance of unrepresented speakers by.
+        """
         increase_percent = []
         for i in range(0,self._params.data_simulator.session_config.num_speakers):
             if self._furthest_sample[i] == 0:
@@ -193,8 +218,14 @@ class LibriSpeechGenerator(object):
             enforce = False
         return dominance, enforce
 
-    # get next speaker (accounting for turn probability, dominance distribution)
     def _get_next_speaker(self, prev_speaker, dominance):
+        """
+        Get next speaker (accounting for turn probability, dominance distribution)
+
+        Args:
+            prev_speaker (int): Previous speaker turn.
+            dominance (list): Dominance values for each speaker.
+        """
         if np.random.uniform(0, 1) > self._params.data_simulator.session_params.turn_prob and prev_speaker != None:
             return prev_speaker
         else:
@@ -207,8 +238,17 @@ class LibriSpeechGenerator(object):
                     speaker_turn += 1
             return speaker_turn
 
-    # add audio file to current sentence
     def _add_file(self, file, audio_file, sentence_duration, max_sentence_duration, max_sentence_duration_sr):
+        """
+        Add audio file to current sentence
+
+        Args:
+            file (dict): Line from manifest file for current audio file
+            audio_file (tensor): Current loaded audio file
+            sentence_duration (int): Running count for number of words in sentence
+            max_sentence_duration (int): Maximum count for number of words in sentence
+            max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
+        """
         sentence_duration_sr = len(self._sentence)
         remaining_duration_sr = max_sentence_duration_sr - sentence_duration_sr
         remaining_duration = max_sentence_duration - sentence_duration
@@ -263,6 +303,18 @@ class LibriSpeechGenerator(object):
 
     # returns new overlapped (or shifted) start position
     def _add_silence_or_overlap(self, speaker_turn, prev_speaker, start, length, session_length_sr, prev_length_sr, enforce):
+        """
+        Returns new overlapped (or shifted) start position
+
+        Args:
+            speaker_turn (int): Current speaker turn.
+            prev_speaker (int): Previous speaker turn.
+            start (int): Current start of the audio file being inserted.
+            length (int): Length of the audio file being inserted.
+            session_length_sr (int): Running length of the session in terms of number of samples
+            prev_length_sr (int): Length of previous sentence (in terms of number of samples)
+            enforce (bool): Whether speaker enforcement mode is being used
+        """
         overlap_prob = self._params.data_simulator.session_params.overlap_prob / (self._params.data_simulator.session_params.turn_prob)  #accounting for not overlapping the same speaker
         mean_overlap_percent = (self._params.data_simulator.session_params.mean_overlap / (1+self._params.data_simulator.session_params.mean_overlap)) /  self._params.data_simulator.session_params.overlap_prob
         mean_silence_percent = self._params.data_simulator.session_params.mean_silence / (1-self._params.data_simulator.session_params.overlap_prob)
@@ -327,19 +379,37 @@ class LibriSpeechGenerator(object):
             else:
                 return start + silence_amount
 
-    # add new entry to dict (to write to output rttm file)
-    def _create_new_rttm_entry(self, start, dur, speaker_id):
-        start = float(round(start,self._params.data_simulator.outputs.output_precision))
-        dur = float(round(dur,self._params.data_simulator.outputs.output_precision))
-        return f"{start} {dur} {speaker_id}"
+    def _create_new_rttm_entry(self, start, length, speaker_id):
+        """
+        Create new RTTM entry (to write to output rttm file)
 
-    # add new entry to dict (to write to output json file)
-    def _create_new_json_entry(self, wav_filename, start, dur, speaker_id, text, rttm_filepath, ctm_filepath):
+        Args:
+            start (int): Current start of the audio file being inserted.
+            length (int): Length of the audio file being inserted.
+            speaker_id (int): LibriSpeech speaker ID for the current entry.
+        """
         start = float(round(start,self._params.data_simulator.outputs.output_precision))
-        dur = float(round(dur,self._params.data_simulator.outputs.output_precision))
+        length = float(round(length,self._params.data_simulator.outputs.output_precision))
+        return f"{start} {length} {speaker_id}"
+
+    def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
+        """
+        Create new JSON entry (to write to output json file)
+
+        Args:
+            wav_filename (str): Output wav filepath.
+            start (int): Current start of the audio file being inserted.
+            length (int): Length of the audio file being inserted.
+            speaker_id (int): LibriSpeech speaker ID for the current entry.
+            text (str): Transcript for the current utterance.
+            rttm_filepath (str): Output rttm filepath.
+            ctm_filepath (str): Output ctm filepath.
+        """
+        start = float(round(start,self._params.data_simulator.outputs.output_precision))
+        length = float(round(length,self._params.data_simulator.outputs.output_precision))
         dict = {"audio_filepath": wav_filename,
                 "offset": start,
-                "duration": dur,
+                "duration": length,
                 "label": speaker_id,
                 "text": text,
                 "num_speakers": self._params.data_simulator.session_config.num_speakers,
@@ -348,8 +418,15 @@ class LibriSpeechGenerator(object):
                 "uem_filepath": None}
         return dict
 
-    # add new entry to dict (to write to output ctm file)
     def _create_new_ctm_entry(self, session_name, speaker_id, start):
+        """
+        Create new CTM entry (to write to output ctm file)
+
+        Args:
+            session_name (str): Current session name.
+            start (int): Current start of the audio file being inserted.
+            speaker_id (int): LibriSpeech speaker ID for the current entry.
+        """
         arr = []
         start = float(round(start,self._params.data_simulator.outputs.output_precision))
         for i in range(0, len(self._words)):
@@ -362,6 +439,15 @@ class LibriSpeechGenerator(object):
         return arr
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
+        """
+        Build new sentence
+
+        Args:
+            speaker_turn (int): Current speaker turn.
+            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
+            speaker_lists (list): List of samples for each speaker in the session.
+            max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
+        """
         # select speaker length
         sl = np.random.negative_binomial(
             self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
@@ -388,10 +474,15 @@ class LibriSpeechGenerator(object):
                 self._sentence = self._sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
-    """
-    Generate diarization session
-    """
     def _generate_session(self, idx, basepath, filename):
+        """
+        Generate diarization session
+
+        Args:
+            idx (int): Index for current session (out of total number of sessions).
+            basepath (str): Path to output directory.
+            filename (str): Filename for output files.
+        """
         speaker_ids = self._get_speaker_ids()  # randomly select speaker ids
         speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
         base_speaker_dominance = np.copy(speaker_dominance)
@@ -460,10 +551,10 @@ class LibriSpeechGenerator(object):
         write_ctm(os.path.join(basepath, filename + '.ctm'), ctm_list)
         write_text(os.path.join(basepath, filename + '.txt'), ctm_list)
 
-    """
-    Generate diarization sessions
-    """
     def generate_sessions(self):
+        """
+        Generate diarization sessions
+        """
         print(f"Generating Diarization Sessions")
         np.random.seed(self._params.data_simulator.random_seed)
         output_dir = self._params.data_simulator.outputs.output_dir
@@ -520,6 +611,9 @@ class LibriSpeechGenerator(object):
         textlist.close()
 
     def create_base_manifest_ds(self):
+        """
+        Create base diarization manifest file
+        """
         basepath = self._params.data_simulator.outputs.output_dir
         wav_path = os.path.join(basepath, 'synthetic_wav.list')
         text_path = os.path.join(basepath, 'synthetic_txt.list')
@@ -533,6 +627,9 @@ class LibriSpeechGenerator(object):
         return self.base_manifest_filepath
 
     def create_segment_manifest_ds(self):
+        """
+        Create segmented diarization manifest file
+        """
         basepath = self._params.data_simulator.outputs.output_dir
         output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
         input_manifest_path = self.base_manifest_filepath
@@ -553,6 +650,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     """
 
     def _check_args(self):
+        """
+        Checks arguments to ensure they are within valid ranges
+        """
         #check base arguments
         super()._check_args()
 
@@ -585,10 +685,10 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 if len(sublist) != 3:
                     raise Exception("Three coordinates must be provided for orientations")
 
-    """
-    Create simulated RIR
-    """
     def _generate_rir(self):
+        """
+        Create simulated RIR
+        """
         room_sz = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
         pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
         pos_rcv = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
@@ -609,10 +709,14 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         RIR = simulateRIR(room_sz, beta, pos_src, pos_rcv, nb_img, Tmax, sr, Tdiff=Tdiff, orV_rcv=orV_rcv, mic_pattern=mic_pattern)
         return RIR
 
-    """
-    Augment sample using synthetic RIR
-    """
     def _convolve_rir(self, speaker_turn, RIR):
+        """
+        Augment sample using synthetic RIR
+
+        Args:
+            speaker_turn (int): Current speaker turn.
+            RIR (torch.tensor): Room Impulse Response.
+        """
         output_sound = []
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
@@ -622,6 +726,16 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         return output_sound
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR):
+        """
+        Build new sentence
+
+        Args:
+            speaker_turn (int): Current speaker turn.
+            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
+            speaker_lists (list): List of samples for each speaker in the session.
+            max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
+            RIR (torch.tensor): Room Impulse Response.
+        """
         # select speaker length
         sl = np.random.negative_binomial(
             self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
@@ -650,13 +764,17 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 average_rms = torch.sqrt(torch.mean(augmented_sentence**2))
                 augmented_sentence = augmented_sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
-
         return augmented_sentence
 
-    """
-    Generate diarization session
-    """
     def _generate_session(self, idx, basepath, filename):
+        """
+        Generate diarization session
+
+        Args:
+            idx (int): Index for current session (out of total number of sessions).
+            basepath (str): Path to output directory.
+            filename (str): Filename for output files.
+        """
         speaker_ids = self._get_speaker_ids()  # randomly select speaker ids
         speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
         base_speaker_dominance = np.copy(speaker_dominance)
