@@ -388,12 +388,11 @@ class LibriSpeechGenerator(object):
             speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
 
             # build sentence (only add if remaining length >  specific time)
+            max_sentence_duration_sr = session_length_sr - running_length_sr
             if enforce:
                 max_sentence_duration_sr = float('inf')
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
                 break
-            else:
-                max_sentence_duration_sr = session_length_sr - running_length_sr
             self._build_sentence(speaker_turn, max_sentence_duration_sr)
 
             length = len(self._sentence)
