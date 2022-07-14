@@ -680,7 +680,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         enforce = self._params.data_simulator.speaker_enforcement.enforce_num_speakers
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
-        array = np.torch((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
+        array = torch.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
 
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
