@@ -104,6 +104,7 @@ msdd_model:
       window_size: 0.1 # length of window at end of segmented utterance (seconds)
       normalization: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
       normalization_var: 0.1 # variance in speaker volume
+      end_buffer: 0.5 # buffer at the end of the session to leave blank
 
     outputs:
       output_dir: null # output directory
