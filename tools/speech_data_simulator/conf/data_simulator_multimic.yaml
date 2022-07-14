@@ -2,7 +2,6 @@ data_simulator:
   manifest_path: null # Manifest file with paths to librispeech audio files
 
   # alignment_type: end # input alignment format (start, end, or tuple alignments in (start,end) pairs)
-  enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
   sr: 16000 # sampling rate of the audio files
   random_seed: 42
 
@@ -31,6 +30,12 @@ data_simulator:
     output_filename: diarization_session # output filename for the wav and rttm files
     overwrite_output: true
     output_precision: 3 # number of decimal places in output files
+
+  speaker_enforcement:
+    enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
+    enforce_time:  # percentage of the way through the audio session that enforcement mode is triggered
+    - 0.25
+    - 0.75
 
   segment_manifest:
     window: 0.5
