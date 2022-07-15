@@ -750,7 +750,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
 
         room.compute_rir()
+        print(len(room.rir))
         for i in room.rir:
+            print(len(i))
             for j in i:
                 print(j.shape)
         return room.rir
