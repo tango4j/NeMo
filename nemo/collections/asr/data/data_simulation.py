@@ -782,12 +782,16 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             RIR (torch.tensor): Room Impulse Response.
         """
         output_sound = []
+        length = 0
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[channel][speaker_turn][:len(self._sentence)]).tolist()
-            output_sound.append(out_channel)
-        output_sound = torch.tensor(output_sound)
-        output_sound = torch.transpose(output_sound, 0, 1)
-        return output_sound
+            if out_channel.shape[0] > length:
+                length = out_channel.shape[0]
+            output_sound.append(torch.tensor(out_channel))
+            # output_sound.append(out_channel)
+        # output_sound = torch.tensor(output_sound)
+        # output_sound = torch.transpose(output_sound, 0, 1)
+        return output_sound,length
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
         """
@@ -888,18 +892,20 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             #augment sentence
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
                 augmented_sentence = self._convolve_rir_gpuRIR(speaker_turn, RIR)
+                length = augmented_sentence.shape[0]
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                augmented_sentence = self._convolve_rir_pyroomacoustics(speaker_turn, RIR)
-            else:
-                raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
+                augmented_sentence, length = self._convolve_rir_pyroomacoustics(speaker_turn, RIR)
 
-            length = augmented_sentence.shape[0]
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
             if end > len(array):
                 array = torch.nn.functional.pad(array, (0, end - len(array)))
 
-            array[start:end, :] += augmented_sentence
+            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+                array[start:end, :] += augmented_sentence
+            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+                for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+                    array[start:end, channel] += augmented_sentence[channel]
 
             #build entries for output files
             new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
