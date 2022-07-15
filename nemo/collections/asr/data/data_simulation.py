@@ -18,6 +18,7 @@ import random
 import warnings
 import shutil
 import torch
+import time
 
 import librosa
 import numpy as np
@@ -851,14 +852,29 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
-        #Room Impulse Response Generation (performed once per batch of sessions)
-        if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+        start = time.time()
+
+        for i in range(0,100):
+            #Room Impulse Response Generation (performed once per batch of sessions)
+            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+                RIR = self._generate_rir_gpuRIR()
+                RIR_pad = RIR.shape[2] - 1
+            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+                RIR,RIR_pad = self._generate_rir_pyroomacoustics()
+            else:
+                raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
+
+        end = time.time()
+        print('PRA TIME: {start-end}')
+
+        start = time.time()
+
+        for i in range(0,100):
             RIR = self._generate_rir_gpuRIR()
             RIR_pad = RIR.shape[2] - 1
-        elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-            RIR,RIR_pad = self._generate_rir_pyroomacoustics()
-        else:
-            raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
+
+        end = time.time()
+        print('gpuRIR TIME: {start-end}')
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
