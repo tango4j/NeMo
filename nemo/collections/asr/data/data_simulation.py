@@ -859,7 +859,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             RIR_pad = RIR.shape[2] - 1
 
         end = time.time()
-        print(f"gpuRIR TIME: {start-end}")
+        print(f"gpuRIR TIME: {end-start}")
 
         start = time.time()
 
@@ -874,7 +874,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
 
         end = time.time()
-        print(f"PRA TIME: {start-end}")
+        print(f"PRA TIME: {end-start}")
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
