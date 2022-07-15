@@ -728,7 +728,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         # We invert Sabine's formula to obtain the parameters for the ISM simulator
         e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
-        room = pra.ShoeBox(room_dim, sr=16000, materials=pra.Material(e_absorption), max_order=max_order)
+        room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
 
         pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
         for pos in pos_src:
