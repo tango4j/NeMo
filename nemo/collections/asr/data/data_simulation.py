@@ -747,7 +747,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         # unused
         # abs_weights = self._params.data_simulator.rir_generation.absorbtion_params.abs_weights
         # att_diff = self._params.data_simulator.rir_generation.absorbtion_params.att_diff
-        # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
+        # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max 
 
         room.compute_rir()
         for i in room.rir:
