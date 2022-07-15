@@ -902,7 +902,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 array[start:end, :] += augmented_sentence
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
                 for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-                    array[start:end, channel] += augmented_sentence[channel]
+                    len_ch = len(augmented_sentence[channel]) #acounts for how channels are slightly different lengths
+                    array[start:start+len_ch, channel] += augmented_sentence[channel]
 
             #build entries for output files
             new_rttm_entry = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
