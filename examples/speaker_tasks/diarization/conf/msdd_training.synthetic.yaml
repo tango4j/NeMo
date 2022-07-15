@@ -126,7 +126,6 @@ msdd_model:
 
     rir_generation: #whether to generate synthetic RIR
       use_rir: false
-      toolkit: 'gpuRIR' #pyroomacoustics or gpuRIR
       #parameters match those used by https://github.com/DavidDiazGuerra/gpuRIR
       room_config:
         room_sz: # size of the shoebox room environment

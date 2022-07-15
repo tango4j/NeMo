@@ -662,8 +662,6 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         #check base arguments
         super()._check_args()
 
-        if self._params.data_simulator.rir_generation.toolkit != 'pyroomacoustics' and self._params.data_simulator.rir_generation.toolkit != 'gpuRIR':
-            raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
         if len(self._params.data_simulator.rir_generation.room_config.room_sz) != 3:
             raise Exception("Incorrect room dimensions provided")
         if self._params.data_simulator.rir_generation.mic_config.num_channels == 0:
@@ -693,7 +691,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 if len(sublist) != 3:
                     raise Exception("Three coordinates must be provided for orientations")
 
-    def _generate_rir_gpuRIR(self):
+    def _generate_rir(self):
         """
         Create simulated RIR
         """
@@ -717,45 +715,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         RIR = simulateRIR(room_sz, beta, pos_src, pos_rcv, nb_img, Tmax, sr, Tdiff=Tdiff, orV_rcv=orV_rcv, mic_pattern=mic_pattern)
         return RIR
 
-    def _generate_rir_pyroomacoustics(self):
-        """
-        Create simulated RIR
-        """
-
-        rt60 = self._params.data_simulator.rir_generation.absorbtion_params.T60  # The desired reverberation time
-        room_dim = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
-        sr = self._params.data_simulator.sr
-
-        # We invert Sabine's formula to obtain the parameters for the ISM simulator
-        e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
-        room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
-
-        pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
-        for pos in pos_src:
-            room.add_source(pos)
-
-        # orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
-        # if orV_rcv: #not needed for omni mics
-        #     orV_rcv = np.array(orV_rcv)
-        # mic_pattern = self._params.data_simulator.rir_generation.mic_config.mic_pattern
-        dir_obj = CardioidFamily(
-            orientation=DirectionVector(azimuth=90, colatitude=15, degrees=True),
-            pattern_enum=DirectivityPattern.OMNI,
-        )
-        room.add_microphone_array(np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv).T, directivity=dir_obj)
-
-        # unused
-        # abs_weights = self._params.data_simulator.rir_generation.absorbtion_params.abs_weights
-        # att_diff = self._params.data_simulator.rir_generation.absorbtion_params.att_diff
-        # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max 
-
-        room.compute_rir()
-        for i in room.rir:
-            for j in i:
-                print(j.shape)
-        return room.rir
-
-    def _convolve_rir_gpuRIR(self, speaker_turn, RIR):
+    def _convolve_rir(self, speaker_turn, RIR):
         """
         Augment sample using synthetic RIR
 
@@ -763,23 +723,6 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             speaker_turn (int): Current speaker turn.
             RIR (torch.tensor): Room Impulse Response.
         """
-        output_sound = []
-        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
-            output_sound.append(out_channel)
-        output_sound = torch.tensor(output_sound)
-        output_sound = torch.transpose(output_sound, 0, 1)
-        return output_sound
-
-    def _convolve_rir_pyroomacoustics(self, speaker_turn, RIR):
-        """
-        Augment sample using synthetic RIR
-
-        Args:
-            speaker_turn (int): Current speaker turn.
-            RIR (torch.tensor): Room Impulse Response.
-        """
-        print(RIR)
         output_sound = []
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
@@ -850,12 +793,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         self._missing_overlap = 0
 
         #Room Impulse Response Generation (performed once per batch of sessions)
-        if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-            RIR = self._generate_rir_gpuRIR()
-        elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-            RIR = self._generate_rir_pyroomacoustics()
-        else:
-            raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
+        RIR = self._generate_rir()
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
@@ -884,12 +822,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr)
 
             #augment sentence
-            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                augmented_sentence = self._convolve_rir_gpuRIR(speaker_turn, RIR)
-            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                augmented_sentence = self._convolve_rir_pyroomacoustics(speaker_turn, RIR)
-            else:
-                raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
+            augmented_sentence = self._convolve_rir(speaker_turn, RIR)
 
             length = augmented_sentence.shape[0]
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)

@@ -46,7 +46,6 @@ data_simulator:
 
   rir_generation: #whether to generate synthetic RIR
     use_rir: true
-    toolkit: 'pyroomacoustics' #pyroomacoustics or gpuRIR
     #parameters match those used by https://github.com/DavidDiazGuerra/gpuRIR
     room_config:
       room_sz: # size of the shoebox room environment
