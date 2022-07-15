@@ -783,7 +783,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         """
         output_sound = []
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(self._sentence, RIR[channel, speaker_turn, : len(self._sentence)]).tolist()
+            out_channel = convolve(self._sentence, RIR[channel][speaker_turn][:len(self._sentence)]).tolist()
             output_sound.append(out_channel)
         output_sound = torch.tensor(output_sound)
         output_sound = torch.transpose(output_sound, 0, 1)
