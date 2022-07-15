@@ -855,6 +855,15 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         start = time.time()
 
         for i in range(0,100):
+            RIR = self._generate_rir_gpuRIR()
+            RIR_pad = RIR.shape[2] - 1
+
+        end = time.time()
+        print(f"gpuRIR TIME: {start-end}")
+
+        start = time.time()
+
+        for i in range(0,100):
             #Room Impulse Response Generation (performed once per batch of sessions)
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
                 RIR = self._generate_rir_gpuRIR()
@@ -865,16 +874,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
 
         end = time.time()
-        print('PRA TIME: {start-end}')
-
-        start = time.time()
-
-        for i in range(0,100):
-            RIR = self._generate_rir_gpuRIR()
-            RIR_pad = RIR.shape[2] - 1
-
-        end = time.time()
-        print('gpuRIR TIME: {start-end}')
+        print(f"PRA TIME: {start-end}")
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
