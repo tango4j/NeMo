@@ -785,12 +785,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         length = 0
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[channel][speaker_turn][:len(self._sentence)]).tolist()
-            if out_channel.shape[0] > length:
-                length = out_channel.shape[0]
+            if len(out_channel) > length:
+                length = len(out_channel)
             output_sound.append(torch.tensor(out_channel))
-            # output_sound.append(out_channel)
-        # output_sound = torch.tensor(output_sound)
-        # output_sound = torch.transpose(output_sound, 0, 1)
         return output_sound,length
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
