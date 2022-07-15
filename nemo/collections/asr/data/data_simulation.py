@@ -750,6 +750,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
 
         room.compute_rir()
+        for i in room.rir:
+            for j in i:
+                print(j.shape)
         return room.rir
 
     def _convolve_rir_gpuRIR(self, speaker_turn, RIR):
