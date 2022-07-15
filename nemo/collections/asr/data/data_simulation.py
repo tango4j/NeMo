@@ -750,12 +750,12 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
 
         room.compute_rir()
-        print(len(room.rir))
+        rir_pad = 0
         for i in room.rir:
-            print(len(i))
             for j in i:
-                print(j.shape)
-        return room.rir
+                if j.shape[0] > rir_pad:
+                    rir_pad = j.shape[0]
+        return room.rir,rir_pad
 
     def _convolve_rir_gpuRIR(self, speaker_turn, RIR):
         """
@@ -781,10 +781,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             speaker_turn (int): Current speaker turn.
             RIR (torch.tensor): Room Impulse Response.
         """
-        print(RIR)
         output_sound = []
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
+            out_channel = convolve(self._sentence, RIR[channel, speaker_turn, : len(self._sentence)]).tolist()
             output_sound.append(out_channel)
         output_sound = torch.tensor(output_sound)
         output_sound = torch.transpose(output_sound, 0, 1)
@@ -854,8 +853,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         #Room Impulse Response Generation (performed once per batch of sessions)
         if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
             RIR = self._generate_rir_gpuRIR()
+            RIR_pad = RIR.shape[2] - 1
         elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-            RIR = self._generate_rir_pyroomacoustics()
+            RIR,RIR_pad = self._generate_rir_pyroomacoustics()
         else:
             raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
 
@@ -878,7 +878,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
 
             # build sentence (only add if remaining length >  specific time)
-            max_sentence_duration_sr = session_length_sr - running_length_sr - (RIR.shape[2] - 1) #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
+            max_sentence_duration_sr = session_length_sr - running_length_sr - rir_pad #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
             if enforce:
                 max_sentence_duration_sr = float('inf')
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
