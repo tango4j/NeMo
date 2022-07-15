@@ -27,6 +27,12 @@ from scipy.signal import convolve
 import soundfile as sf
 from omegaconf import OmegaConf
 from gpuRIR import att2t_SabineEstimator, beta_SabineEstimation, simulateRIR, t2n
+import pyroomacoustics as pra
+from pyroomacoustics.directivities import (
+    DirectivityPattern,
+    DirectionVector,
+    CardioidFamily,
+)
 
 from collections import Counter
 from nemo.collections.asr.parts.utils.speaker_utils import labels_to_rttmfile
@@ -656,6 +662,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         #check base arguments
         super()._check_args()
 
+        if self._params.data_simulator.rir_generation.toolkit != 'pyroomacoustics' and self._params.data_simulator.rir_generation.toolkit != 'gpuRIR':
+            raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
         if len(self._params.data_simulator.rir_generation.room_config.room_sz) != 3:
             raise Exception("Incorrect room dimensions provided")
         if self._params.data_simulator.rir_generation.mic_config.num_channels == 0:
@@ -685,7 +693,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 if len(sublist) != 3:
                     raise Exception("Three coordinates must be provided for orientations")
 
-    def _generate_rir(self):
+    def _generate_rir_gpuRIR(self):
         """
         Create simulated RIR
         """
@@ -709,6 +717,41 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         RIR = simulateRIR(room_sz, beta, pos_src, pos_rcv, nb_img, Tmax, sr, Tdiff=Tdiff, orV_rcv=orV_rcv, mic_pattern=mic_pattern)
         return RIR
 
+    def _generate_rir_pyroomacoustics(self):
+        """
+        Create simulated RIR
+        """
+
+        rt60 = self._params.data_simulator.rir_generation.absorbtion_params.T60  # The desired reverberation time
+        room_dim = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
+        sr = self._params.data_simulator.sr
+
+        # We invert Sabine's formula to obtain the parameters for the ISM simulator
+        e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
+        room = pra.ShoeBox(room_dim, sr=16000, materials=pra.Material(e_absorption), max_order=max_order)
+
+        pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
+        for pos in pos_src:
+            room.add_source(pos)
+
+        # orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
+        # if orV_rcv: #not needed for omni mics
+        #     orV_rcv = np.array(orV_rcv)
+        # mic_pattern = self._params.data_simulator.rir_generation.mic_config.mic_pattern
+        dir_obj = CardioidFamily(
+            orientation=None,
+            pattern_enum=DirectivityPattern.OMNI,
+        )
+        room.add_microphone_array(np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv), directivity=dir_obj)
+
+        # unused
+        # abs_weights = self._params.data_simulator.rir_generation.absorbtion_params.abs_weights
+        # att_diff = self._params.data_simulator.rir_generation.absorbtion_params.att_diff
+        # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
+
+        room.compute_rir()
+        return room.rir
+
     def _convolve_rir(self, speaker_turn, RIR):
         """
         Augment sample using synthetic RIR
@@ -725,7 +768,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         output_sound = torch.transpose(output_sound, 0, 1)
         return output_sound
 
-    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR):
+    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
         """
         Build new sentence
 
@@ -755,16 +798,13 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             audio_file = torch.from_numpy(audio_file)
             sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
-        #augment sentence
-        augmented_sentence = self._convolve_rir(speaker_turn, RIR)
-
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
-            if torch.max(torch.abs(augmented_sentence)) > 0:
-                average_rms = torch.sqrt(torch.mean(augmented_sentence**2))
-                augmented_sentence = augmented_sentence / (1.0 * average_rms)
+            if torch.max(torch.abs(self._sentence)) > 0:
+                average_rms = torch.sqrt(torch.mean(self._sentence**2))
+                self._sentence = self._sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
-        return augmented_sentence
+        #TODO account for voice activity when normalizing
 
     def _generate_session(self, idx, basepath, filename):
         """
@@ -790,7 +830,12 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         self._missing_overlap = 0
 
         #Room Impulse Response Generation (performed once per batch of sessions)
-        RIR = self._generate_rir()
+        if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+            RIR = self._generate_rir_gpuRIR()
+        elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+            RIR = self._generate_rir_pyroomacoustics()
+        else:
+            raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
@@ -816,7 +861,10 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 max_sentence_duration_sr = float('inf')
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
                 break
-            augmented_sentence = self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr, RIR)
+            self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr)
+
+            #augment sentence
+            augmented_sentence = self._convolve_rir(speaker_turn, RIR)
 
             length = augmented_sentence.shape[0]
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
