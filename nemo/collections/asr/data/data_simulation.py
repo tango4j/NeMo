@@ -750,17 +750,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
 
         room.compute_rir()
+        return room.rir
 
-        target_room = []
-        for l in room.rir:
-            r = []
-            for sublist in l:
-                r.append(sublist.tolist())
-            target_room.append(r)
-        target_room = torch.tensor(target_room)
-        return target_room
-
-    def _convolve_rir(self, speaker_turn, RIR):
+    def _convolve_rir_gpuRIR(self, speaker_turn, RIR):
         """
         Augment sample using synthetic RIR
 
@@ -768,6 +760,23 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             speaker_turn (int): Current speaker turn.
             RIR (torch.tensor): Room Impulse Response.
         """
+        output_sound = []
+        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+            out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
+            output_sound.append(out_channel)
+        output_sound = torch.tensor(output_sound)
+        output_sound = torch.transpose(output_sound, 0, 1)
+        return output_sound
+
+    def _convolve_rir_pyroomacoustics(self, speaker_turn, RIR):
+        """
+        Augment sample using synthetic RIR
+
+        Args:
+            speaker_turn (int): Current speaker turn.
+            RIR (torch.tensor): Room Impulse Response.
+        """
+        print(RIR)
         output_sound = []
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
             out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
@@ -872,7 +881,12 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr)
 
             #augment sentence
-            augmented_sentence = self._convolve_rir(speaker_turn, RIR)
+            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+                augmented_sentence = self._convolve_rir_gpuRIR(speaker_turn, RIR)
+            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+                augmented_sentence = self._convolve_rir_pyroomacoustics(speaker_turn, RIR)
+            else:
+                raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
 
             length = augmented_sentence.shape[0]
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
