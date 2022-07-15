@@ -739,7 +739,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         #     orV_rcv = np.array(orV_rcv)
         # mic_pattern = self._params.data_simulator.rir_generation.mic_config.mic_pattern
         dir_obj = CardioidFamily(
-            orientation=None,
+            orientation=DirectionVector(azimuth=90, colatitude=15, degrees=True),,
             pattern_enum=DirectivityPattern.OMNI,
         )
         room.add_microphone_array(np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv), directivity=dir_obj)
