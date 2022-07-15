@@ -878,7 +878,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             speaker_turn = self._get_next_speaker(prev_speaker, speaker_dominance)
 
             # build sentence (only add if remaining length >  specific time)
-            max_sentence_duration_sr = session_length_sr - running_length_sr - rir_pad #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
+            max_sentence_duration_sr = session_length_sr - running_length_sr - RIR_pad #sentence will be RIR_len - 1 longer than the audio was pre-augmentation
             if enforce:
                 max_sentence_duration_sr = float('inf')
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
