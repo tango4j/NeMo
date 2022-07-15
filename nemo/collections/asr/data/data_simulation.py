@@ -749,14 +749,15 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         # att_diff = self._params.data_simulator.rir_generation.absorbtion_params.att_diff
         # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
 
-        print(room)
         room.compute_rir()
-        print(room.rir)
 
-        for i in room.rir:
-            for j in i:
-                print(j[1000:1500])
-        return room.rir
+        target_room = []
+        for l in room.rir:
+            r = []
+            for sublist in l:
+                r.append(sublist.tolist())
+            target_room.append(r)
+        return target_room
 
     def _convolve_rir(self, speaker_turn, RIR):
         """
