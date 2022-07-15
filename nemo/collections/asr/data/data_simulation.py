@@ -755,7 +755,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         for i in room.rir:
             for j in i:
-                print(j.shape)
+                print(j[1000:1500])
         return room.rir
 
     def _convolve_rir(self, speaker_turn, RIR):
