@@ -757,6 +757,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             for sublist in l:
                 r.append(sublist.tolist())
             target_room.append(r)
+        target_room = torch.tensor(target_room)
         return target_room
 
     def _convolve_rir(self, speaker_turn, RIR):
