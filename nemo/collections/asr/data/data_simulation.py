@@ -486,18 +486,18 @@ class LibriSpeechGenerator(object):
             if self._words[i] == "" and i > 0:
                 silence_length = self._alignments[i] - self._alignments[i-1]
                 if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
-                    new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
+                    new_end = start + self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
                     s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
                     e = float(round(new_end,self._params.data_simulator.outputs.output_precision))
                     utterance = f"{s} {e} {speaker_id}"
                     rttm_list.append(utterance)
-                    new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
+                    new_start = start + self._alignments[i] - self._params.data_simulator.session_params.split_buffer
 
         utterance = f"{new_start} {end} {speaker_id}"
         rttm_list.append(utterance)
-        print('start: ', start)
-        print('end: ', end)
-        print('rttm: ', rttm_list)
+        # print('start: ', start)
+        # print('end: ', end)
+        # print('rttm: ', rttm_list)
         return rttm_list
 
     def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
