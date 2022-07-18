@@ -455,22 +455,7 @@ class LibriSpeechGenerator(object):
             else:
                 new_start = start + silence_amount
 
-        self._update_alignments(start, new_start)
         return new_start
-
-    def _update_alignments(self, start, new_start):
-        """
-        Update word alignments after inserting overlap/silence
-
-        Args:
-            start (int): Current start of the audio file being inserted.
-            new_start (int): Updated start of the audio file being inserted.
-        """
-        print('base alignments: ', self._alignments)
-        diff = new_start-start
-        for i in range(0,len(self._alignments)):
-            self._alignments[i] += float( diff * 1.0 / self._params.data_simulator.sr)
-        print('updated alignments: ', self._alignments)
 
     def _create_new_rttm_entry(self, start, end, speaker_id):
         """
