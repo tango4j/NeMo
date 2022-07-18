@@ -245,6 +245,28 @@ class LibriSpeechGenerator(object):
                     speaker_turn += 1
             return speaker_turn
 
+    def _get_window(self, window_amount, start=False):
+        """
+        Get window
+
+        Args:
+            window_amount (int): Window length (in terms of number of samples).
+            start (bool): If true, return first half of the window.
+        """
+        if self._params.data_simulator.session_params.window_type == 'hamming':
+            window = hamming(window_amount*2)
+        elif self._params.data_simulator.session_params.window_type == 'hann':
+            window = hann(window_amount*2)
+        elif self._params.data_simulator.session_params.window_type == 'cosine':
+            window = cosine(window_amount*2)
+        else:
+            raise Exception("Incorrect window type provided")
+
+        if start:
+            return window[:window_amount]
+        else:
+            return window[window_amount:]
+
     def _add_file(self, file, audio_file, sentence_duration, max_sentence_duration, max_sentence_duration_sr, first_sentence):
         """
         Add audio file to current sentence
@@ -300,14 +322,7 @@ class LibriSpeechGenerator(object):
         # add audio clip up to the final alignment
         if first_sentence and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
             if (window_amount > 0): #include window
-                if self._params.data_simulator.session_params.window_type == 'hamming':
-                    window = hamming(window_amount*2)[window_amount:]
-                elif self._params.data_simulator.session_params.window_type == 'hann':
-                    window = hann(window_amount*2)[window_amount:]
-                elif self._params.data_simulator.session_params.window_type == 'cosine':
-                    window = cosine(window_amount*2)[window_amount:]
-                else:
-                    raise Exception("Incorrect window type provided")
+                window = self._get_window(window_amount, start=True)
             if (window_amount > 0): #include window
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff:start_cutoff+window_amount], window)), 0)
 
@@ -333,14 +348,7 @@ class LibriSpeechGenerator(object):
                 window_amount = len(audio_file[prev_dur_sr:]) - release_buffer
 
             if (window_amount > 0): #include window
-                if self._params.data_simulator.session_params.window_type == 'hamming':
-                    window = hamming(window_amount*2)[window_amount:]
-                elif self._params.data_simulator.session_params.window_type == 'hann':
-                    window = hann(window_amount*2)[window_amount:]
-                elif self._params.data_simulator.session_params.window_type == 'cosine':
-                    window = cosine(window_amount*2)[window_amount:]
-                else:
-                    raise Exception("Incorrect window type provided")
+                window = self._get_window(window_amount, start=False)
 
             self._sentence = torch.cat((self._sentence, audio_file[prev_dur_sr:prev_dur_sr+release_buffer]), 0)
             if (window_amount > 0): #include window
@@ -441,7 +449,6 @@ class LibriSpeechGenerator(object):
         diff = new_start-start
         for i in range(0,len(self._alignments)):
             self._alignments[i] += float( diff * 1.0 / self._params.data_simulator.sr)
-
 
     def _create_new_rttm_entry(self, start, length, speaker_id):
         """
