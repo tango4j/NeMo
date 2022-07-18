@@ -361,7 +361,7 @@ class LibriSpeechGenerator(object):
             prev_dur_sr = dur_sr
 
         # add audio clip up to the final alignment
-        if first_sentence and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
+        if first_sentence and self._params.data_simulator.session_params.window_type != None: #cut off the start of the sentence
             if (start_window_amount > 0): #include window
                 window = self._get_window(start_window_amount, start=True)
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff:start_cutoff+start_window_amount], window)), 0)
@@ -370,18 +370,13 @@ class LibriSpeechGenerator(object):
             self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
 
         #windowing at the end of the sentence
-        if i < len(file['words']) and self._params.data_simulator.session_params.window_type != None:
-            remaining_len_audio_file = len(audio_file[prev_dur_sr:])
-            release_buffer, end_window_amount = self._get_end_buffer_and_window(prev_dur_sr, remaining_duration_sr, start_cutoff, remaining_len_audio_file)
-
+        if (nw == remaining_duration or dur_sr >= remaining_duration_sr) and self._params.data_simulator.session_params.window_type != None:
+            release_buffer, end_window_amount = self._get_end_buffer_and_window(prev_dur_sr, remaining_duration_sr, start_cutoff, len(audio_file[prev_dur_sr:]))
             self._sentence = torch.cat((self._sentence, audio_file[prev_dur_sr:prev_dur_sr+release_buffer]), 0)
             if (end_window_amount > 0): #include window
                 window = self._get_window(end_window_amount, start=False)
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[prev_dur_sr+release_buffer:prev_dur_sr+release_buffer+end_window_amount], window)), 0)
 
-        #zero pad if close to end of the clip
-        if dur_sr > remaining_duration_sr + start_cutoff:
-            self._sentence = torch.nn.functional.pad(self._sentence, (0, max_sentence_duration_sr - len(self._sentence)))
         return sentence_duration+nw, len(self._sentence)
 
     # returns new overlapped (or shifted) start position
