@@ -470,17 +470,18 @@ class LibriSpeechGenerator(object):
         for i in range(0,len(self._alignments)):
             self._alignments[i] += float( diff * 1.0 / self._params.data_simulator.sr)
 
-    def _create_new_rttm_entry(self, start, length, speaker_id):
+    def _create_new_rttm_entry(self, start, end, speaker_id):
         """
         Create new RTTM entries (to write to output rttm file)
 
         Args:
             start (int): Current start of the audio file being inserted.
-            length (int): Length of the audio file being inserted.
+            end (int): End of the audio file being inserted.
             speaker_id (int): LibriSpeech speaker ID for the current entry.
         """
         rttm_list = []
         new_start = start
+        orig_end = end
         #look for split locations
         for i in range(0, len(self._words)):
             if self._words[i] == "" and i > 0:
@@ -493,7 +494,7 @@ class LibriSpeechGenerator(object):
                     rttm_list.append(utterance)
                     new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
 
-        utterance = f"{new_start} {length + start - new_start} {speaker_id}"
+        utterance = f"{new_start} {orig_end} {speaker_id}"
         rttm_list.append(utterance)
         return rttm_list
 
