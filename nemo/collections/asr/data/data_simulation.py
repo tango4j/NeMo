@@ -466,9 +466,11 @@ class LibriSpeechGenerator(object):
             start (int): Current start of the audio file being inserted.
             new_start (int): Updated start of the audio file being inserted.
         """
+        print('base alignments: ', self._alignments)
         diff = new_start-start
         for i in range(0,len(self._alignments)):
             self._alignments[i] += float( diff * 1.0 / self._params.data_simulator.sr)
+        print('updated alignments: ', self._alignments)
 
     def _create_new_rttm_entry(self, start, end, speaker_id):
         """
@@ -486,8 +488,6 @@ class LibriSpeechGenerator(object):
             if self._words[i] == "" and i > 0:
                 silence_length = self._alignments[i] - self._alignments[i-1]
                 if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
-                    print('self._alignments[i-1]: ', self._alignments[i-1])
-                    print('self._alignments[i]: ', self._alignments[i])
                     new_end = start + self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
                     s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
                     e = float(round(new_end,self._params.data_simulator.outputs.output_precision))
@@ -495,14 +495,10 @@ class LibriSpeechGenerator(object):
                     rttm_list.append(utterance)
                     new_start = start + self._alignments[i] - self._params.data_simulator.session_params.split_buffer
 
-
         s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
         e = float(round(end,self._params.data_simulator.outputs.output_precision))
         utterance = f"{s} {e} {speaker_id}"
         rttm_list.append(utterance)
-        print('start: ', start)
-        print('end: ', end)
-        print('rttm: ', rttm_list)
         return rttm_list
 
     def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
