@@ -297,6 +297,8 @@ class LibriSpeechGenerator(object):
                 start_cutoff = 0
             else:
                 start_cutoff = first_alignment - start_buffer - window_amount
+        else:
+            start_cutoff = 0
 
         #ensure the desired number of words are added and the length of the output session isn't exceeded
         while (nw < remaining_duration and dur_sr < remaining_duration_sr and i < len(file['words'])):
@@ -329,7 +331,6 @@ class LibriSpeechGenerator(object):
             self._sentence = torch.cat((self._sentence, audio_file[start_cutoff+window_amount:prev_dur_sr]), 0)
         else:
             self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
-            start_cutoff = 0
 
         #windowing at the end of the sentence
         if i < len(file['words']) and self._params.data_simulator.session_params.window_type != None:
