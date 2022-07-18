@@ -104,6 +104,7 @@ msdd_model:
       window_type: hamming # type of windowing used when segmenting utterances (hamming, hann, cosine)
       window_size: 0.05 # length of window at end of segmented utterance (seconds)
       start_buffer: 0.1 # buffer of silence before the start of the sentence
+      split_buffer: 0.1 # split RTTM if greater than twice this amount of gap
       release_buffer: 0.1 # buffer before window at end of sentence
       normalization: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
       normalization_var: 0.1 # variance in speaker volume
