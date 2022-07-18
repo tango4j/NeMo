@@ -8,7 +8,7 @@ data_simulator:
   session_config:
     num_speakers: 4 # number of unique speakers per diarization session
     num_sessions: 5 # number of sessions
-    session_length: 600 # length of each diarization session (seconds)
+    session_length: 100 # length of each diarization session (seconds)
 
   session_params:
     sentence_length_params: # k,p values for negative_binomial distribution
