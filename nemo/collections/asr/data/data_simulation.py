@@ -486,6 +486,8 @@ class LibriSpeechGenerator(object):
             if self._words[i] == "" and i > 0:
                 silence_length = self._alignments[i] - self._alignments[i-1]
                 if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
+                    print('self._alignments[i-1]: ', self._alignments[i-1])
+                    print('self._alignments[i]: ', self._alignments[i])
                     new_end = start + self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
                     s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
                     e = float(round(new_end,self._params.data_simulator.outputs.output_precision))
@@ -493,7 +495,10 @@ class LibriSpeechGenerator(object):
                     rttm_list.append(utterance)
                     new_start = start + self._alignments[i] - self._params.data_simulator.session_params.split_buffer
 
-        utterance = f"{new_start} {end} {speaker_id}"
+
+        s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
+        e = float(round(end,self._params.data_simulator.outputs.output_precision))
+        utterance = f"{s} {e} {speaker_id}"
         rttm_list.append(utterance)
         print('start: ', start)
         print('end: ', end)
