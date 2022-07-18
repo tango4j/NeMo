@@ -245,7 +245,7 @@ class LibriSpeechGenerator(object):
                     speaker_turn += 1
             return speaker_turn
 
-    def _add_file(self, file, audio_file, sentence_duration, max_sentence_duration, max_sentence_duration_sr):
+    def _add_file(self, file, audio_file, sentence_duration, max_sentence_duration, max_sentence_duration_sr, first_sentence):
         """
         Add audio file to current sentence
 
@@ -284,27 +284,71 @@ class LibriSpeechGenerator(object):
             prev_dur_sr = dur_sr
 
         # add audio clip up to the final alignment
-        self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
+        if first_sentence and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
+            window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
+            start_buffer = int(self._params.data_simulator.session_params.release_buffer*self._params.data_simulator.sr)
 
-        #windowing
+            first_alignment = self._alignments[0]*self._params.data_simulator.sr
+
+            if first_alignment < start_buffer:
+                window_amount = 0
+                start_cutoff = 0
+            elif first_alignment < start_buffer + window_amount:
+                window_amount = first_alignment - start_buffer
+                start_cutoff = 0
+            else:
+                start_cutoff = first_alignment - start_buffer - window_amount
+
+            if (window_amount > 0): #include window
+                if self._params.data_simulator.session_params.window_type == 'hamming':
+                    window = hamming(window_amount*2)[window_amount:]
+                elif self._params.data_simulator.session_params.window_type == 'hann':
+                    window = hann(window_amount*2)[window_amount:]
+                elif self._params.data_simulator.session_params.window_type == 'cosine':
+                    window = cosine(window_amount*2)[window_amount:]
+                else:
+                    raise Exception("Incorrect window type provided")
+
+            if (window_amount > 0): #include window
+                self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff:start_cutoff+window_amount], window)), 0)
+
+            self._sentence = torch.cat((self._sentence, audio_file[start_cutoff+window_amount:prev_dur_sr]), 0)
+        else:
+            self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
+            start_cutoff = 0
+
+        #windowing at the end of the sentence
         if i < len(file['words']) and self._params.data_simulator.session_params.window_type != None:
             window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
-            if prev_dur_sr+window_amount > remaining_duration_sr:
-                window_amount = remaining_duration_sr - prev_dur_sr
-            if self._params.data_simulator.session_params.window_type == 'hamming':
-                window = hamming(window_amount*2)[window_amount:]
-            elif self._params.data_simulator.session_params.window_type == 'hann':
-                window = hann(window_amount*2)[window_amount:]
-            elif self._params.data_simulator.session_params.window_type == 'cosine':
-                window = cosine(window_amount*2)[window_amount:]
-            else:
-                raise Exception("Incorrect window type provided")
-            if len(audio_file[prev_dur_sr:]) < window_amount:
-                audio_file = torch.nn.functional.pad(audio_file, (0, window_amount - len(audio_file[prev_dur_sr:])))
-            self._sentence = torch.cat((self._sentence, np.multiply(audio_file[prev_dur_sr:prev_dur_sr+window_amount], window)), 0)
+            release_buffer = int(self._params.data_simulator.session_params.release_buffer*self._params.data_simulator.sr)
+            if prev_dur_sr+release_buffer > remaining_duration_sr + start_cutoff:
+                release_buffer = remaining_duration_sr + start_cutoff - prev_dur_sr
+                window_amount = 0
+            elif prev_dur_sr+window_amount+release_buffer > remaining_duration_sr + start_cutoff:
+                window_amount = remaining_duration_sr + start_cutoff - prev_dur_sr - release_buffer
+
+            if len(audio_file[prev_dur_sr:]) < release_buffer:
+                release_buffer = len(audio_file[prev_dur_sr:])
+                window_amount = 0
+            elif len(audio_file[prev_dur_sr:]) < release_buffer + window_amount:
+                window_amount = len(audio_file[prev_dur_sr:]) - release_buffer
+
+            if (window_amount > 0): #include window
+                if self._params.data_simulator.session_params.window_type == 'hamming':
+                    window = hamming(window_amount*2)[window_amount:]
+                elif self._params.data_simulator.session_params.window_type == 'hann':
+                    window = hann(window_amount*2)[window_amount:]
+                elif self._params.data_simulator.session_params.window_type == 'cosine':
+                    window = cosine(window_amount*2)[window_amount:]
+                else:
+                    raise Exception("Incorrect window type provided")
+
+            self._sentence = torch.cat((self._sentence, audio_file[prev_dur_sr:prev_dur_sr+release_buffer]), 0)
+            if (window_amount > 0): #include window
+                self._sentence = torch.cat((self._sentence, np.multiply(audio_file[prev_dur_sr+release_buffer:prev_dur_sr+release_buffer+window_amount], window)), 0)
 
         #zero pad if close to end of the clip
-        if dur_sr > remaining_duration_sr:
+        if dur_sr > remaining_duration_sr + start_cutoff:
             self._sentence = torch.nn.functional.pad(self._sentence, (0, max_sentence_duration_sr - len(self._sentence)))
         return sentence_duration+nw, len(self._sentence)
 
@@ -472,7 +516,8 @@ class LibriSpeechGenerator(object):
             file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
             audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
             audio_file = torch.from_numpy(audio_file)
-            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+            first_sentence = (sentence_duration == 0)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr, first_sentence)
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
@@ -735,27 +780,23 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         for pos in pos_src:
             room.add_source(pos)
 
-        # orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
-        # if orV_rcv: #not needed for omni mics
-        #     orV_rcv = np.array(orV_rcv)
-        # mic_pattern = self._params.data_simulator.rir_generation.mic_config.mic_pattern
+        orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
+        mic_pattern = self._params.data_simulator.rir_generation.mic_config.mic_pattern
+        if self._params.data_simulator.rir_generation.mic_config.mic_pattern == 'omni':
+            mic_pattern = DirectivityPattern.OMNI
+            dir_vec = DirectionVector(azimuth=0, colatitude=90, degrees=True)
         dir_obj = CardioidFamily(
-            orientation=DirectionVector(azimuth=90, colatitude=15, degrees=True),
-            pattern_enum=DirectivityPattern.OMNI,
+            orientation=dir_vec,
+            pattern_enum=mic_pattern,
         )
         room.add_microphone_array(np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv).T, directivity=dir_obj)
 
-        # unused
-        # abs_weights = self._params.data_simulator.rir_generation.absorbtion_params.abs_weights
-        # att_diff = self._params.data_simulator.rir_generation.absorbtion_params.att_diff
-        # att_max = self._params.data_simulator.rir_generation.absorbtion_params.att_max
-
         room.compute_rir()
         rir_pad = 0
-        for i in room.rir:
-            for j in i:
-                if j.shape[0] > rir_pad:
-                    rir_pad = j.shape[0]
+        for channel in room.rir:
+            for pos in channel:
+                if pos.shape[0] > rir_pad:
+                    rir_pad = pos.shape[0]
         return room.rir,rir_pad
 
     def _convolve_rir_gpuRIR(self, speaker_turn, RIR):
@@ -819,7 +860,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
             audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
             audio_file = torch.from_numpy(audio_file)
-            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+            first_sentence = (sentence_duration == 0)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr, first_sentence)
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
@@ -852,29 +894,14 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         self._missing_overlap = 0
 
-        start = time.time()
-
-        for i in range(0,100):
+        #Room Impulse Response Generation (performed once per batch of sessions)
+        if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
             RIR = self._generate_rir_gpuRIR()
             RIR_pad = RIR.shape[2] - 1
-
-        end = time.time()
-        print(f"gpuRIR TIME: {end-start}")
-
-        start = time.time()
-
-        for i in range(0,100):
-            #Room Impulse Response Generation (performed once per batch of sessions)
-            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                RIR = self._generate_rir_gpuRIR()
-                RIR_pad = RIR.shape[2] - 1
-            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                RIR,RIR_pad = self._generate_rir_pyroomacoustics()
-            else:
-                raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
-
-        end = time.time()
-        print(f"PRA TIME: {end-start}")
+        elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+            RIR,RIR_pad = self._generate_rir_pyroomacoustics()
+        else:
+            raise Exception("Toolkit must be pyroomacoustics or gpuRIR")
 
         #hold enforce until all speakers have spoken
         enforce_counter = 2
