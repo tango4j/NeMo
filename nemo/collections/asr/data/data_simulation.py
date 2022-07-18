@@ -481,20 +481,19 @@ class LibriSpeechGenerator(object):
         """
         rttm_list = []
         new_start = start
-        orig_end = end
         #look for split locations
         for i in range(0, len(self._words)):
             if self._words[i] == "" and i > 0:
                 silence_length = self._alignments[i] - self._alignments[i-1]
                 if silence_length > 2*self._params.data_simulator.session_params.split_buffer: #split utterance on silence
-                    end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
+                    new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
                     s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
-                    l = float(round(end,self._params.data_simulator.outputs.output_precision))
-                    utterance = f"{s} {l} {speaker_id}"
+                    e = float(round(new_end,self._params.data_simulator.outputs.output_precision))
+                    utterance = f"{s} {e} {speaker_id}"
                     rttm_list.append(utterance)
                     new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
 
-        utterance = f"{new_start} {orig_end} {speaker_id}"
+        utterance = f"{new_start} {end} {speaker_id}"
         rttm_list.append(utterance)
         return rttm_list
 
