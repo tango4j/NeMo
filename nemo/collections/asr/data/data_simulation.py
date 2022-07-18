@@ -262,6 +262,20 @@ class LibriSpeechGenerator(object):
         prev_dur_sr = dur_sr = 0
         nw = i = 0
 
+        if first_sentence and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
+            window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
+            start_buffer = int(self._params.data_simulator.session_params.start_buffer*self._params.data_simulator.sr)
+            first_alignment = int(file['alignments'][0]*self._params.data_simulator.sr)
+
+            if first_alignment < start_buffer:
+                window_amount = 0
+                start_cutoff = 0
+            elif first_alignment < start_buffer + window_amount:
+                window_amount = first_alignment - start_buffer
+                start_cutoff = 0
+            else:
+                start_cutoff = first_alignment - start_buffer - window_amount
+
         #ensure the desired number of words are added and the length of the output session isn't exceeded
         while (nw < remaining_duration and dur_sr < remaining_duration_sr and i < len(file['words'])):
             dur_sr = int(file['alignments'][i] * self._params.data_simulator.sr)
@@ -270,7 +284,7 @@ class LibriSpeechGenerator(object):
 
             word = file['words'][i]
             self._words.append(word)
-            self._alignments.append(int(sentence_duration_sr / self._params.data_simulator.sr) + file['alignments'][i])
+            self._alignments.append(float(sentence_duration_sr * 1.0 / self._params.data_simulator.sr) - float(start_cutoff * 1.0 / self._params.data_simulator.sr) + file['alignments'][i])
 
             if word == "":
                 i+=1
@@ -285,19 +299,6 @@ class LibriSpeechGenerator(object):
 
         # add audio clip up to the final alignment
         if first_sentence and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
-            window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
-            start_buffer = int(self._params.data_simulator.session_params.release_buffer*self._params.data_simulator.sr)
-            first_alignment = int(self._alignments[0]*self._params.data_simulator.sr)
-
-            if first_alignment < start_buffer:
-                window_amount = 0
-                start_cutoff = 0
-            elif first_alignment < start_buffer + window_amount:
-                window_amount = first_alignment - start_buffer
-                start_cutoff = 0
-            else:
-                start_cutoff = first_alignment - start_buffer - window_amount
-
             if (window_amount > 0): #include window
                 if self._params.data_simulator.session_params.window_type == 'hamming':
                     window = hamming(window_amount*2)[window_amount:]
@@ -307,7 +308,6 @@ class LibriSpeechGenerator(object):
                     window = cosine(window_amount*2)[window_amount:]
                 else:
                     raise Exception("Incorrect window type provided")
-
             if (window_amount > 0): #include window
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff:start_cutoff+window_amount], window)), 0)
 
@@ -414,20 +414,34 @@ class LibriSpeechGenerator(object):
 
             if overlap_amount < 0:
                 overlap_amount = 0
-
             if overlap_amount < desired_overlap_amount:
                 self._missing_overlap += desired_overlap_amount - overlap_amount
 
-            return new_start
         else:
             # add silence
             silence_percent = halfnorm(loc=0, scale=mean_silence_percent*np.sqrt(np.pi)/np.sqrt(2)).rvs()
             silence_amount = int(length * silence_percent)
 
             if start + length + silence_amount > session_length_sr and not enforce:
-                return session_length_sr - length
+                new_start = session_length_sr - length
             else:
-                return start + silence_amount
+                new_start = start + silence_amount
+
+        self._update_alignments(start, new_start)
+        return new_start
+
+    def _update_alignments(self, start, new_start):
+        """
+        Update word alignments after inserting overlap/silence
+
+        Args:
+            start (int): Current start of the audio file being inserted.
+            new_start (int): Updated start of the audio file being inserted.
+        """
+        diff = new_start-start
+        for i in range(0,len(self._alignments)):
+            self._alignments[i] += float( diff * 1.0 / self._params.data_simulator.sr)
+
 
     def _create_new_rttm_entry(self, start, length, speaker_id):
         """
