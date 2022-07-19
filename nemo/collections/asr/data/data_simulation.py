@@ -570,15 +570,18 @@ class LibriSpeechGenerator(object):
                 silence_length = self._alignments[i] - self._alignments[i-1]
                 if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
                     new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
-                    splits.append([new_start, new_end])
+                    splits.append([int(new_start * self._params.data_simulator.sr), int(new_end * self._params.data_simulator.sr)])
                     new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
         splits.append([new_start, len(self._sentence)])
-        print(splits)
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
             if torch.max(torch.abs(self._sentence)) > 0:
-                average_rms = torch.sqrt(torch.mean(self._sentence**2))
+                split_length = split_sum = 0
+                for split in splits:
+                    split_length += len(self._sentence[split[0]:split[1]])
+                    split_sum += torch.sum(self._sentence[split[0]:split[1]]**2)
+                average_rms = torch.sqrt(split_sum*1.0/split_length)
                 self._sentence = self._sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
