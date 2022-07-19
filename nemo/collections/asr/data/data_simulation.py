@@ -386,6 +386,7 @@ class LibriSpeechGenerator(object):
         print('start cutoff: ', float(start_cutoff * 1.0 / self._params.data_simulator.sr))
         print('len sentence: ', len(self._sentence) * 1.0 / self._params.data_simulator.sr)
         print('len audio_file: ', len(audio_file[:prev_dur_sr]) * 1.0 / self._params.data_simulator.sr)
+        print('len  full audio_file: ', len(audio_file) * 1.0 / self._params.data_simulator.sr)
 
         return sentence_duration+nw, len(self._sentence)
 
