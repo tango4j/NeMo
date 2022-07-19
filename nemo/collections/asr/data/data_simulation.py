@@ -381,6 +381,9 @@ class LibriSpeechGenerator(object):
         self._words.append("")
         self._alignments.append(float(sentence_duration_sr * 1.0 / self._params.data_simulator.sr) + float(len(self._sentence) * 1.0 / self._params.data_simulator.sr))
 
+        print('words: ', self._words)
+        print('alignments: ', self._alignments)
+        
         return sentence_duration+nw, len(self._sentence)
 
     # returns new overlapped (or shifted) start position
@@ -488,10 +491,6 @@ class LibriSpeechGenerator(object):
         e = float(round(end,self._params.data_simulator.outputs.output_precision))
         utterance = f"{s} {e} {speaker_id}"
         rttm_list.append(utterance)
-        print('rttm: ', rttm_list)
-        print('words: ', self._words)
-        print('alignments: ', self._alignments)
-        self._alignments
         return rttm_list
 
     def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
@@ -538,7 +537,6 @@ class LibriSpeechGenerator(object):
                 align2 = float(round(self._alignments[i] - self._alignments[i-1], self._params.data_simulator.outputs.output_precision))
                 text = f"{session_name} {speaker_id} {align1} {align2} {word} 0\n"
                 arr.append((align1, text))
-        print('ctm: ', arr)
         return arr
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
