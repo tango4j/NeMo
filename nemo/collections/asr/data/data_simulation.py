@@ -366,7 +366,7 @@ class LibriSpeechGenerator(object):
             if (start_window_amount > 0): #include window
                 window = self._get_window(start_window_amount, start=True)
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff:start_cutoff+start_window_amount], window)), 0)
-            self._sentence = torch.cat((self._sentence, audio_file[start_cutoff+start_window_amount:prev_dur_sr]), 0)
+            self._sentence = torch.cat((self._sentence, audio_file[start_cutoff+start_window_amount:start_cutoff+prev_dur_sr]), 0)
         else:
             self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
 
@@ -386,7 +386,7 @@ class LibriSpeechGenerator(object):
         print('start cutoff: ', float(start_cutoff * 1.0 / self._params.data_simulator.sr))
         print('len sentence: ', len(self._sentence) * 1.0 / self._params.data_simulator.sr)
         print('len audio_file: ', len(audio_file[:prev_dur_sr]) * 1.0 / self._params.data_simulator.sr)
-        print('len  full audio_file: ', len(audio_file) * 1.0 / self._params.data_simulator.sr)
+        print('len full audio_file: ', len(audio_file) * 1.0 / self._params.data_simulator.sr)
 
         return sentence_duration+nw, len(self._sentence)
 
