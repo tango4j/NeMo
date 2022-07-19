@@ -486,6 +486,9 @@ class LibriSpeechGenerator(object):
         utterance = f"{s} {e} {speaker_id}"
         rttm_list.append(utterance)
         print('rttm: ', rttm_list)
+        print('words: ', self._words)
+        print('alignments: ', self._alignments)
+        self._alignments
         return rttm_list
 
     def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
