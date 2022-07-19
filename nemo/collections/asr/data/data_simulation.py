@@ -383,7 +383,9 @@ class LibriSpeechGenerator(object):
 
         print('words: ', self._words)
         print('alignments: ', self._alignments)
-        
+        print('len sentence: ', len(self._sentence) * 1.0 / self._params.data_simulator.sr)
+        print('len audio_file: ', len(audio_file[:prev_dur_sr]) * 1.0 / self._params.data_simulator.sr)
+
         return sentence_duration+nw, len(self._sentence)
 
     # returns new overlapped (or shifted) start position
