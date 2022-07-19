@@ -1070,7 +1070,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
                 augmented_bg = self._convolve_bg_pyroomacoustics(bg, RIR)
                 for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-                    array[:,channel] += augmented_bg[:length,channel]
+                    array[:,channel] += augmented_bg[channel][:length]
 
         array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
