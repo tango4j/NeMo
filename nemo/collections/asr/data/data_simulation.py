@@ -585,6 +585,39 @@ class LibriSpeechGenerator(object):
                 self._sentence = self._sentence / (1.0 * average_rms)
         #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
+    def _get_background(self, len_array, power_array):
+        """
+        Augment with background noise
+
+        Args:
+            len_array (int): Length of background noise required.
+            avg_power_array (float): Average power of the audio file.
+        """
+
+        bg_dir = self._params.data_simulator.background_noise.background_dir
+        desired_snr = self._params.data_simulator.background_noise.snr
+        ratio = 10 ** (desired_snr / 20)
+        desired_avg_power_noise = power_array / ratio
+
+        bg_files = os.listdir(bg_files)
+        bg_array = torch.zeros(len_array)
+        running_len = 0
+        while running_len < len_array:
+            file_id = np.random.randint(0, len(bg_files) - 1)
+            file = bg_files[file_id]
+            audio_file, sr = librosa.load(file, sr=self._params.data_simulator.sr)
+            audio_file = torch.from_numpy(audio_file)
+
+            if running_len+len(audio_file) < len_array:
+                end_audio_file = running_len+len(audio_file)
+            else:
+                end_audio_file = len_array
+
+            bg_array[running_len:end_audio_file] = audio_file
+            running_len = end_audio_file
+
+        return bg_array
+
     def _generate_session(self, idx, basepath, filename):
         """
         Generate diarization session
@@ -655,6 +688,12 @@ class LibriSpeechGenerator(object):
             self._furthest_sample[speaker_turn] = running_length_sr
             prev_speaker = speaker_turn
             prev_length_sr = length
+
+        #background noise augmentation
+        if self._params.data_simulator.background_noise.add_bg:
+            avg_power_array = torch.mean(array**2)
+            bg = self._get_background(len(array), avg_power_array)
+            array += bg
 
         array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
@@ -891,44 +930,6 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 length = len(out_channel)
             output_sound.append(torch.tensor(out_channel))
         return output_sound,length
-
-    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
-        """
-        Build new sentence
-
-        Args:
-            speaker_turn (int): Current speaker turn.
-            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
-            speaker_lists (list): List of samples for each speaker in the session.
-            max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
-            RIR (torch.tensor): Room Impulse Response.
-        """
-        # select speaker length
-        sl = np.random.negative_binomial(
-            self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
-        ) + 1
-
-        # initialize sentence, text, words, alignments
-        self._sentence = torch.zeros(0)
-        self._text = ""
-        self._words = []
-        self._alignments = []
-        sentence_duration = sentence_duration_sr = 0
-
-        # build sentence
-        while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
-            file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
-            audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
-            audio_file = torch.from_numpy(audio_file)
-            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
-
-        #per-speaker normalization
-        if self._params.data_simulator.session_params.normalization == 'equal':
-            if torch.max(torch.abs(self._sentence)) > 0:
-                average_rms = torch.sqrt(torch.mean(self._sentence**2))
-                self._sentence = self._sentence / (1.0 * average_rms)
-        #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
-        #TODO account for voice activity when normalizing
 
     def _generate_session(self, idx, basepath, filename):
         """
