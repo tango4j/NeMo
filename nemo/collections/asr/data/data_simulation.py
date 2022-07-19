@@ -1062,14 +1062,15 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         #background noise augmentation
         if self._params.data_simulator.background_noise.add_bg:
             avg_power_array = torch.mean(array**2)
-            bg = self._get_background(len(array), avg_power_array)
+            length = array.shape[0]
+            bg = self._get_background(length, avg_power_array)
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
                 augmented_bg = self._convolve_bg_gpuRIR(bg, RIR)
-                array += augmented_bg[:len(array),:]
+                array += augmented_bg[:length,:]
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
                 augmented_bg = self._convolve_bg_pyroomacoustics(bg, RIR)
                 for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-                    array += augmented_bg[:len(array),channel]
+                    array[:,channel] += augmented_bg[:length,channel]
 
         array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)

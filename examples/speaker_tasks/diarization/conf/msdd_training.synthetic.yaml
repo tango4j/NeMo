@@ -87,8 +87,8 @@ msdd_model:
 
     session_config:
       num_speakers: 4 # number of unique speakers per diarization session
-      num_sessions: 5 # number of sessions
-      session_length: 300 # length of each diarization session (seconds)
+      num_sessions: 1 # number of sessions
+      session_length: 600 # length of each diarization session (seconds)
 
     session_params:
       sentence_length_params: # k,p values for negative_binomial distribution
@@ -116,6 +116,11 @@ msdd_model:
       overwrite_output: true
       output_precision: 3 # number of decimal places in output files
 
+    background_noise:
+      add_bg: true
+      background_dir: null
+      snr: 60
+
     speaker_enforcement:
       enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
       enforce_time:  # percentage of the way through the audio session that enforcement mode is triggered
@@ -130,45 +135,6 @@ msdd_model:
 
     rir_generation: #whether to generate synthetic RIR
       use_rir: false
-      toolkit: 'gpuRIR' #pyroomacoustics or gpuRIR
-      #parameters match those used by https://github.com/DavidDiazGuerra/gpuRIR
-      room_config:
-        room_sz: # size of the shoebox room environment
-        - 3
-        - 3
-        - 2.5
-        pos_src: # positions of the speakers in the simulated room environment
-        - - 0.6
-          - 1.1
-          - 0.5
-        - - 1
-          - 2
-          - 0.5
-        - - 0.4
-          - 1.1
-          - 0.5
-        - - 1
-          - 2.1
-          - 0.5
-      mic_config:
-        num_channels: 1 # number of output audio channels
-        pos_rcv: # microphone positions in the simulated room environment
-        - - 0.5
-          - 1
-          - 0.5
-        orV_rcv: null # microphone orientations (needed for non-omnidirectional microphones)
-        mic_pattern: omni # microphone type (eg. omnidirectional)
-      absorbtion_params:
-        abs_weights: # absorption coefficient ratios for each surface
-        - 0.9
-        - 0.9
-        - 0.9
-        - 0.9
-        - 0.9
-        - 0.9
-        T60: 0.1 # room reverberation time
-        att_diff: 15.0 # starting attenuation (if this is different than att_max, the diffuse reverberation model is used)
-        att_max: 60.0 # end attenuation
 
   validation_ds:
     manifest_filepath: ???
