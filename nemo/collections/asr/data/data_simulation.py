@@ -625,16 +625,13 @@ class LibriSpeechGenerator(object):
                 array = torch.nn.functional.pad(array, (0, end - len(array)))
             array[start:end] += self._sentence
 
-            print('start: ', start)
             #build entries for output files
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
-            print('new_rttm_entries: ', new_rttm_entries)
             for entry in new_rttm_entries:
                 rttm_list.append(entry)
             new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
             json_list.append(new_json_entry)
             new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
-            print('new_ctm_entries: ', new_ctm_entries)
             for entry in new_ctm_entries:
                 ctm_list.append(entry)
 
