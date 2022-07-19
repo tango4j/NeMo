@@ -572,7 +572,7 @@ class LibriSpeechGenerator(object):
                     new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
                     splits.append([int(new_start * self._params.data_simulator.sr), int(new_end * self._params.data_simulator.sr)])
                     new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
-        splits.append([new_start * self._params.data_simulator.sr, len(self._sentence)])
+        splits.append([int(new_start * self._params.data_simulator.sr), len(self._sentence)])
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
