@@ -332,7 +332,7 @@ class LibriSpeechGenerator(object):
         prev_dur_sr = dur_sr = 0
         nw = i = 0
 
-        if first_sentence and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
+        if (sentence_duration == 0) and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
             first_alignment = int(file['alignments'][0]*self._params.data_simulator.sr)
             start_cutoff, start_window_amount = self._get_start_buffer_and_window(first_alignment)
         else:
