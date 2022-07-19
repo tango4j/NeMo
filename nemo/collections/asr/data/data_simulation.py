@@ -288,25 +288,24 @@ class LibriSpeechGenerator(object):
 
         return start_cutoff, window_amount
 
-    def _get_end_buffer_and_window(self, prev_dur_sr, remaining_duration_sr, start_cutoff, remaining_len_audio_file):
+    def _get_end_buffer_and_window(self, current_sr, remaining_duration_sr, remaining_len_audio_file):
         """
         Get the end buffer and window length
 
         Args:
-            prev_dur_sr (int): Current location in the target file (in terms of number of samples).
+            current_sr (int): Current location in the target file (in terms of number of samples).
             remaining_duration_sr (int): Remaining duration in the target file (in terms of number of samples).
-            start_cutoff (int): Remaining duration in the target file (in terms of number of samples).
             remaining_len_audio_file (int): Length remaining in audio file (in terms of number of samples).
         """
 
         window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
         release_buffer = int(self._params.data_simulator.session_params.release_buffer*self._params.data_simulator.sr)
 
-        if prev_dur_sr + release_buffer > remaining_duration_sr + start_cutoff:
-            release_buffer = remaining_duration_sr + start_cutoff - prev_dur_sr
+        if current_sr + release_buffer > remaining_duration_sr:
+            release_buffer = remaining_duration_sr - current_sr
             window_amount = 0
-        elif prev_dur_sr + window_amount + release_buffer > remaining_duration_sr + start_cutoff:
-            window_amount = remaining_duration_sr + start_cutoff - prev_dur_sr - release_buffer
+        elif current_sr + window_amount + release_buffer > remaining_duration_sr:
+            window_amount = remaining_duration_sr - current_sr - release_buffer
 
         if remaining_len_audio_file < release_buffer:
             release_buffer = remaining_len_audio_file
@@ -316,7 +315,7 @@ class LibriSpeechGenerator(object):
 
         return release_buffer, window_amount
 
-    def _add_file(self, file, audio_file, sentence_duration, max_sentence_duration, max_sentence_duration_sr, first_sentence):
+    def _add_file(self, file, audio_file, sentence_duration, max_sentence_duration, max_sentence_duration_sr):
         """
         Add audio file to current sentence
 
@@ -339,9 +338,11 @@ class LibriSpeechGenerator(object):
         else:
             start_cutoff = 0
 
+        remaining_duration_sr = max_sentence_duration_sr - sentence_duration_sr
+
         #ensure the desired number of words are added and the length of the output session isn't exceeded
         while (nw < remaining_duration and dur_sr < remaining_duration_sr and i < len(file['words'])):
-            dur_sr = int(file['alignments'][i] * self._params.data_simulator.sr)
+            dur_sr = int(file['alignments'][i] * self._params.data_simulator.sr) - start_cutoff
             if dur_sr > remaining_duration_sr:
                 break
 
@@ -361,7 +362,7 @@ class LibriSpeechGenerator(object):
             prev_dur_sr = dur_sr
 
         # add audio clip up to the final alignment
-        if first_sentence and self._params.data_simulator.session_params.window_type != None: #cut off the start of the sentence
+        if (sentence_duration == 0) and self._params.data_simulator.session_params.window_type != None: #cut off the start of the sentence
             if (start_window_amount > 0): #include window
                 window = self._get_window(start_window_amount, start=True)
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff:start_cutoff+start_window_amount], window)), 0)
@@ -371,11 +372,11 @@ class LibriSpeechGenerator(object):
 
         #windowing at the end of the sentence
         if (nw == remaining_duration or dur_sr >= remaining_duration_sr) and self._params.data_simulator.session_params.window_type != None:
-            release_buffer, end_window_amount = self._get_end_buffer_and_window(prev_dur_sr, remaining_duration_sr, start_cutoff, len(audio_file[prev_dur_sr:]))
-            self._sentence = torch.cat((self._sentence, audio_file[prev_dur_sr:prev_dur_sr+release_buffer]), 0)
+            release_buffer, end_window_amount = self._get_end_buffer_and_window(prev_dur_sr, remaining_duration_sr, len(audio_file[start_cutoff+prev_dur_sr:]))
+            self._sentence = torch.cat((self._sentence, audio_file[start_cutoff+prev_dur_sr:start_cutoff+prev_dur_sr+release_buffer]), 0)
             if (end_window_amount > 0): #include window
                 window = self._get_window(end_window_amount, start=False)
-                self._sentence = torch.cat((self._sentence, np.multiply(audio_file[prev_dur_sr+release_buffer:prev_dur_sr+release_buffer+end_window_amount], window)), 0)
+                self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff+prev_dur_sr+release_buffer:start_cutoff+prev_dur_sr+release_buffer+end_window_amount], window)), 0)
 
         return sentence_duration+nw, len(self._sentence)
 
@@ -525,9 +526,9 @@ class LibriSpeechGenerator(object):
         start = float(round(start,self._params.data_simulator.outputs.output_precision))
         for i in range(0, len(self._words)):
             word = self._words[i]
-            align1 = float(round(self._alignments[i-1] + start, self._params.data_simulator.outputs.output_precision))
-            align2 = float(round(self._alignments[i] - self._alignments[i-1], self._params.data_simulator.outputs.output_precision))
             if word != "": #note that using the current alignments the first word is always empty, so there is no error from indexing the array with i-1
+                align1 = float(round(self._alignments[i-1] + start, self._params.data_simulator.outputs.output_precision))
+                align2 = float(round(self._alignments[i] - self._alignments[i-1], self._params.data_simulator.outputs.output_precision))
                 text = f"{session_name} {speaker_id} {align1} {align2} {word} 0\n"
                 arr.append((align1, text))
         return arr
@@ -559,8 +560,7 @@ class LibriSpeechGenerator(object):
             file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
             audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
             audio_file = torch.from_numpy(audio_file)
-            first_sentence = (sentence_duration == 0)
-            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr, first_sentence)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
@@ -904,8 +904,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
             audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
             audio_file = torch.from_numpy(audio_file)
-            first_sentence = (sentence_duration == 0)
-            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr, first_sentence)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
