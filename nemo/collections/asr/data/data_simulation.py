@@ -378,6 +378,9 @@ class LibriSpeechGenerator(object):
                 window = self._get_window(end_window_amount, start=False)
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff+prev_dur_sr+release_buffer:start_cutoff+prev_dur_sr+release_buffer+end_window_amount], window)), 0)
 
+        self._words.append("")
+        self._alignments.append(float(sentence_duration_sr * 1.0 / self._params.data_simulator.sr) + float(len(self._sentence) * 1.0 / self._params.data_simulator.sr))
+
         return sentence_duration+nw, len(self._sentence)
 
     # returns new overlapped (or shifted) start position
