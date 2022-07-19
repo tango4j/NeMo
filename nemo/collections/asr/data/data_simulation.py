@@ -599,7 +599,7 @@ class LibriSpeechGenerator(object):
         ratio = 10 ** (desired_snr / 20)
         desired_avg_power_noise = power_array / ratio
 
-        bg_files = os.listdir(bg_files)
+        bg_files = os.listdir(bg_dir)
         bg_array = torch.zeros(len_array)
         running_len = 0
         while running_len < len_array:
@@ -613,7 +613,9 @@ class LibriSpeechGenerator(object):
             else:
                 end_audio_file = len_array
 
-            bg_array[running_len:end_audio_file] = audio_file
+            pow_audio_file = torch.mean(audio_file[:end_audio_file-running_len]**2)
+            scaled_audio_file = audio_file[:end_audio_file-running_len] * (desired_avg_power_noise / pow_audio_file)
+            bg_array[running_len:end_audio_file] = scaled_audio_file
             running_len = end_audio_file
 
         return bg_array
