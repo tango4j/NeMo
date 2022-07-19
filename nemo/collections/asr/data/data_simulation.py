@@ -614,6 +614,8 @@ class LibriSpeechGenerator(object):
                 end_audio_file = len_array
 
             pow_audio_file = torch.mean(audio_file[:end_audio_file-running_len]**2)
+            print('pow_audio_file: ', pow_audio_file)
+            print('desired_avg_power_noise: ', desired_avg_power_noise)
             scaled_audio_file = audio_file[:end_audio_file-running_len] * (desired_avg_power_noise / pow_audio_file)
             bg_array[running_len:end_audio_file] = scaled_audio_file
             running_len = end_audio_file
