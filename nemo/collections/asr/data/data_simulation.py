@@ -599,9 +599,6 @@ class LibriSpeechGenerator(object):
         ratio = 10 ** (desired_snr / 20)
         desired_avg_power_noise = power_array / ratio
 
-        print('power_array: ', power_array)
-        print('desired_avg_power_noise: ', desired_avg_power_noise)
-
         bg_files = os.listdir(bg_dir)
         bg_array = torch.zeros(len_array)
         running_len = 0
@@ -617,11 +614,8 @@ class LibriSpeechGenerator(object):
                 end_audio_file = len_array
 
             pow_audio_file = torch.mean(audio_file[:end_audio_file-running_len]**2)
-            print('pow_audio_file: ', pow_audio_file)
-
             scaled_audio_file = audio_file[:end_audio_file-running_len] * torch.sqrt(desired_avg_power_noise / pow_audio_file)
 
-            print('measured_pow_audio_file: ', torch.mean(scaled_audio_file**2))
             bg_array[running_len:end_audio_file] = scaled_audio_file
             running_len = end_audio_file
 
@@ -853,6 +847,9 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         """
         room_sz = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
         pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
+        if self._params.data_simulator.background_noise.add_bg:
+            pos_src.append(self._params.data_simulator.rir_generation.room_config.noise_src_pos)
+
         pos_rcv = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
         orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
         if orV_rcv: #not needed for omni mics
@@ -939,6 +936,36 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                 length = len(out_channel)
             output_sound.append(torch.tensor(out_channel))
         return output_sound,length
+
+    def _convolve_bg_gpuRIR(self, bg, RIR):
+        """
+        Augment background using synthetic RIR
+
+        Args:
+            bg (torch.tensor): Background noise signal.
+            RIR (torch.tensor): Room Impulse Response.
+        """
+        output_sound = []
+        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+            out_channel = convolve(bg, RIR[-1, channel, : len(self._sentence)]).tolist()
+            output_sound.append(out_channel)
+        output_sound = torch.tensor(output_sound)
+        output_sound = torch.transpose(output_sound, 0, 1)
+        return output_sound
+
+    def _convolve_bg_pyroomacoustics(self, bg, RIR):
+        """
+        Augment background using synthetic RIR
+
+        Args:
+            bg (torch.tensor): Background noise signal.
+            RIR (torch.tensor): Room Impulse Response.
+        """
+        output_sound = []
+        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+            out_channel = convolve(bg, RIR[channel][-1][:len(self._sentence)]).tolist()
+            output_sound.append(torch.tensor(out_channel))
+        return output_sound
 
     def _generate_session(self, idx, basepath, filename):
         """
@@ -1031,6 +1058,18 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             self._furthest_sample[speaker_turn] = running_length_sr
             prev_speaker = speaker_turn
             prev_length_sr = length
+
+        #background noise augmentation
+        if self._params.data_simulator.background_noise.add_bg:
+            avg_power_array = torch.mean(array**2)
+            bg = self._get_background(len(array), avg_power_array)
+            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+                augmented_bg = self._convolve_bg_gpuRIR(bg, RIR)
+                array += augmented_bg[:len(array),:]
+            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+                augmented_bg = self._convolve_bg_pyroomacoustics(bg, RIR)
+                for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+                    array += augmented_bg[:len(array),channel]
 
         array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)
