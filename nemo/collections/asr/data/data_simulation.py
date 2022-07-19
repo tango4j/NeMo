@@ -579,6 +579,7 @@ class LibriSpeechGenerator(object):
             if torch.max(torch.abs(self._sentence)) > 0:
                 split_length = split_sum = 0
                 for split in splits:
+                    print(split)
                     split_length += len(self._sentence[split[0]:split[1]])
                     split_sum += torch.sum(self._sentence[split[0]:split[1]]**2)
                 average_rms = torch.sqrt(split_sum*1.0/split_length)
