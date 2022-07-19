@@ -471,7 +471,7 @@ class LibriSpeechGenerator(object):
         new_start = start
         #look for split locations
         for i in range(0, len(self._words)):
-            if self._words[i] == "" and i > 0:
+            if self._words[i] == "" and i != 0 and i != len(self._words) - 1:
                 silence_length = self._alignments[i] - self._alignments[i-1]
                 if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
                     new_end = start + self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
@@ -485,6 +485,7 @@ class LibriSpeechGenerator(object):
         e = float(round(end,self._params.data_simulator.outputs.output_precision))
         utterance = f"{s} {e} {speaker_id}"
         rttm_list.append(utterance)
+        print('rttm: ', rttm_list)
         return rttm_list
 
     def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
@@ -531,6 +532,7 @@ class LibriSpeechGenerator(object):
                 align2 = float(round(self._alignments[i] - self._alignments[i-1], self._params.data_simulator.outputs.output_precision))
                 text = f"{session_name} {speaker_id} {align1} {align2} {word} 0\n"
                 arr.append((align1, text))
+        print('ctm: ', arr)
         return arr
 
     def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
