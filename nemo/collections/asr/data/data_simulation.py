@@ -562,6 +562,19 @@ class LibriSpeechGenerator(object):
             audio_file = torch.from_numpy(audio_file)
             sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
+        #look for split locations
+        splits = []
+        new_start = 0
+        for i in range(0, len(self._words)):
+            if self._words[i] == "" and i != 0 and i != len(self._words) - 1:
+                silence_length = self._alignments[i] - self._alignments[i-1]
+                if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
+                    new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
+                    splits.append([new_start, new_end])
+                    new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
+        splits.append([new_start, len(self._sentence)])
+        print(splits)
+
         #per-speaker normalization
         if self._params.data_simulator.session_params.normalization == 'equal':
             if torch.max(torch.abs(self._sentence)) > 0:
