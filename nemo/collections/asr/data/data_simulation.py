@@ -327,7 +327,8 @@ class LibriSpeechGenerator(object):
             if dur_sr > remaining_duration_sr:
                 break
 
-            self._words.append(file['words'][i])
+            word = file['words'][i]
+            self._words.append(word)
             self._alignments.append(float(sentence_duration_sr * 1.0 / self._params.data_simulator.sr) - float(start_cutoff * 1.0 / self._params.data_simulator.sr) + file['alignments'][i])
 
             if word == "":
