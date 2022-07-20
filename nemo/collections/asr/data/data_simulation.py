@@ -986,8 +986,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             print('end: ', end)
             print('len(array): ', len(array))
             if end > len(array):
-                print(array)
-                array = torch.nn.functional.pad(array, (0, end - len(array)))
+                print(array.shape)
+                array = torch.nn.functional.pad(array, (0, end - len(array), 0, end - len(array)))
             print('new len(array): ', len(array))
 
             print('length: ', length)
