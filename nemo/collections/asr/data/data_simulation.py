@@ -993,7 +993,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
             # print('length: ', length)
 
-            print('preaug')
+            # print('preaug')
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
                 array[start:end, :] += augmented_sentence
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
@@ -1002,7 +1002,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                     # print('len_ch: ', len_ch)
                     # print('len_array: ', len(array[start:start+len_ch, channel]))
                     array[start:start+len_ch, channel] += augmented_sentence[channel]
-            print('postaug')
+            # print('postaug')
 
             #build entries for output files
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
