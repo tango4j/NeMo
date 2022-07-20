@@ -827,6 +827,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         print(pos_src.shape)
         if self._params.data_simulator.background_noise.add_bg:
             pos_src = np.append(pos_src, self._params.data_simulator.rir_generation.room_config.noise_src_pos)
+        print(pos_src.shape)
 
         pos_rcv = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
         orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
@@ -860,7 +861,6 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
 
         pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
-        print(pos_src.shape)
         if self._params.data_simulator.background_noise.add_bg:
             pos_src = np.append(pos_src, self._params.data_simulator.rir_generation.room_config.noise_src_pos)
         for pos in pos_src:
