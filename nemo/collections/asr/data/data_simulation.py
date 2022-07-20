@@ -983,26 +983,17 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
-            # print('end: ', end)
-            # print('len(array): ', len(array))
             if end > len(array):
                 print(array.shape)
-                array = torch.nn.functional.pad(array, (0, 0, 0, end - len(array)))
+                array = torch.nn.functional.pad(array, (0, 0, 0, end - len(array))) #PRA
                 # array = torch.nn.functional.pad(array, (0, end - len(array)))
-            # print('new len(array): ', len(array))
 
-            # print('length: ', length)
-
-            # print('preaug')
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
                 array[start:end, :] += augmented_sentence
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
                 for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
                     len_ch = len(augmented_sentence[channel]) #acounts for how channels are slightly different lengths
-                    # print('len_ch: ', len_ch)
-                    # print('len_array: ', len(array[start:start+len_ch, channel]))
                     array[start:start+len_ch, channel] += augmented_sentence[channel]
-            # print('postaug')
 
             #build entries for output files
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
