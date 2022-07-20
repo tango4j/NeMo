@@ -987,8 +987,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             end = start + length
             if end > len(array):
                 print('before: ', array.shape)
-                array = torch.nn.functional.pad(array, (0, 0, 0, end - len(array))) #PRA
-                # array = torch.nn.functional.pad(array, (0, end - len(array)))
+                array = torch.nn.functional.pad(array, (0, 0, 0, end - len(array)))
                 print('after: ', array.shape)
 
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
