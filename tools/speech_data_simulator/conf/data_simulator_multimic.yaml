@@ -78,7 +78,7 @@ data_simulator:
       noise_src_pos:
       - 1.5
       - 1.5
-      - 2.5
+      - 2
     mic_config:
       num_channels: 2 # number of output audio channels
       pos_rcv: # microphone positions in the simulated room environment
