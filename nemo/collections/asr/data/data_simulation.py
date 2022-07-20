@@ -986,11 +986,15 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             if end > len(array):
                 array = torch.nn.functional.pad(array, (0, end - len(array)))
 
+            print('length: ', length)
+
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
                 array[start:end, :] += augmented_sentence
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
                 for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
                     len_ch = len(augmented_sentence[channel]) #acounts for how channels are slightly different lengths
+                    print('len_ch: ', len_ch)
+                    print('len_array: ', len(array[start:start+len_ch, channel]))
                     array[start:start+len_ch, channel] += augmented_sentence[channel]
 
             #build entries for output files
