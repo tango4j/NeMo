@@ -26,7 +26,8 @@ data_simulator:
     start_buffer: 0.1 # buffer of silence before the start of the sentence
     split_buffer: 0.1 # split RTTM if greater than twice this amount of gap
     release_buffer: 0.1 # buffer before window at end of sentence
-    normalization: variable # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
+    normalize: true
+    normalization_type: variable # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
     normalization_var: 0.1 # variance in speaker volume
     min_volume: 0.75
     max_volume: 1.25
