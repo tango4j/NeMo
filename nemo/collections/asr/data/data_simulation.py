@@ -75,6 +75,8 @@ class LibriSpeechGenerator(object):
         #creating manifests during online data simulation
         self.base_manifest_filepath = None
         self.segment_manifest_filepath = None
+        #variable speaker volume
+        self._volume = None
 
     def _check_args(self):
         """
@@ -209,6 +211,20 @@ class LibriSpeechGenerator(object):
             dominance = base_speaker_dominance
             enforce = False
         return dominance, enforce
+
+    def _set_speaker_volume(self):
+        """
+        Set the volume for each speaker
+        """
+        if self._params.data_simulator.session_params.normalization_type == 'equal':
+            self._volume = np.ones(self._params.data_simulator.session_config.num_speakers)
+        elif self._params.data_simulator.session_params.normalization_type == 'variable':
+            self._volume = np.random.normal(loc=1.0, scale=self._params.data_simulator.session_params.normalization_var, size=self._params.data_simulator.session_config.num_speakers)
+            for i in range(0, self._params.data_simulator.session_config.num_speakers):
+                if self._volume[i] < self._params.data_simulator.session_params.min_volume:
+                    self._volume[i] = self._params.data_simulator.session_params.min_volume
+                if self._volume[i] > self._params.data_simulator.session_params.max_volume:
+                    self._volume[i] = self._params.data_simulator.session_params.max_volume
 
     def _get_next_speaker(self, prev_speaker, dominance):
         """
@@ -403,15 +419,14 @@ class LibriSpeechGenerator(object):
         splits.append([int(new_start * self._params.data_simulator.sr), len(self._sentence)])
 
         #per-speaker normalization (accounting for active speaker time)
-        if self._params.data_simulator.session_params.normalization == 'equal':
+        if self._params.data_simulator.session_params.normalize:
             if torch.max(torch.abs(self._sentence)) > 0:
                 split_length = split_sum = 0
                 for split in splits:
                     split_length += len(self._sentence[split[0]:split[1]])
                     split_sum += torch.sum(self._sentence[split[0]:split[1]]**2)
                 average_rms = torch.sqrt(split_sum*1.0/split_length)
-                self._sentence = self._sentence / (1.0 * average_rms)
-        #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
+                self._sentence = self._sentence / (1.0 * average_rms) * self._volume[speaker_turn]
 
     # returns new overlapped (or shifted) start position
     def _add_silence_or_overlap(self, speaker_turn, prev_speaker, start, length, session_length_sr, prev_length_sr, enforce):
@@ -645,6 +660,7 @@ class LibriSpeechGenerator(object):
         speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
         base_speaker_dominance = np.copy(speaker_dominance)
         speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
+        self._set_speaker_volume()
 
         running_length_sr = prev_length_sr = 0  # starting point for each sentence
         start = end = 0
@@ -931,6 +947,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         speaker_dominance = self._get_speaker_dominance()  # randomly determine speaker dominance
         base_speaker_dominance = np.copy(speaker_dominance)
         speaker_lists = self._get_speaker_samples(speaker_ids)  # get list of samples per speaker
+        self._set_speaker_volume()
 
         running_length_sr = prev_length_sr = 0  # starting point for each sentence
         start = end = 0
