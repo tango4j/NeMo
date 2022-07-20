@@ -7,7 +7,7 @@ data_simulator:
 
   session_config:
     num_speakers: 4 # number of unique speakers per diarization session
-    num_sessions: 10 # number of sessions
+    num_sessions: 60 # number of sessions
     session_length: 600 # length of each diarization session (seconds)
 
   session_params:
