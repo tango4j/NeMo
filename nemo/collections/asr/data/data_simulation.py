@@ -983,6 +983,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
+            print('end: ', end)
+            print('len(array): ', len(array))
             if end > len(array):
                 array = torch.nn.functional.pad(array, (0, end - len(array)))
 
