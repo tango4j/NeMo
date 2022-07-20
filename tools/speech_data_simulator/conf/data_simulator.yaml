@@ -7,8 +7,8 @@ data_simulator:
 
   session_config:
     num_speakers: 4 # number of unique speakers per diarization session
-    num_sessions: 60 # number of sessions
-    session_length: 600 # length of each diarization session (seconds)
+    num_sessions: 10 # number of sessions
+    session_length: 60 # length of each diarization session (seconds)
 
   session_params:
     sentence_length_params: # k,p values for negative_binomial distribution
@@ -42,7 +42,7 @@ data_simulator:
     snr: 60
 
   speaker_enforcement:
-    enforce_num_speakers: false # enforce that all requested speakers are present in the output wav file
+    enforce_num_speakers: true # enforce that all requested speakers are present in the output wav file
     enforce_time:  # percentage of the way through the audio session that enforcement mode is triggered
     - 0.25
     - 0.75
