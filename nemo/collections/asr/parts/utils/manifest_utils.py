@@ -28,18 +28,40 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
 )
 
 def rreplace(s, old, new):
+    """
+    Replace end of string.
+
+    Args:
+        s (str): string to operate on
+        old (str): ending of string to replace
+        new (str): replacement for ending of string
+    """
     li = s.rsplit(old, 1)
     return new.join(li)
 
 def get_uniq_id_with_period(path):
+    """
+    Get file id.
+
+    Args:
+        path (str): path to audio file
+    """
     split_path = os.path.basename(path).split('.')[:-1]
     uniq_id = '.'.join(split_path) if len(split_path) > 1 else split_path[0]
     return uniq_id
 
 def get_subsegment_dict(subsegments_manifest_file, window, shift, deci):
+    """
+    Get subsegment dictionary from manifest file.
+
+    Args:
+        subsegments_manifest_file (str): Path to subsegment manifest file
+        window (float): Window length for segmentation
+        shift (float): Shift length for segmentation
+        deci (int): Rounding number of decimal places
+    """
     _subsegment_dict = {}
     with open(subsegments_manifest_file, 'r') as subsegments_manifest:
-        # print(f"Reading subsegments_manifest_file: {subsegments_manifest_file}")
         segments = subsegments_manifest.readlines()
         for segment in segments:
             segment = segment.strip()
@@ -56,6 +78,12 @@ def get_subsegment_dict(subsegments_manifest_file, window, shift, deci):
     return _subsegment_dict
 
 def get_input_manifest_dict(input_manifest_path):
+    """
+    Get dictionary from manifest file.
+
+    Args:
+        input_manifest_path (str): Path to manifest file
+    """
     input_manifest_dict = {}
     with open(input_manifest_path, 'r') as input_manifest_fp:
         json_lines = input_manifest_fp.readlines()
@@ -67,6 +95,16 @@ def get_input_manifest_dict(input_manifest_path):
     return input_manifest_dict
 
 def write_truncated_subsegments(input_manifest_dict, _subsegment_dict, output_manifest_path, step_count, deci):
+    """
+    Write subsegments to manifest filepath.
+
+    Args:
+        input_manifest_dict (dict): Input manifest dictionary
+        _subsegment_dict (dict): Input subsegment dictionary
+        output_manifest_path (str): Path to output manifest file
+        step_count (int): Number of the unit segments you want to create per utterance
+        deci (int): Rounding number of decimal places
+    """
     with open(output_manifest_path, 'w') as output_manifest_fp:
         for uniq_id, subseg_dict in _subsegment_dict.items():
             # print(f"Writing {uniq_id}")
@@ -87,6 +125,14 @@ def write_truncated_subsegments(input_manifest_dict, _subsegment_dict, output_ma
                 output_manifest_fp.write("\n")
 
 def write_file(name, lines, idx):
+    """
+    Write json lines to file.
+
+    Args:
+        name (str): Output file path
+        lines (list): List of json lines
+        idx (int): Indices to dump to the file
+    """
     with open(name, 'w') as fout:
         for i in idx:
             dic = lines[i]
@@ -94,10 +140,22 @@ def write_file(name, lines, idx):
             fout.write('\n')
 
 def read_file(pathlist):
+    """
+    Read list of lines from target file.
+
+    Args:
+        pathlist (str): Input file path
+    """
     pathlist = open(pathlist, 'r').readlines()
     return sorted(pathlist)
 
 def get_dict_from_wavlist(pathlist):
+    """
+    Read dictionaries from list of lines
+
+    Args:
+        pathlist (list): List of file paths
+    """
     path_dict = od()
     pathlist = sorted(pathlist)
     for line_path in pathlist:
@@ -106,6 +164,13 @@ def get_dict_from_wavlist(pathlist):
     return path_dict
 
 def get_dict_from_list(data_pathlist, uniqids):
+    """
+    Create dictionaries from list of lines
+
+    Args:
+        data_pathlist (list): List of file paths
+        uniqids (list): List of file IDs
+    """
     path_dict = {}
     for line_path in data_pathlist:
         uniq_id = os.path.basename(line_path).split('.')[0]
@@ -116,6 +181,14 @@ def get_dict_from_list(data_pathlist, uniqids):
     return path_dict
 
 def get_path_dict(data_path, uniqids, len_wavs=None):
+    """
+    Create dictionary from list of lines (using the get_dict_from_list function)
+
+    Args:
+        data_path (str): Path to file containing list of files
+        uniqids (list): List of file IDs
+        len_wavs (int): Length of file list
+    """
     if data_path is not None:
         data_pathlist = read_file(data_path)
         if len_wavs is not None:
@@ -126,6 +199,17 @@ def get_path_dict(data_path, uniqids, len_wavs=None):
     return data_pathdict
 
 def create_segment_manifest(input_manifest_path, output_manifest_path, window, shift, step_count, deci):
+    """
+    Create segmented manifest file from base manifest file
+
+    Args:
+        input_manifest_path (str): Path to input manifest file
+        output_manifest_path (str): Path to output manifest file
+        window (float): Window length for segmentation
+        shift (float): Shift length for segmentation
+        step_count (int): Number of the unit segments you want to create per utterance
+        deci (int): Rounding number of decimal places
+    """
     if '.json' not in input_manifest_path:
         raise ValueError("input_manifest_path file should be .json file format")
     if output_manifest_path and '.json' not in output_manifest_path:
@@ -158,6 +242,17 @@ def create_segment_manifest(input_manifest_path, output_manifest_path, window, s
     os.remove(subsegment_manifest_path)
 
 def create_manifest(wav_path, manifest_filepath, text_path=None, rttm_path=None, uem_path=None, ctm_path=None):
+    """
+    Create base manifest file
+
+    Args:
+        wav_path (str): Path to list of wav files
+        manifest_filepath (str): Path to output manifest file
+        text_path (str): Path to list of text files
+        rttm_path (str): Path to list of rttm files
+        uem_path (str): Path to list of uem files
+        ctm_path (str): Path to list of ctm files
+    """
     if os.path.exists(manifest_filepath):
         os.remove(manifest_filepath)
     wav_pathlist = read_file(wav_path)
@@ -217,6 +312,12 @@ def create_manifest(wav_path, manifest_filepath, text_path=None, rttm_path=None,
     write_file(manifest_filepath, lines, range(len(lines)))
 
 def read_manifest(manifest):
+    """
+    Read manifest file
+
+    Args:
+        manifest (str): Path to manifest file
+    """
     data = []
     with open(manifest, 'r', encoding='utf-8') as f:
         for line in f:
@@ -225,7 +326,44 @@ def read_manifest(manifest):
     return data
 
 def write_manifest(output_path, target_manifest):
+    """
+    Write to manifest file
+
+    Args:
+        output_path (str): Path to output manifest file
+        target_manifest (list): List of manifest file entries
+    """
     with open(output_path, "w") as outfile:
         for tgt in target_manifest:
             json.dump(tgt, outfile)
             outfile.write('\n')
+
+def write_ctm(output_path, target_ctm):
+    """
+    Write ctm entries from diarization session to a .ctm file.
+
+    Args:
+        output_path (str): target file path
+        target_ctm (dict): list of ctm entries
+    """
+    target_ctm.sort(key=lambda y: y[0])
+    with open(output_path, "w") as outfile:
+        for pair in target_ctm:
+            tgt = pair[1]
+            outfile.write(tgt)
+
+def write_text(output_path, target_ctm):
+    """
+    Write text from diarization session to a .txt file
+
+    Args:
+        output_path (str): target file path
+        target_ctm (dict): list of ctm entries
+    """
+    target_ctm.sort(key=lambda y: y[0])
+    with open(output_path, "w") as outfile:
+        for pair in target_ctm:
+            tgt = pair[1]
+            word = tgt.split(' ')[4]
+            outfile.write(word + ' ')
+        outfile.write('\n')

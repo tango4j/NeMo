@@ -27,6 +27,8 @@ from scipy.signal.windows import hamming, hann, cosine
 from scipy.signal import convolve
 import soundfile as sf
 from omegaconf import OmegaConf
+from collections import Counter
+
 from gpuRIR import att2t_SabineEstimator, beta_SabineEstimation, simulateRIR, t2n
 import pyroomacoustics as pra
 from pyroomacoustics.directivities import (
@@ -35,30 +37,16 @@ from pyroomacoustics.directivities import (
     CardioidFamily,
 )
 
-from collections import Counter
 from nemo.collections.asr.parts.utils.speaker_utils import labels_to_rttmfile
 from nemo.collections.asr.parts.utils.manifest_utils import (
     create_manifest,
     create_segment_manifest,
     read_manifest,
-    write_manifest
+    write_manifest,
+    write_text,
+    write_ctm
 )
-
-def write_ctm(output_path, target_ctm):
-    target_ctm.sort(key=lambda y: y[0])
-    with open(output_path, "w") as outfile:
-        for pair in target_ctm:
-            tgt = pair[1]
-            outfile.write(tgt)
-
-def write_text(output_path, target_ctm):
-    target_ctm.sort(key=lambda y: y[0])
-    with open(output_path, "w") as outfile:
-        for pair in target_ctm:
-            tgt = pair[1]
-            word = tgt.split(' ')[4]
-            outfile.write(word + ' ')
-        outfile.write('\n')
+from nemo.utils import logging
 
 class LibriSpeechGenerator(object):
     """
@@ -70,8 +58,7 @@ class LibriSpeechGenerator(object):
 
     def __init__(self, cfg):
         self._params = cfg
-        #error check arguments
-        self._check_args()
+        self._check_args() #error check arguments
         # internal params
         try:
             self._manifest = read_manifest(self._params.data_simulator.manifest_path)
@@ -85,13 +72,13 @@ class LibriSpeechGenerator(object):
         self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
         #use to ensure overlap percentage is correct
         self._missing_overlap = 0
-        #creating manifests
+        #creating manifests during online data simulation
         self.base_manifest_filepath = None
         self.segment_manifest_filepath = None
 
     def _check_args(self):
         """
-        Checks arguments to ensure they are within valid ranges
+        Checks YAML arguments to ensure they are within valid ranges
         """
         if self._params.data_simulator.session_config.num_speakers < 2:
             raise Exception("Atleast two speakers are required for multispeaker audio sessions (num_speakers < 2)")
@@ -124,7 +111,7 @@ class LibriSpeechGenerator(object):
 
     def _get_speaker_ids(self):
         """
-        Randomly select speaker IDs from loaded dict
+        Randomly select speaker IDs from loaded manifest file
         """
         speaker_ids = []
         s = 0
@@ -132,31 +119,28 @@ class LibriSpeechGenerator(object):
             file = self._manifest[np.random.randint(0, len(self._manifest) - 1)]
             fn = file['audio_filepath'].split('/')[-1]
             speaker_id = fn.split('-')[0]
-            # ensure speaker ids are not duplicated
-            if speaker_id not in speaker_ids:
+            if speaker_id not in speaker_ids: # ensure speaker ids are not duplicated
                 speaker_ids.append(speaker_id)
                 s += 1
         return speaker_ids
 
     def _get_speaker_samples(self, speaker_ids):
         """
-        Get a list of the samples for the specified speakers
+        Get a list of the samples for each of the specified speakers
 
         Args:
             speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
         """
         speaker_lists = {}
         for i in range(0, self._params.data_simulator.session_config.num_speakers):
-            spid = speaker_ids[i]
-            speaker_lists[str(spid)] = []
-
+            speaker_lists[str(speaker_ids[i])] = []
+        # loop over manifest and add files corresponding to each speaker to each sublist
         for file in self._manifest:
             fn = file['audio_filepath'].split('/')[-1]
             new_speaker_id = fn.split('-')[0]
             for spid in speaker_ids:
                 if spid == new_speaker_id:
                     speaker_lists[str(spid)].append(file)
-
         return speaker_lists
 
     def _load_speaker_sample(self, speaker_lists, speaker_ids, speaker_turn):
@@ -170,8 +154,8 @@ class LibriSpeechGenerator(object):
         """
         speaker_id = speaker_ids[speaker_turn]
         file_id = np.random.randint(0, len(speaker_lists[str(speaker_id)]) - 1)
-        file = speaker_lists[str(speaker_id)][file_id]
-        return file
+        file_path = speaker_lists[str(speaker_id)][file_id]
+        return file_path
 
     def _get_speaker_dominance(self):
         """
@@ -191,7 +175,7 @@ class LibriSpeechGenerator(object):
         dominance = (dominance / total)*(1-self._params.data_simulator.session_params.min_dominance*self._params.data_simulator.session_config.num_speakers)
         for i in range(0,len(dominance)):
           dominance[i]+=self._params.data_simulator.session_params.min_dominance
-          if i > 0:
+          if i > 0: # dominance values are cumulative to make it easy to select the speaker using a random value in [0,1]
             dominance[i] = dominance[i] + dominance[i-1]
         return dominance
 
@@ -213,14 +197,15 @@ class LibriSpeechGenerator(object):
             dominance = np.copy(base_speaker_dominance)
             for i in range(len(dominance)-1,0,-1):
                 dominance[i] = dominance[i] - dominance[i-1]
-            #increase specified speakers by the desired factor and renormalize
+            #increase specified speakers by the desired factor
             for i in increase_percent:
                 dominance[i] = dominance[i] * factor
+            #renormalize
             dominance = dominance / np.sum(dominance)
             for i in range(1,len(dominance)):
                 dominance[i] = dominance[i] + dominance[i-1]
             enforce = True
-        else:
+        else: #no unrepresented speakers, so enforce mode can be turned off
             dominance = base_speaker_dominance
             enforce = False
         return dominance, enforce
@@ -237,8 +222,7 @@ class LibriSpeechGenerator(object):
             return prev_speaker
         else:
             speaker_turn = prev_speaker
-            #ensure another speaker goes next
-            while speaker_turn == prev_speaker:
+            while speaker_turn == prev_speaker: #ensure another speaker goes next
                 rand = np.random.uniform(0, 1)
                 speaker_turn = 0
                 while rand > dominance[speaker_turn]:
@@ -261,7 +245,7 @@ class LibriSpeechGenerator(object):
             window = cosine(window_amount*2)
         else:
             raise Exception("Incorrect window type provided")
-
+        #return first half or second half of the window
         if start:
             return window[:window_amount]
         else:
@@ -326,28 +310,24 @@ class LibriSpeechGenerator(object):
             max_sentence_duration (int): Maximum count for number of words in sentence
             max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
         """
-        sentence_duration_sr = len(self._sentence)
-        remaining_duration_sr = max_sentence_duration_sr - sentence_duration_sr
-        remaining_duration = max_sentence_duration - sentence_duration
-        prev_dur_sr = dur_sr = 0
-        nw = i = 0
-
         if (sentence_duration == 0) and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
             first_alignment = int(file['alignments'][0]*self._params.data_simulator.sr)
             start_cutoff, start_window_amount = self._get_start_buffer_and_window(first_alignment)
         else:
             start_cutoff = 0
 
-        remaining_duration_sr = max_sentence_duration_sr - sentence_duration_sr
-
         #ensure the desired number of words are added and the length of the output session isn't exceeded
+        sentence_duration_sr = len(self._sentence)
+        remaining_duration_sr = max_sentence_duration_sr - sentence_duration_sr
+        remaining_duration = max_sentence_duration - sentence_duration
+        prev_dur_sr = dur_sr = 0
+        nw = i = 0
         while (nw < remaining_duration and dur_sr < remaining_duration_sr and i < len(file['words'])):
             dur_sr = int(file['alignments'][i] * self._params.data_simulator.sr) - start_cutoff
             if dur_sr > remaining_duration_sr:
                 break
 
-            word = file['words'][i]
-            self._words.append(word)
+            self._words.append(file['words'][i])
             self._alignments.append(float(sentence_duration_sr * 1.0 / self._params.data_simulator.sr) - float(start_cutoff * 1.0 / self._params.data_simulator.sr) + file['alignments'][i])
 
             if word == "":
@@ -371,7 +351,7 @@ class LibriSpeechGenerator(object):
             self._sentence = torch.cat((self._sentence, audio_file[:prev_dur_sr]), 0)
 
         #windowing at the end of the sentence
-        if (nw == remaining_duration or dur_sr >= remaining_duration_sr) and self._params.data_simulator.session_params.window_type != None:
+        if (i < len(file['words'])) and self._params.data_simulator.session_params.window_type != None:
             release_buffer, end_window_amount = self._get_end_buffer_and_window(prev_dur_sr, remaining_duration_sr, len(audio_file[start_cutoff+prev_dur_sr:]))
             self._sentence = torch.cat((self._sentence, audio_file[start_cutoff+prev_dur_sr:start_cutoff+prev_dur_sr+release_buffer]), 0)
             if (end_window_amount > 0): #include window
@@ -379,6 +359,58 @@ class LibriSpeechGenerator(object):
                 self._sentence = torch.cat((self._sentence, np.multiply(audio_file[start_cutoff+prev_dur_sr+release_buffer:start_cutoff+prev_dur_sr+release_buffer+end_window_amount], window)), 0)
 
         return sentence_duration+nw, len(self._sentence)
+
+    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
+        """
+        Build new sentence
+
+        Args:
+            speaker_turn (int): Current speaker turn.
+            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
+            speaker_lists (list): List of samples for each speaker in the session.
+            max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
+        """
+        # select speaker length
+        sl = np.random.negative_binomial(
+            self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
+        ) + 1
+
+        # initialize sentence, text, words, alignments
+        self._sentence = torch.zeros(0)
+        self._text = ""
+        self._words = []
+        self._alignments = []
+        sentence_duration = sentence_duration_sr = 0
+
+        # build sentence
+        while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
+            file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
+            audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
+            audio_file = torch.from_numpy(audio_file)
+            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+
+        #look for split locations
+        splits = []
+        new_start = 0
+        for i in range(0, len(self._words)):
+            if self._words[i] == "" and i != 0 and i != len(self._words) - 1:
+                silence_length = self._alignments[i] - self._alignments[i-1]
+                if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
+                    new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
+                    splits.append([int(new_start * self._params.data_simulator.sr), int(new_end * self._params.data_simulator.sr)])
+                    new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
+        splits.append([int(new_start * self._params.data_simulator.sr), len(self._sentence)])
+
+        #per-speaker normalization (accounting for active speaker time)
+        if self._params.data_simulator.session_params.normalization == 'equal':
+            if torch.max(torch.abs(self._sentence)) > 0:
+                split_length = split_sum = 0
+                for split in splits:
+                    split_length += len(self._sentence[split[0]:split[1]])
+                    split_sum += torch.sum(self._sentence[split[0]:split[1]]**2)
+                average_rms = torch.sqrt(split_sum*1.0/split_length)
+                self._sentence = self._sentence / (1.0 * average_rms)
+        #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
 
     # returns new overlapped (or shifted) start position
     def _add_silence_or_overlap(self, speaker_turn, prev_speaker, start, length, session_length_sr, prev_length_sr, enforce):
@@ -405,6 +437,7 @@ class LibriSpeechGenerator(object):
             desired_overlap_amount = int(prev_length_sr * overlap_percent)
             new_start = start - desired_overlap_amount
 
+            # reinject missing overlap to ensure desired overlap percentage is met
             if self._missing_overlap > 0 and overlap_percent < 1:
                 rand = int(prev_length_sr * np.random.uniform(0, 1 - overlap_percent / (1+self._params.data_simulator.session_params.mean_overlap)))
                 if rand > self._missing_overlap:
@@ -458,6 +491,41 @@ class LibriSpeechGenerator(object):
 
         return new_start
 
+    def _get_background(self, len_array, power_array):
+        """
+        Augment with background noise
+
+        Args:
+            len_array (int): Length of background noise required.
+            avg_power_array (float): Average power of the audio file.
+        """
+
+        bg_dir = self._params.data_simulator.background_noise.background_dir
+        bg_files = os.listdir(bg_dir)
+        bg_array = torch.zeros(len_array)
+        desired_snr = self._params.data_simulator.background_noise.snr
+        ratio = 10 ** (desired_snr / 20)
+        desired_avg_power_noise = power_array / ratio
+        running_len = 0
+        while running_len < len_array: #build background audio stream (the same length as the full file)
+            file_id = np.random.randint(0, len(bg_files) - 1)
+            file = bg_files[file_id]
+            audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
+            audio_file = torch.from_numpy(audio_file)
+
+            if running_len+len(audio_file) < len_array:
+                end_audio_file = running_len + len(audio_file)
+            else:
+                end_audio_file = len_array
+
+            pow_audio_file = torch.mean(audio_file[:end_audio_file-running_len]**2)
+            scaled_audio_file = audio_file[:end_audio_file-running_len] * torch.sqrt(desired_avg_power_noise / pow_audio_file)
+
+            bg_array[running_len:end_audio_file] = scaled_audio_file
+            running_len = end_audio_file
+
+        return bg_array
+
     def _create_new_rttm_entry(self, start, end, speaker_id):
         """
         Create new RTTM entries (to write to output rttm file)
@@ -477,17 +545,15 @@ class LibriSpeechGenerator(object):
                     new_end = start + self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
                     s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
                     e = float(round(new_end,self._params.data_simulator.outputs.output_precision))
-                    utterance = f"{s} {e} {speaker_id}"
-                    rttm_list.append(utterance)
+                    rttm_list.append(f"{s} {e} {speaker_id}")
                     new_start = start + self._alignments[i] - self._params.data_simulator.session_params.split_buffer
 
         s = float(round(new_start,self._params.data_simulator.outputs.output_precision))
         e = float(round(end,self._params.data_simulator.outputs.output_precision))
-        utterance = f"{s} {e} {speaker_id}"
-        rttm_list.append(utterance)
+        rttm_list.append(f"{s} {e} {speaker_id}")
         return rttm_list
 
-    def _create_new_json_entry(self, wav_filename, start, length, speaker_id, text, rttm_filepath, ctm_filepath):
+    def _create_new_json_entry(self, wav_filename, start, length, speaker_id, rttm_filepath, ctm_filepath):
         """
         Create new JSON entry (to write to output json file)
 
@@ -496,7 +562,6 @@ class LibriSpeechGenerator(object):
             start (int): Current start of the audio file being inserted.
             length (int): Length of the audio file being inserted.
             speaker_id (int): LibriSpeech speaker ID for the current entry.
-            text (str): Transcript for the current utterance.
             rttm_filepath (str): Output rttm filepath.
             ctm_filepath (str): Output ctm filepath.
         """
@@ -506,7 +571,7 @@ class LibriSpeechGenerator(object):
                 "offset": start,
                 "duration": length,
                 "label": speaker_id,
-                "text": text,
+                "text": self._text,
                 "num_speakers": self._params.data_simulator.session_config.num_speakers,
                 "rttm_filepath": rttm_filepath,
                 "ctm_filepath": ctm_filepath,
@@ -533,93 +598,38 @@ class LibriSpeechGenerator(object):
                 arr.append((align1, text))
         return arr
 
-    def _build_sentence(self, speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr):
+    def create_base_manifest_ds(self):
         """
-        Build new sentence
-
-        Args:
-            speaker_turn (int): Current speaker turn.
-            speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
-            speaker_lists (list): List of samples for each speaker in the session.
-            max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
+        Create base diarization manifest file (for online data simulation)
         """
-        # select speaker length
-        sl = np.random.negative_binomial(
-            self._params.data_simulator.session_params.sentence_length_params[0], self._params.data_simulator.session_params.sentence_length_params[1]
-        ) + 1
+        basepath = self._params.data_simulator.outputs.output_dir
+        wav_path = os.path.join(basepath, 'synthetic_wav.list')
+        text_path = os.path.join(basepath, 'synthetic_txt.list')
+        rttm_path = os.path.join(basepath, 'synthetic_rttm.list')
+        ctm_path = os.path.join(basepath, 'synthetic_ctm.list')
+        manifest_filepath = os.path.join(basepath, 'base_manifest.json')
 
-        # initialize sentence, text, words, alignments
-        self._sentence = torch.zeros(0)
-        self._text = ""
-        self._words = []
-        self._alignments = []
-        sentence_duration = sentence_duration_sr = 0
+        create_manifest(wav_path, manifest_filepath, text_path=text_path, rttm_path=rttm_path, ctm_path=ctm_path)
 
-        # build sentence
-        while sentence_duration < sl and sentence_duration_sr < max_sentence_duration_sr:
-            file = self._load_speaker_sample(speaker_lists, speaker_ids, speaker_turn)
-            audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
-            audio_file = torch.from_numpy(audio_file)
-            sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
+        self.base_manifest_filepath = manifest_filepath
+        return self.base_manifest_filepath
 
-        #look for split locations
-        splits = []
-        new_start = 0
-        for i in range(0, len(self._words)):
-            if self._words[i] == "" and i != 0 and i != len(self._words) - 1:
-                silence_length = self._alignments[i] - self._alignments[i-1]
-                if silence_length > 2 * self._params.data_simulator.session_params.split_buffer: #split utterance on silence
-                    new_end = self._alignments[i-1] + self._params.data_simulator.session_params.split_buffer
-                    splits.append([int(new_start * self._params.data_simulator.sr), int(new_end * self._params.data_simulator.sr)])
-                    new_start = self._alignments[i] - self._params.data_simulator.session_params.split_buffer
-        splits.append([int(new_start * self._params.data_simulator.sr), len(self._sentence)])
-
-        #per-speaker normalization
-        if self._params.data_simulator.session_params.normalization == 'equal':
-            if torch.max(torch.abs(self._sentence)) > 0:
-                split_length = split_sum = 0
-                for split in splits:
-                    split_length += len(self._sentence[split[0]:split[1]])
-                    split_sum += torch.sum(self._sentence[split[0]:split[1]]**2)
-                average_rms = torch.sqrt(split_sum*1.0/split_length)
-                self._sentence = self._sentence / (1.0 * average_rms)
-        #TODO add variable speaker volume (per-speaker volume selected at start of sentence)
-
-    def _get_background(self, len_array, power_array):
+    def create_segment_manifest_ds(self):
         """
-        Augment with background noise
-
-        Args:
-            len_array (int): Length of background noise required.
-            avg_power_array (float): Average power of the audio file.
+        Create segmented diarization manifest file (for online data simulation)
         """
+        basepath = self._params.data_simulator.outputs.output_dir
+        output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
+        input_manifest_path = self.base_manifest_filepath
+        window = self._params.data_simulator.segment_manifest.window
+        shift = self._params.data_simulator.segment_manifest.shift
+        step_count = self._params.data_simulator.segment_manifest.step_count
+        deci = self._params.data_simulator.segment_manifest.deci
 
-        bg_dir = self._params.data_simulator.background_noise.background_dir
-        desired_snr = self._params.data_simulator.background_noise.snr
-        ratio = 10 ** (desired_snr / 20)
-        desired_avg_power_noise = power_array / ratio
+        create_segment_manifest(input_manifest_path, output_manifest_path, window, shift, step_count, deci)
 
-        bg_files = os.listdir(bg_dir)
-        bg_array = torch.zeros(len_array)
-        running_len = 0
-        while running_len < len_array:
-            file_id = np.random.randint(0, len(bg_files) - 1)
-            file = bg_files[file_id]
-            audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
-            audio_file = torch.from_numpy(audio_file)
-
-            if running_len+len(audio_file) < len_array:
-                end_audio_file = running_len+len(audio_file)
-            else:
-                end_audio_file = len_array
-
-            pow_audio_file = torch.mean(audio_file[:end_audio_file-running_len]**2)
-            scaled_audio_file = audio_file[:end_audio_file-running_len] * torch.sqrt(desired_avg_power_noise / pow_audio_file)
-
-            bg_array[running_len:end_audio_file] = scaled_audio_file
-            running_len = end_audio_file
-
-        return bg_array
+        self.segment_manifest_filepath = output_manifest_path
+        return self.segment_manifest_filepath
 
     def _generate_session(self, idx, basepath, filename):
         """
@@ -681,7 +691,7 @@ class LibriSpeechGenerator(object):
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
             for entry in new_rttm_entries:
                 rttm_list.append(entry)
-            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
+            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
             json_list.append(new_json_entry)
             new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
             for entry in new_ctm_entries:
@@ -709,7 +719,7 @@ class LibriSpeechGenerator(object):
         """
         Generate diarization sessions
         """
-        print(f"Generating Diarization Sessions")
+        logging.info(f"Generating Diarization Sessions")
         np.random.seed(self._params.data_simulator.random_seed)
         output_dir = self._params.data_simulator.outputs.output_dir
 
@@ -740,7 +750,7 @@ class LibriSpeechGenerator(object):
             self._furthest_sample = [0 for n in range(0,self._params.data_simulator.session_config.num_speakers)]
             self._missing_overlap = 0
 
-            print(f"Generating Session Number {i}")
+            logging.info(f"Generating Session Number {i}")
             filename = self._params.data_simulator.outputs.output_filename + f"_{i}"
             self._generate_session(i, basepath, filename)
 
@@ -764,40 +774,6 @@ class LibriSpeechGenerator(object):
         ctmlist.close()
         textlist.close()
 
-    def create_base_manifest_ds(self):
-        """
-        Create base diarization manifest file
-        """
-        basepath = self._params.data_simulator.outputs.output_dir
-        wav_path = os.path.join(basepath, 'synthetic_wav.list')
-        text_path = os.path.join(basepath, 'synthetic_txt.list')
-        rttm_path = os.path.join(basepath, 'synthetic_rttm.list')
-        ctm_path = os.path.join(basepath, 'synthetic_ctm.list')
-        manifest_filepath = os.path.join(basepath, 'base_manifest.json')
-
-        create_manifest(wav_path, manifest_filepath, text_path=text_path, rttm_path=rttm_path, ctm_path=ctm_path)
-
-        self.base_manifest_filepath = manifest_filepath
-        return self.base_manifest_filepath
-
-    def create_segment_manifest_ds(self):
-        """
-        Create segmented diarization manifest file
-        """
-        basepath = self._params.data_simulator.outputs.output_dir
-        output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
-        input_manifest_path = self.base_manifest_filepath
-        window = self._params.data_simulator.segment_manifest.window
-        shift = self._params.data_simulator.segment_manifest.shift
-        step_count = self._params.data_simulator.segment_manifest.step_count
-        deci = self._params.data_simulator.segment_manifest.deci
-
-        create_segment_manifest(input_manifest_path, output_manifest_path, window, shift, step_count, deci)
-
-        self.segment_manifest_filepath = output_manifest_path
-        return self.segment_manifest_filepath
-
-
 class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
     """
     Multi Microphone Librispeech Diarization Session Generator.
@@ -805,7 +781,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
     def _check_args(self):
         """
-        Checks arguments to ensure they are within valid ranges
+        Checks YAML arguments to ensure they are within valid ranges
         """
         #check base arguments
         super()._check_args()
@@ -904,68 +880,40 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
                     rir_pad = pos.shape[0]
         return room.rir,rir_pad
 
-    def _convolve_rir_gpuRIR(self, speaker_turn, RIR):
+    def _convolve_rir_gpuRIR(self, input, speaker_turn, RIR):
         """
         Augment sample using synthetic RIR
 
         Args:
+            input (torch.tensor): Input audio.
             speaker_turn (int): Current speaker turn.
             RIR (torch.tensor): Room Impulse Response.
         """
         output_sound = []
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(self._sentence, RIR[speaker_turn, channel, : len(self._sentence)]).tolist()
+            out_channel = convolve(input, RIR[speaker_turn, channel, : len(input)]).tolist()
             output_sound.append(out_channel)
         output_sound = torch.tensor(output_sound)
         output_sound = torch.transpose(output_sound, 0, 1)
         return output_sound
 
-    def _convolve_rir_pyroomacoustics(self, speaker_turn, RIR):
+    def _convolve_rir_pyroomacoustics(self, input, speaker_turn, RIR):
         """
         Augment sample using synthetic RIR
 
         Args:
+            input (torch.tensor): Input audio.
             speaker_turn (int): Current speaker turn.
             RIR (torch.tensor): Room Impulse Response.
         """
         output_sound = []
         length = 0
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(self._sentence, RIR[channel][speaker_turn][:len(self._sentence)]).tolist()
+            out_channel = convolve(input, RIR[channel][speaker_turn][:len(input)]).tolist()
             if len(out_channel) > length:
                 length = len(out_channel)
             output_sound.append(torch.tensor(out_channel))
         return output_sound,length
-
-    def _convolve_bg_gpuRIR(self, bg, RIR):
-        """
-        Augment background using synthetic RIR
-
-        Args:
-            bg (torch.tensor): Background noise signal.
-            RIR (torch.tensor): Room Impulse Response.
-        """
-        output_sound = []
-        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(bg, RIR[-1, channel, : len(self._sentence)]).tolist()
-            output_sound.append(out_channel)
-        output_sound = torch.tensor(output_sound)
-        output_sound = torch.transpose(output_sound, 0, 1)
-        return output_sound
-
-    def _convolve_bg_pyroomacoustics(self, bg, RIR):
-        """
-        Augment background using synthetic RIR
-
-        Args:
-            bg (torch.tensor): Background noise signal.
-            RIR (torch.tensor): Room Impulse Response.
-        """
-        output_sound = []
-        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(bg, RIR[channel][-1][:len(self._sentence)]).tolist()
-            output_sound.append(torch.tensor(out_channel))
-        return output_sound
 
     def _generate_session(self, idx, basepath, filename):
         """
@@ -1027,10 +975,10 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
             #augment sentence
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                augmented_sentence = self._convolve_rir_gpuRIR(speaker_turn, RIR)
+                augmented_sentence = self._convolve_rir_gpuRIR(self._sentence, speaker_turn, RIR)
                 length = augmented_sentence.shape[0]
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                augmented_sentence, length = self._convolve_rir_pyroomacoustics(speaker_turn, RIR)
+                augmented_sentence, length = self._convolve_rir_pyroomacoustics(self._sentence, speaker_turn, RIR)
 
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
@@ -1048,7 +996,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
             for entry in new_rttm_entries:
                 rttm_list.append(entry)
-            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], self._text, os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
+            new_json_entry = self._create_new_json_entry(os.path.join(basepath, filename + '.wav'), start / self._params.data_simulator.sr, length / self._params.data_simulator.sr, speaker_ids[speaker_turn], os.path.join(basepath, filename + '.rttm'), os.path.join(basepath, filename + '.ctm'))
             json_list.append(new_json_entry)
             new_ctm_entries = self._create_new_ctm_entry(filename, speaker_ids[speaker_turn], start / self._params.data_simulator.sr)
             for entry in new_ctm_entries:
@@ -1065,10 +1013,10 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             length = array.shape[0]
             bg = self._get_background(length, avg_power_array)
             if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                augmented_bg = self._convolve_bg_gpuRIR(bg, RIR)
+                augmented_bg = self._convolve_rir_gpuRIR(bg, -1, RIR)
                 array += augmented_bg[:length,:]
             elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                augmented_bg = self._convolve_bg_pyroomacoustics(bg, RIR)
+                augmented_bg,_ = self._convolve_rir_pyroomacoustics(bg, -1, RIR)
                 for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
                     array[:,channel] += augmented_bg[channel][:length]
 
