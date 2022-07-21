@@ -20,7 +20,8 @@ train_emb_dir='./speaker_outputs_train'
 dev_emb_dir='./speaker_outputs_dev'
 test_emb_dir='./speaker_outputs_test'
 
-EXP_NAME=$emb_tag
+emb_tag='sd'
+EXP_NAME="$emb_tag"
 EMB_BATCH_SIZE=0
 TRAIN_BATCHSIZE=4
 BATCHSIZE=$TRAIN_BATCHSIZE
@@ -28,7 +29,9 @@ MAX_NUM_OF_SPKS=2
 export CUDA_VISIBLE_DEVICES="0,1"
 export PYTHONPATH=/home/chooper/projects/$branch_name/NeMo:$PYTHONPATH
 MEMO=$emb_tag
-python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name='msdd_training.synthetic.yaml' \
+
+wandb login 7aff50100c43f8efc06542e5a9b0c5aaff35b4c1 \
+&& python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name='msdd_training.synthetic.yaml' \
     diarizer.speaker_embeddings.model_path="/home/chooper/Downloads/titanet-m.nemo" \
     diarizer.speaker_embeddings.parameters.save_embeddings=True \
     diarizer.clustering.parameters.oracle_num_speakers=True \
@@ -61,7 +64,7 @@ python $BASEPATH/diarizer_end2end_finetune.py --config-path='conf' --config-name
     exp_manager.name=$EXP_NAME \
     +exp_manager.use_datetime_version=False \
     exp_manager.create_wandb_logger=True \
-    exp_manager.wandb_logger_kwargs.name="chooper" \
-    exp_manager.wandb_logger_kwargs.project=$EXP_NAME \
-    exp_manager.exp_dir=$emb_tag \
+    exp_manager.wandb_logger_kwargs.name="$EXP_NAME" \
+    exp_manager.wandb_logger_kwargs.project="synthetic-diarization" \
+    exp_manager.exp_dir="expdir" \
     msdd_model.base.diarizer.speaker_embeddings.model_path="/home/chooper/Downloads/titanet-m.nemo" \

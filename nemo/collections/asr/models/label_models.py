@@ -12,16 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import itertools
+from math import ceil
 from typing import Dict, List, Optional, Union
 
 import librosa
 import numpy as np
 import torch
-import gc
 from omegaconf import DictConfig
-from omegaconf.omegaconf import open_dict
 from pytorch_lightning import Trainer
 from tqdm import tqdm
 
@@ -107,6 +105,10 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         self.task = None
         self._accuracy = TopKClassificationAccuracy(top_k=[1])
         self.labels = None
+        if hasattr(self._cfg, 'spec_augment') and self._cfg.spec_augment is not None:
+            self.spec_augmentation = EncDecSpeakerLabelModel.from_config_dict(self._cfg.spec_augment)
+        else:
+            self.spec_augmentation = None
 
     @staticmethod
     def extract_labels(data_layer_config):
@@ -122,7 +124,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
                 manifests_files=manifest_filepath,
                 min_duration=data_layer_config.get("min_duration", None),
                 max_duration=data_layer_config.get("max_duration", None),
-                index_by_file_id=False,
+                index_by_file_id=True,
             )
             labels.update(collection.uniq_labels)
         labels = list(sorted(labels))
@@ -195,6 +197,23 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         if 'shuffle' not in train_data_layer_config:
             train_data_layer_config['shuffle'] = True
         self._train_dl = self.__setup_dataloader_from_config(config=train_data_layer_config)
+        # Need to set this because if using an IterableDataset, the length of the dataloader is the total number
+        # of samples rather than the number of batches, and this messes up the tqdm progress bar.
+        # So we set the number of steps manually (to the correct number) to fix this.
+        if 'is_tarred' in train_data_layer_config and train_data_layer_config['is_tarred']:
+            # We also need to check if limit_train_batches is already set.
+            # If it's an int, we assume that the user has set it to something sane, i.e. <= # training batches,
+            # and don't change it. Otherwise, adjust batches accordingly if it's a float (including 1.0).
+            if self._trainer is not None and isinstance(self._trainer.limit_train_batches, float):
+                self._trainer.limit_train_batches = int(
+                    self._trainer.limit_train_batches
+                    * ceil((len(self._train_dl.dataset) / self.world_size) / train_data_layer_config['batch_size'])
+                )
+            elif self._trainer is None:
+                logging.warning(
+                    "Model Trainer was not set before constructing the dataset, incorrect number of "
+                    "training batches will be used. Please set the trainer and rebuild the dataset."
+                )
 
     def setup_validation_data(self, val_data_layer_config: Optional[Union[DictConfig, Dict]]):
         val_data_layer_config['labels'] = self.labels
@@ -207,7 +226,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         self.embedding_dir = test_data_layer_params.get('embedding_dir', './')
         self._test_dl = self.__setup_dataloader_from_config(config=test_data_layer_params)
         self.test_manifest = test_data_layer_params.get('manifest_filepath', None)
-    
+
     def test_dataloader(self):
         if self._test_dl is not None:
             return self._test_dl
@@ -230,13 +249,9 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
             "embs": NeuralType(('B', 'D'), AcousticEncodedRepresentation()),
         }
 
-    # @typecheck()
     def forward_for_export(self, processed_signal, processed_signal_len):
         encoded, length = self.encoder(audio_signal=processed_signal, length=processed_signal_len)
         logits, embs = self.decoder(encoder_output=encoded, length=length)
-        del encoded, length, processed_signal, processed_signal_len
-        torch.cuda.empty_cache() 
-        gc.collect()
         return logits, embs
 
     @typecheck()
@@ -244,6 +259,10 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
         processed_signal, processed_signal_len = self.preprocessor(
             input_signal=input_signal, length=input_signal_length,
         )
+
+        if self.spec_augmentation is not None and self.training:
+            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_len)
+
         encoded, length = self.encoder(audio_signal=processed_signal, length=processed_signal_len)
         logits, embs = self.decoder(encoder_output=encoded, length=length)
         return logits, embs
@@ -256,7 +275,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
 
         self.log('loss', loss)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'])
-        print('learning_rate', self._optimizer.param_groups[0]['lr'])
+        self.log('global_step', self.trainer.global_step)
 
         self._accuracy(logits=logits, labels=labels)
         top_k = self._accuracy.compute()
@@ -333,61 +352,6 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
             'test_loss': test_loss_mean,
             'test_acc_top_k': topk_scores,
         }
-
-    def setup_finetune_model(self, model_config: DictConfig):
-        """
-        setup_finetune_model method sets up training data, validation data and test data with new
-        provided config, this checks for the previous labels set up during training from scratch, if None,
-        it sets up labels for provided finetune data from manifest files
-
-        Args:
-            model_config: cfg which has train_ds, optional validation_ds, optional test_ds, 
-            mandatory encoder and decoder model params. Make sure you set num_classes correctly for finetune data.
-
-        Returns: 
-            None
-        """
-        logging.info("Setting up data loaders with manifests provided from model_config")
-
-        if 'train_ds' in model_config and model_config.train_ds is not None:
-            self.setup_training_data(model_config.train_ds)
-        else:
-            raise KeyError("train_ds is not found in model_config but you need it for fine tuning")
-
-        if self.labels is None or len(self.labels) == 0:
-            raise ValueError(f'New labels must be non-empty list of labels. But I got: {self.labels}')
-
-        if 'validation_ds' in model_config and model_config.validation_ds is not None:
-            self.setup_multiple_validation_data(model_config.validation_ds)
-
-        if 'test_ds' in model_config and model_config.test_ds is not None:
-            self.setup_multiple_test_data(model_config.test_ds)
-
-        if self.labels is not None:  # checking for new finetune dataset labels
-            logging.warning(
-                "Trained dataset labels are same as finetune dataset labels -- continuing change of decoder parameters"
-            )
-        else:
-            logging.warning(
-                "Either you provided a dummy manifest file during training from scratch or you restored from a pretrained nemo file"
-            )
-
-        decoder_config = model_config.decoder
-        new_decoder_config = copy.deepcopy(decoder_config)
-        if new_decoder_config['num_classes'] != len(self.labels):
-            raise ValueError(
-                "number of classes provided {} is not same as number of different labels in finetuning data: {}".format(
-                    new_decoder_config['num_classes'], len(self.labels)
-                )
-            )
-
-        del self.decoder
-        self.decoder = EncDecSpeakerLabelModel.from_config_dict(new_decoder_config)
-
-        with open_dict(self._cfg.decoder):
-            self._cfg.decoder = new_decoder_config
-
-        logging.info(f"Changed decoder output to # {self.decoder._num_classes} classes.")
 
     @torch.no_grad()
     def get_embedding(self, path2audio_file):

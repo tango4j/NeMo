@@ -25,10 +25,13 @@ from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import (
     create_masked_lm_predictions,
     get_samples_mapping,
 )
-from nemo.collections.nlp.data.language_modeling.megatron.megatron_dataset import MegatronDataset
+from nemo.core import Dataset
 
 
-class T5Dataset(MegatronDataset):
+class T5Dataset(Dataset):
+    # account for added tokens
+    MAX_SEQ_LENGTH_DELTA = 2
+
     def __init__(
         self,
         cfg,
@@ -51,7 +54,7 @@ class T5Dataset(MegatronDataset):
         whole_word_masking=True,
         favor_long_ngrams=False,
     ):
-        super().__init__(cfg, trainer=trainer)
+        super().__init__()
 
         # Params to store.
         self.name = name
@@ -86,7 +89,7 @@ class T5Dataset(MegatronDataset):
             data_prefix=data_prefix,
             num_epochs=num_epochs,
             max_num_samples=max_num_samples,
-            max_seq_length=self.max_seq_length - 2,  # account for added tokens
+            max_seq_length=self.max_seq_length - self.MAX_SEQ_LENGTH_DELTA,  # account for added tokens
             short_seq_prob=self.short_seq_prob,
             seed=self.seed,
             name=self.name,
@@ -179,7 +182,6 @@ class T5Dataset(MegatronDataset):
 
         # Truncate to `target_sequence_length`.
         max_num_tokens = target_seq_length
-        truncated = len(tokens) > max_num_tokens
         tokens = tokens[:max_num_tokens]
 
         # Masking.
@@ -225,7 +227,6 @@ class T5Dataset(MegatronDataset):
             'text_dec': tokens_dec_in,
             'labels': labels,
             'loss_mask': loss_mask,
-            'truncated': int(truncated),
             'enc_mask': enc_mask,
             'dec_mask': dec_mask,
         }

@@ -101,7 +101,9 @@ def audio_rttm_map(manifest):
                 AUDIO_RTTM_MAP[uniqname] = meta
             else:
                 raise KeyError(
-                    "file {} is already part AUDIO_RTTM_Map, it might be duplicated".format(meta['audio_filepath'])
+                    "file {} is already part of AUDIO_RTTM_MAP, it might be duplicated, Note: file basename must be unique".format(
+                        meta['audio_filepath']
+                    )
                 )
 
     return AUDIO_RTTM_MAP
@@ -203,22 +205,12 @@ def get_embs_and_timestamps(multiscale_embeddings_and_timestamps, multiscale_arg
         uniq_id: {'multiscale_weights': [], 'scale_dict': {}}
         for uniq_id in multiscale_embeddings_and_timestamps[0][0].keys()
     }
-    if multiscale_args_dict['use_single_scale_clustering'] is not False:
-        lim_scale_n = multiscale_args_dict['use_single_scale_clustering']
+    if multiscale_args_dict['use_single_scale_clustering']:
         _multiscale_args_dict = deepcopy(multiscale_args_dict)
-        _multiscale_args_dict['scale_dict'] = {}
-        for scale_idx in range(lim_scale_n):
-            _multiscale_args_dict['scale_dict'][scale_idx] = multiscale_args_dict['scale_dict'][scale_idx]
-        _multiscale_args_dict['multiscale_weights'] = multiscale_args_dict['multiscale_weights'][:lim_scale_n]
-
+        _multiscale_args_dict['scale_dict'] = {0: multiscale_args_dict['scale_dict'][0]}
+        _multiscale_args_dict['multiscale_weights'] = multiscale_args_dict['multiscale_weights'][:1]
     else:
         _multiscale_args_dict = multiscale_args_dict
-    # if multiscale_args_dict['use_single_scale_clustering']:
-        # _multiscale_args_dict = deepcopy(multiscale_args_dict)
-        # _multiscale_args_dict['scale_dict'] = {0: multiscale_args_dict['scale_dict'][0]}
-        # _multiscale_args_dict['multiscale_weights'] = multiscale_args_dict['multiscale_weights'][:1]
-    # else:
-        # _multiscale_args_dict = multiscale_args_dict
 
     for scale_idx in sorted(_multiscale_args_dict['scale_dict'].keys()):
         embeddings, time_stamps = multiscale_embeddings_and_timestamps[scale_idx]
@@ -322,11 +314,13 @@ def labels_to_rttmfile(labels, uniq_id, out_rttm_dir):
 
     return filename
 
+
 def string_to_float(x, round_digits):
     """
     Convert string to float then round the number.
     """
     return round(float(x), round_digits)
+
 
 def convert_rttm_line(rttm_line, round_digits=3):
     """
@@ -346,11 +340,12 @@ def convert_rttm_line(rttm_line, round_digits=3):
         speaker (str):
             speaker string in RTTM lines.
     """
-    rttm  = rttm_line.strip().split()
+    rttm = rttm_line.strip().split()
     start = string_to_float(rttm[3], round_digits)
     end = string_to_float(rttm[4], round_digits) + string_to_float(rttm[3], round_digits)
     speaker = rttm[7]
     return start, end, speaker
+
 
 def rttm_to_labels(rttm_filename):
     """
@@ -363,6 +358,7 @@ def rttm_to_labels(rttm_filename):
             labels.append('{} {} {}'.format(start, end, speaker))
     return labels
 
+
 def get_rttm_speaker_index(rttm_labels):
     """
     Generate speaker mapping between integer index to RTTM speaker label names.
@@ -373,8 +369,9 @@ def get_rttm_speaker_index(rttm_labels):
         speaker_set.add(spk_str)
     num_of_spks = len(speaker_set)
     speaker_list = sorted(list(speaker_set))
-    speaker_mapping_dict = { key: val for key, val in enumerate(speaker_list) }
+    speaker_mapping_dict = {key: val for key, val in enumerate(speaker_list)}
     return speaker_mapping_dict
+
 
 def write_cluster_labels(base_scale_idx, lines_cluster_labels, out_rttm_dir):
     """
@@ -436,7 +433,6 @@ def perform_clustering(embs_and_timestamps, AUDIO_RTTM_MAP, out_rttm_dir, cluste
             enhanced_count_thres=clustering_params.enhanced_count_thres,
             max_rp_threshold=clustering_params.max_rp_threshold,
             sparse_search_volume=clustering_params.sparse_search_volume,
-            maj_vote_spk_count=clustering_params.maj_vote_spk_count,
             cuda=cuda,
         )
 
@@ -631,6 +627,31 @@ def isOverlap(rangeA, rangeB):
     return end1 > start2 and end2 > start1
 
 
+def validate_vad_manifest(AUDIO_RTTM_MAP, vad_manifest):
+    """
+    This function will check the valid speech segments in the manifest file which is either
+    generated from NeMo voice activity detection(VAD) or oracle VAD.
+    If an audio file does not contain any valid speech segments, we ignore the audio file
+    (indexed by uniq_id) for the rest of the processing steps.
+    """
+    vad_uniq_ids = set()
+    with open(vad_manifest, 'r') as vad_file:
+        for line in vad_file:
+            line = line.strip()
+            dic = json.loads(line)
+            if dic['duration'] > 0:
+                vad_uniq_ids.add(dic['uniq_id'])
+
+    provided_uniq_ids = set(AUDIO_RTTM_MAP.keys())
+    silence_ids = provided_uniq_ids - vad_uniq_ids
+    for uniq_id in silence_ids:
+        del AUDIO_RTTM_MAP[uniq_id]
+        logging.warning(f"{uniq_id} is ignored since the file does not contain any speech signal to be processed.")
+
+    if len(AUDIO_RTTM_MAP) == 0:
+        raise ValueError("All files present in manifest contains silence, aborting next steps")
+
+
 def getOverlapRange(rangeA, rangeB):
     """
     Calculate the overlapping range between rangeA and rangeB.
@@ -760,15 +781,6 @@ def getMergedRanges(label_list_A: List, label_list_B: List, deci: int = 3) -> Li
         return [[int2fl(x[0] - 1, deci), int2fl(x[1], deci)] for x in combined]
 
 
-def getMinMaxOfRangeList(ranges):
-    """
-    Get the min and max of a given range list.
-    """
-    _max = max([x[1] for x in ranges])
-    _min = min([x[0] for x in ranges])
-    return _min, _max
-
-
 def getSubRangeList(target_range, source_range_list) -> List:
     """
     Get the ranges that has overlaps with the target range from the source_range_list.
@@ -839,16 +851,13 @@ def write_rttm2manifest(AUDIO_RTTM_MAP: str, manifest_file: str, include_uniq_id
             vad_start_end_list = combine_float_overlaps(vad_start_end_list_raw, deci)
             if len(vad_start_end_list) == 0:
                 logging.warning(f"File ID: {uniq_id}: The VAD label is not containing any speech segments.")
-            elif duration == 0:
-                logging.warning(f"File ID: {uniq_id}: The audio file has zero duration.")
+            elif duration <= 0:
+                logging.warning(f"File ID: {uniq_id}: The audio file has negative or zero duration.")
             else:
-                min_vad, max_vad = getMinMaxOfRangeList(vad_start_end_list)
-                # if max_vad > round(offset + duration, deci) or min_vad < offset:
-                    # logging.warning("RTTM label has been truncated since start is greater than duration of audio file")
                 overlap_range_list = getSubRangeList(
                     source_range_list=vad_start_end_list, target_range=[offset, offset + duration]
                 )
-            write_overlap_segments(outfile, AUDIO_RTTM_MAP, uniq_id, overlap_range_list, include_uniq_id, deci)
+                write_overlap_segments(outfile, AUDIO_RTTM_MAP, uniq_id, overlap_range_list, include_uniq_id, deci)
     return manifest_file
 
 

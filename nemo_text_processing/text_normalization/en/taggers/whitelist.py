@@ -1,5 +1,4 @@
 # Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
-# Copyright 2015 and onwards Google, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pynini
 from nemo_text_processing.text_normalization.en.graph_utils import (
     NEMO_CHAR,
     NEMO_NOT_SPACE,
+    NEMO_SIGMA,
     NEMO_UPPER,
     SINGULAR_TO_PLURAL,
     GraphFst,
@@ -27,14 +28,7 @@ from nemo_text_processing.text_normalization.en.utils import (
     get_abs_path,
     load_labels,
 )
-
-try:
-    import pynini
-    from pynini.lib import pynutil
-
-    PYNINI_AVAILABLE = True
-except (ModuleNotFoundError, ImportError):
-    PYNINI_AVAILABLE = False
+from pynini.lib import pynutil
 
 
 class WhiteListFst(GraphFst):
@@ -71,7 +65,10 @@ class WhiteListFst(GraphFst):
             return graph
 
         graph = _get_whitelist_graph(input_case, get_abs_path("data/whitelist/tts.tsv"))
-        graph |= _get_whitelist_graph(input_case, get_abs_path("data/whitelist/symbol.tsv"))
+        graph |= pynini.compose(
+            pynini.difference(NEMO_SIGMA, pynini.accep("/")).optimize(),
+            _get_whitelist_graph(input_case, get_abs_path("data/whitelist/symbol.tsv")),
+        ).optimize()
 
         if deterministic:
             names = get_names()

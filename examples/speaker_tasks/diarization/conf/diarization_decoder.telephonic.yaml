@@ -32,16 +32,16 @@ diarizer: &diarizer
       filter_speech_first: True 
 
   speaker_embeddings:
-    model_path: "/home/taejinp/Downloads/titanet-m.nemo"  # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
+    model_path: null # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
     parameters:
       window_length_in_sec: [1.5,1.25,1.0,0.75,0.5] # Window length(s) in sec (floating-point number). Either a number or a list. Ex) 1.5 or [1.5,1.0,0.5]
       shift_length_in_sec: [0.75,0.625,0.5,0.375,0.25] # Shift length(s) in sec (floating-point number). Either a number or a list. Ex) 0.75 or [0.75,0.5,0.25]
-      multiscale_weights: [1,1,1,1,1]
+      multiscale_weights: [1,1,1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
       save_embeddings: True # Save embeddings as pickle file for each audio input.
   
   clustering:
     parameters:
-      oracle_num_speakers: False  # If True, use num of speakers value provided in manifest file.
+      oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
       max_num_speakers: &max_num_speakers 8 # Max number of speakers for each recording. If oracle num speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
       max_rp_threshold: 0.15 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
@@ -49,68 +49,14 @@ diarizer: &diarizer
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
 
   msdd_model:
-    model_path: null
+    model_path: null # .nemo local model path or pretrained model name for multiscale diarization decoder (MSDD)
     parameters:
-      run_clus_from_loaded_emb: True
-      use_single_scale_clustering: False
-      infer_batch_size: &infer_batch_size 25
-      sigmoid_threshold: [0.85,0.97]
-      seq_eval_mode: False
-      split_infer: True
-      diar_window_length: 120
-
-msdd_model: 
-  base:
-    name: *name 
-    sample_rate: *sample_rate
-    repeat: *rep
-    dropout: *drop
-    separable: *separable
-    n_filters: *n_filters
-    num_workers: *num_workers
-    batch_size: *global_bs
-    diarizer: *diarizer
-
-  max_num_of_spks: *max_num_speakers
-  scale_n: &scale_n 5
-  subsample_rate: &subsample_rate 1
-  split_length: 30
-  emb_batch_size: 100
-  use_longest_scale_clus_avg_emb: True
-  weighting_scheme: "conv"
-  
-  test_ds:
-    manifest_filepath: null
-    emb_dir: null
-    sample_rate: 16000
-    num_spks: 2
-    soft_label_thres: 0.5
-    labels: null
-    batch_size: *infer_batch_size
-    shuffle: False
-
-  preprocessor:
-    _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
-    normalize: "per_feature"
-    window_size: 0.02
-    sample_rate: *sample_rate
-    window_stride: 0.01
-    window: "hann"
-    features: &n_mels 64
-    n_fft: 512
-    frame_splicing: 1
-    dither: 0.00001
-  
-  msdd_module:
-    _target_: nemo.collections.asr.modules.msdd_diarizer.MSDD_module
-    num_spks: 2
-    hidden_size: 256
-    num_lstm_layers: 2
-    dropout_rate: 0.5
-    cnn_output_ch: 16
-    emb_sizes: 192
-    scale_n: *scale_n
-    clamp_max: 0.75
-    weighting_scheme: 'conv'
-    use_cos_sim_input: True
-
+      run_clus_from_loaded_emb: True # Run clustering again after loading speaker embedding.
+      use_single_scale_clustering: False # Use only the longest scale (single scale) for clustering initialization.
+      infer_batch_size: &infer_batch_size 25 # Batch size for MSDD inference. 
+      sigmoid_threshold: [0.85,0.97] # Sigmoid threshold for outputting 
+      seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
+      split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
+      diar_window_length: 120 # The length of split short sequence when split_infer is True.
+      use_longest_scale_clus_avg_emb: False # Take the cluster average embedding of the longest scale then use the longest scale embedding for all the other scales.
+    
