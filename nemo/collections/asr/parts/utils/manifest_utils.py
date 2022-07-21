@@ -241,7 +241,7 @@ def create_segment_manifest(input_manifest_path, output_manifest_path, window, s
     os.remove(segment_manifest_path)
     os.remove(subsegment_manifest_path)
 
-def create_manifest(wav_path, manifest_filepath, text_path=None, rttm_path=None, uem_path=None, ctm_path=None):
+def create_manifest(wav_path, manifest_filepath, text_path=None, rttm_path=None, uem_path=None, ctm_path=None, add_duration=False):
     """
     Create base manifest file
 
@@ -294,11 +294,15 @@ def create_manifest(wav_path, manifest_filepath, text_path=None, rttm_path=None,
         if ctm is not None:
             ctm = ctm.strip()
 
+        duration = None
+        if add_duration:
+            y, sr = librosa.load(audio_line, sr=None)
+            duration = librosa.get_duration(y=y, sr=sr)
         meta = [
             {
                 "audio_filepath": audio_line,
                 "offset": 0,
-                "duration": None,
+                "duration": duration,
                 "label": "infer",
                 "text": text,
                 "num_speakers": num_speakers,

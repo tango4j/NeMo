@@ -31,8 +31,8 @@ Useful to get manifest when you have list of audio files and optionally rttm and
 Note: make sure basename for each file is unique and rttm files also has the corresponding base name for mapping
 """
 
-def main(wav_path, text_path=None, rttm_path=None, uem_path=None, ctm_path=None, manifest_filepath=None):
-    create_manifest(wav_path, manifest_filepath, text_path=text_path, rttm_path=rttm_path, uem_path=uem_path, ctm_path=ctm_path)
+def main(wav_path, text_path=None, rttm_path=None, uem_path=None, ctm_path=None, manifest_filepath=None, add_duration=False):
+    create_manifest(wav_path, manifest_filepath, text_path=text_path, rttm_path=rttm_path, uem_path=uem_path, ctm_path=ctm_path, add_duration=add_duration)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
