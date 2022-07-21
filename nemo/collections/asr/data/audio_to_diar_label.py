@@ -949,7 +949,9 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         else:
             self.data_simulator = LibriSpeechGenerator(cfg) #includes tmp dir
         self.emb_dir = emb_dir
+
         self.include_base_ds = cfg.train_ds.include_base_ds
+        self.multiscale_timestamp_base_dict = multiscale_timestamp_dict
 
         self.regenerate_dataset()
         # self.regen = False
@@ -1080,6 +1082,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         emb_batch_size = self.emb_batch_size
         if self.include_base_ds:
             multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
-            self.multiscale_timestamp_dict = multiscale_timestamp_dict.update(self.multiscale_timestamp_dict)
+            self.multiscale_timestamp_dict = multiscale_timestamp_dict.update(self.multiscale_timestamp_base_dict)
         else:
             self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
