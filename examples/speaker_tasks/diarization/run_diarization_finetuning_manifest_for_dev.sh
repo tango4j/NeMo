@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #generate dev set diarization manifest
-branch_name="chooper_dl"
+branch_name="chooper_dl_msdiar"
 export PYTHONPATH=/home/chooper/projects/$branch_name/NeMo:$PYTHONPATH
 python /home/chooper/projects/$branch_name/NeMo/scripts/speaker_tasks/diarization_finetuning_manifest.py \
     --step_count 50\

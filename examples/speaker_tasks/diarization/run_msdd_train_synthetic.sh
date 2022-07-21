@@ -1,5 +1,5 @@
 
-branch_name="chooper_dl"
+branch_name="chooper_dl_msdiar"
 cd /home/chooper/projects/$branch_name/NeMo
 pwd
 BASEPATH=/home/chooper/projects/$branch_name/NeMo/examples/speaker_tasks/diarization
