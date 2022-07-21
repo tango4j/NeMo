@@ -1080,7 +1080,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         emb_batch_size = self.emb_batch_size
         if self.include_base_ds:
             multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
-            self.multiscale_timestamp_dict = self.multiscale_timestamp_dict | multiscale_timestamp_dict
+            self.multiscale_timestamp_dict = multiscale_timestamp_dict.update(self.multiscale_timestamp_dict)
         else:
             self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
-        print('self.multiscale_timestamp_dict: ', self.multiscale_timestamp_dict)
