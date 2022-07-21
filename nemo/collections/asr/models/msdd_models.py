@@ -754,8 +754,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         )
 
         if 'manifest_filepath' in config and config['manifest_filepath'] is None and ('synthetic' not in config or config['synthetic'] == False or self.cfg_msdd_model.train_ds.include_base_ds):
-
-            if self.cfg_msdd_model.train_ds.include_base_ds
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
