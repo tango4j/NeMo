@@ -1077,4 +1077,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         #regenerate segments
         tmp_dir = self.emb_dir
         emb_batch_size = self.emb_batch_size
+        print('segment_manifest_path: ', segment_manifest_path)
+        print('self.multiscale_timestamp_dict: ', self.multiscale_timestamp_dict)
         self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
+        print('self.multiscale_timestamp_dict: ', self.multiscale_timestamp_dict)
