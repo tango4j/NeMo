@@ -1069,6 +1069,16 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.data_simulator.create_base_manifest_ds()
         segment_manifest_path = self.data_simulator.create_segment_manifest_ds()
 
+        #regenerate segments
+        tmp_dir = self.emb_dir
+        emb_batch_size = self.emb_batch_size
+        if self.include_base_ds: #add base manifest
+            with open(self.manifest_filepath, 'r') as fp:
+                manifest_lines = fp.readlines()
+                with open(segment_manifest_path, 'a') as segment_manifest:
+                    for line in manifest_lines:
+                        segment_manifest.write(line)
+
         #reresh diarization session collection
         self.collection = DiarizationSpeechLabel(
             manifests_files=segment_manifest_path,
@@ -1076,16 +1086,4 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             clus_label_dict=None,
             pairwise_infer=self.pairwise_infer,
         )
-
-        #regenerate segments
-        tmp_dir = self.emb_dir
-        emb_batch_size = self.emb_batch_size
-        if self.include_base_ds:
-            with open(self.manifest_filepath, 'r') as fp:
-                manifest_lines = fp.readlines()
-                with open(segment_manifest_path, 'a') as segment_manifest:
-                    for line in manifest_lines:
-                        segment_manifest.write(line)
-            self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
-        else:
-            self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
+        self.multiscale_timestamp_dict = self.prepare_split_data(segment_manifest_path, tmp_dir, emb_batch_size)
