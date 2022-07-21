@@ -625,7 +625,7 @@ class LibriSpeechGenerator(object):
         ctm_path = os.path.join(basepath, 'synthetic_ctm.list')
         manifest_filepath = os.path.join(basepath, 'base_manifest.json')
 
-        create_manifest(wav_path, manifest_filepath, text_path=text_path, rttm_path=rttm_path, ctm_path=ctm_path)
+        create_manifest(wav_path, manifest_filepath, text_path=text_path, rttm_path=rttm_path, ctm_path=ctm_path, add_duration=False)
 
         self.base_manifest_filepath = manifest_filepath
         return self.base_manifest_filepath
