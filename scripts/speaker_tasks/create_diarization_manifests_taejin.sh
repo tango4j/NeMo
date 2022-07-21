@@ -1,5 +1,5 @@
 #!/bin/bash
-export PYTHONPATH=/home/chooper/projects/chooper_dl/NeMo:$PYTHONPATH
+export PYTHONPATH=/home/chooper/projects/chooper_dl_msdiar/NeMo:$PYTHONPATH
 
 # Create initial diarization manifest file (used as input for run_diarization_finetuning_manifest_for_synthetic.sh)
 python pathsfiles_to_manifest.py \

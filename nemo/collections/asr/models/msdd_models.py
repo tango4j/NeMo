@@ -401,13 +401,9 @@ class ClusterEmbedding:
             # The output label should be replaced: (longest -> shortest)
             output_clus_label_dict = self.replace_output_clus_label_dict(all_scale_clus_label_dict)
         else:
-<<<<<<< HEAD
-            all_scale_clus_label_dict = self.assign_labels_to_longer_segs(output_clus_label_dict, session_scale_mapping_dict)
-=======
             all_scale_clus_label_dict = self.assign_labels_to_longer_segs(
                 output_clus_label_dict, session_scale_mapping_dict
             )
->>>>>>> 080703b1dc0ccc8d358e6e9da9539006255a2435
         for scale_index in emb_scale_seq_dict.keys():
             for uniq_id, _emb_tensor in emb_scale_seq_dict[scale_index].items():
                 if type(_emb_tensor) == list:
@@ -486,16 +482,9 @@ class ClusterEmbedding:
         session_scale_mapping_dict = self.get_scale_map(self._embs_and_timestamps)
         emb_scale_seq_dict = self.load_emb_scale_seq_dict(emb_dir)
         clus_labels = self.load_clustering_labels(emb_dir)
-<<<<<<< HEAD
-        emb_sess_avg_dict, base_clus_label_dict = self.get_cluster_avg_embs(emb_scale_seq_dict,
-                                                                            clus_labels,
-                                                                            speaker_mapping_dict,
-                                                                            session_scale_mapping_dict)
-=======
         emb_sess_avg_dict, base_clus_label_dict = self.get_cluster_avg_embs(
             emb_scale_seq_dict, clus_labels, speaker_mapping_dict, session_scale_mapping_dict
         )
->>>>>>> 080703b1dc0ccc8d358e6e9da9539006255a2435
         emb_scale_seq_dict['session_scale_mapping'] = session_scale_mapping_dict
         return emb_sess_avg_dict, emb_scale_seq_dict, base_clus_label_dict
 
@@ -545,7 +534,6 @@ class ClusterEmbedding:
             emb_scale_seq_dict[scale_index] = emb_dict
         return emb_scale_seq_dict
 
-<<<<<<< HEAD
 class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
     """
     Modified dataloader for refreshing synthetic dataset
@@ -558,8 +546,6 @@ class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
             if torch.cuda.current_device() == 0:
                 self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
-=======
->>>>>>> 080703b1dc0ccc8d358e6e9da9539006255a2435
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
     """Encoder decoder class for multiscale speaker diarization decoder.
@@ -587,13 +573,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
 
         self.cfg_msdd_model.train_ds.num_spks = self.cfg_msdd_model.max_num_of_spks
         self.cfg_msdd_model.validation_ds.num_spks = self.cfg_msdd_model.max_num_of_spks
-<<<<<<< HEAD
-        ClusterEmbedding.__init__(self,
-                                  cfg_base=self.cfg_msdd_model.base,
-                                  cfg_msdd_model=self.cfg_msdd_model)
-=======
         ClusterEmbedding.__init__(self, cfg_base=self.cfg_msdd_model.base, cfg_msdd_model=self.cfg_msdd_model)
->>>>>>> 080703b1dc0ccc8d358e6e9da9539006255a2435
         if trainer:
             if self.cfg_msdd_model.end_to_end_train:
                 self._init_segmentation_info()
@@ -601,14 +581,10 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
 
             self.world_size = trainer.num_nodes * trainer.num_devices
             self.emb_batch_size = self.cfg_msdd_model.emb_batch_size
-<<<<<<< HEAD
-            self.pairwise_infer = False
-=======
         else:
             self.world_size = 1
             self.pairwise_infer = True
         super().__init__(cfg=self.cfg_msdd_model, trainer=trainer)
->>>>>>> 080703b1dc0ccc8d358e6e9da9539006255a2435
 
         if type(self.cfg_msdd_model.base.diarizer.speaker_embeddings.parameters.window_length_in_sec) == int:
             raise ValueError("window_length_in_sec should be a list containing multiple segment (window) lengths")
