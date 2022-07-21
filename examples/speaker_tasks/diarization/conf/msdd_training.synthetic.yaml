@@ -58,6 +58,7 @@ msdd_model:
     batch_size: 2
     emb_batch_size: 50
     shuffle: True
+    synthetic: True
 
   data_simulator:
     manifest_path: null # Manifest file with paths to librispeech audio files
