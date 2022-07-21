@@ -10,41 +10,23 @@ diarizer: &diarizer
   manifest_filepath: null
   out_dir: null
   oracle_vad: True # If True, uses RTTM files provided in manifest file to get speech activity (VAD) timestamps
-  collar: 0.25 # Collar value for scoring
-  ignore_overlap: True # Consider or ignore overlap segments while scoring
-
-  vad:
-    model_path: null # .nemo local model path or pretrained model name or none
-    external_vad_manifest: null # This option is provided to use external vad and provide its speech activity labels for speaker embeddings extraction. Only one of model_path or external_vad_manifest should be set
-
-    parameters: # Tuned parameter for CH109 (using the 11 multi-speaker sessions as dev set)
-      window_length_in_sec: 0.15  # Window length in sec for VAD context input
-      shift_length_in_sec: 0.01 # Shift length in sec for generate frame level VAD prediction
-      smoothing: "median" # False or type of smoothing method (eg: median)
-      overlap: 0.875 # Overlap ratio for overlapped mean/median smoothing filter
-      onset: 0.4 # Onset threshold for detecting the beginning and end of a speech
-      offset: 0.7 # Offset threshold for detecting the end of a speech
-      pad_onset: 0.05 # Adding durations before each speech segment
-      pad_offset: -0.1 # Adding durations after each speech segment
-      min_duration_on: 0.2 # Threshold for small non_speech deletion
-      min_duration_off: 0.2 # Threshold for short speech segment deletion
-      filter_speech_first: True
 
   speaker_embeddings:
-    model_path: null  # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
+    model_path: null # .nemo local model path or pretrained model name (titanet_large is recommended)
     parameters:
-      window_length_in_sec: [3.0, 2.5, 2.0, 1.5, 1.0, 0.5]
-      shift_length_in_sec: [1.5, 1.25, 1.0, 0.75, 0.5, 0.25]
-      multiscale_weights: [1,1,1,1,1,1] # weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
+      window_length_in_sec: [3.0,2.5,2.0,1.5,1.0,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
+      shift_length_in_sec: [1.5,1.25,1.0,0.75,0.5,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
+      multiscale_weights: [1,1,1,1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
       save_embeddings: True # Save embeddings as pickle file for each audio input.
 
   clustering:
     parameters:
-      oracle_num_speakers: True  # If True, use num of speakers value provided in manifest file.
-      max_num_speakers: 2 # Max number of speakers for each recording. If oracle num speakers is passed, this value is ignored.
+      oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
+      max_num_speakers: &max_num_speakers 8 # Max number of speakers for each recording. If oracle num speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
       max_rp_threshold: 0.15 # Determines the range of p-value search: 0 < p <= max_rp_threshold.
       sparse_search_volume: 30 # The higher the number, the more values will be examined with more time.
+      maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
 
 msdd_model:
   base:
@@ -57,14 +39,14 @@ msdd_model:
     batch_size: *global_bs
     diarizer: *diarizer
     soft_label_thres: &soft_label_thres 0.5
+
   max_num_of_spks: &max_num_of_spks 2
   scale_n: &scale_n
   subsample_rate: &subsample_rate 1
   split_length: 30
   end_to_end_train: False
-  emb_batch_size: 0
+  emb_batch_size: 100
   use_longest_scale_clus_avg_emb: True
-  interpolate_finest_scale: True
 
   train_ds:
     manifest_filepath: ???
@@ -73,9 +55,30 @@ msdd_model:
     num_spks: *max_num_of_spks
     soft_label_thres: *soft_label_thres
     labels: null
-    batch_size: 15
-    emb_batch_size: 0
+    batch_size: 2
+    emb_batch_size: 50
     shuffle: True
+
+  validation_ds:
+    manifest_filepath: ???
+    emb_dir: ???
+    sample_rate: 16000
+    num_spks: *max_num_of_spks
+    soft_label_thres: *soft_label_thres
+    labels: null
+    batch_size: 2
+    emb_batch_size: 50
+    shuffle: False
+
+  test_ds:
+    manifest_filepath: null
+    emb_dir: null
+    sample_rate: 16000
+    num_spks: *max_num_of_spks
+    soft_label_thres: *soft_label_thres
+    labels: null
+    batch_size: 2
+    shuffle: False
     synthetic: True #whether to generate synthetic data online
 
   data_simulator:
@@ -87,7 +90,7 @@ msdd_model:
 
     session_config:
       num_speakers: 4 # number of unique speakers per diarization session
-      num_sessions: 1 # number of sessions
+      num_sessions: 60 # number of sessions
       session_length: 600 # length of each diarization session (seconds)
 
     session_params:
@@ -100,14 +103,17 @@ msdd_model:
       mean_overlap: 0.19 # mean proportion of overlap to speaking time
       mean_silence: 0.15 # mean proportion of silence to speaking time
       overlap_prob: 0.5 # proportion of overlap occurences versus silence between utterances
-      start_window: True #window the start of sentences
+      start_window: true #window the start of sentences
       window_type: hamming # type of windowing used when segmenting utterances (hamming, hann, cosine)
       window_size: 0.05 # length of window at end of segmented utterance (seconds)
       start_buffer: 0.1 # buffer of silence before the start of the sentence
       split_buffer: 0.1 # split RTTM if greater than twice this amount of gap
       release_buffer: 0.1 # buffer before window at end of sentence
-      normalization: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
+      normalize: true
+      normalization_type: equal # normalizing speakers (equal - same volume per speaker, var - variable volume per speaker)
       normalization_var: 0.1 # variance in speaker volume
+      min_volume: 0.75
+      max_volume: 1.25
       end_buffer: 0.5 # buffer at the end of the session to leave blank
 
     outputs:
@@ -143,10 +149,20 @@ msdd_model:
     num_spks: *max_num_of_spks
     soft_label_thres: *soft_label_thres
     labels: null
-    batch_size: 15
-    emb_batch_size: 0
+    batch_size: 2
+    emb_batch_size: 50
     shuffle: False
     synthetic: False
+
+  test_ds:
+    manifest_filepath: null
+    emb_dir: null
+    sample_rate: 16000
+    num_spks: *max_num_of_spks
+    soft_label_thres: *soft_label_thres
+    labels: null
+    batch_size: 2
+    shuffle: False
 
   preprocessor:
     _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
@@ -198,7 +214,6 @@ trainer:
   logger: False
   log_every_n_steps: 1  # Interval of logging.
   val_check_interval: 1.0  # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
-  reload_dataloaders_every_n_epochs: 1
 
 exp_manager:
   exp_dir: null
