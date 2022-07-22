@@ -543,7 +543,8 @@ class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
         super().__init__(*args, **kwargs)
         #avoid regenerating post-initialization
         if kwargs['dataset'].regen:
-            if torch.cuda.current_device() == 0:
+            # if torch.cuda.current_device() == 0:
+            if self.trainer.global_rank == 0
                 self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
 
@@ -797,6 +798,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
                 shuffle=False,
                 num_workers=config.get('num_workers', 0),
                 pin_memory=config.get('pin_memory', False),
+                trainer=self.trainer,
             )
         else:
             return torch.utils.data.DataLoader(
