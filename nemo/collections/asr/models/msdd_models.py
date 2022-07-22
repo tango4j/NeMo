@@ -769,6 +769,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
                 pairwise_infer=False,
                 emb_dir=self.cfg_msdd_model.train_ds.emb_dir,
                 ds_config=self.cfg_msdd_model,
+                trainer=self.trainer
             )
         else:
             dataset = AudioToSpeechMSDDTrainDataset(
