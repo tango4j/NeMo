@@ -544,7 +544,9 @@ class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
         #avoid regenerating post-initialization
         if kwargs['dataset'].regen:
             # if torch.cuda.current_device() == 0:
+            print('RANK: ', self.trainer.global_rank)
             if self.trainer.global_rank == 0
+                print('RANK INSIDE: ', self.trainer.global_rank)
                 self.dataset.regenerate_dataset()
         kwargs['dataset'].regen = True
 
