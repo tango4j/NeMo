@@ -587,7 +587,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
         else:
             self.world_size = 1
             self.pairwise_infer = True
-        super().__init__(cfg=self.cfg_msdd_model, trainer=trainer)
+        super().__init__(cfg=self.cfg_msdd_model)
 
         if type(self.cfg_msdd_model.base.diarizer.speaker_embeddings.parameters.window_length_in_sec) == int:
             raise ValueError("window_length_in_sec should be a list containing multiple segment (window) lengths")
