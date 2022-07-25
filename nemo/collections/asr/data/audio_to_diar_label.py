@@ -945,6 +945,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.random_flip = random_flip
 
         cfg = OmegaConf.create(ds_config)
+        cfg.data_simulator.outputs.output_dir += f" rank{self.trainer.global_rank}" 
         if cfg.data_simulator.rir_generation.use_rir:
             self.data_simulator = MultiMicLibriSpeechGenerator(cfg) #includes tmp dir
         else:
@@ -956,10 +957,10 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.trainer = trainer
         # self.collection = []
 
-        print('RANK: ', self.trainer.global_rank)
-        if self.trainer.global_rank == 0:
-            print('RANK INSIDE: ', self.trainer.global_rank)
-            self.regenerate_dataset()
+        # print('RANK: ', self.trainer.global_rank)
+        # if self.trainer.global_rank == 0:
+        #     print('RANK INSIDE: ', self.trainer.global_rank)
+        self.regenerate_dataset()
         # self.regen = False
 
     def _extract_timestamps(self, manifest_file: str):
