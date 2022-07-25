@@ -8,8 +8,8 @@ BASEPATH=/home/chooper/projects/$branch_name/NeMo/examples/speaker_tasks/diariza
 # train_manifest='/home/chooper/projects/branch_nemo/NeMo/scripts/speaker_tasks/ami_mixheadset_test_input_manifest.json'
 # dev_manifest='/home/chooper/projects/branch_nemo/NeMo/scripts/speaker_tasks/ami_mixheadset_dev_input_manifest.json'
 
-train_manifest=''
-dev_manifest='/home/chooper/projects/chooper_dl/NeMo/examples/speaker_tasks/diarization/ami_mixheadset_dev_input_manifest.json'
+train_manifest='/home/chooper/projects/chooper_dl_msdiar/NeMo/examples/speaker_tasks/diarization/ami_mixheadset_dev_input_manifest_short.json'
+dev_manifest='/home/chooper/projects/chooper_dl_msdiar/NeMo/examples/speaker_tasks/diarization/ami_mixheadset_dev_input_manifest_short.json'
 
 # PATHADD=''
 # train_emb_dir='/home/chooper/projects/data/diar_manifest_input'$PATHADD'/ts_vad_embs/'$emb_tag'/diar_train'
@@ -23,7 +23,7 @@ test_emb_dir='./speaker_outputs_test'
 emb_tag='sd'
 EXP_NAME="$emb_tag"
 EMB_BATCH_SIZE=0
-TRAIN_BATCHSIZE=4
+TRAIN_BATCHSIZE=2
 BATCHSIZE=$TRAIN_BATCHSIZE
 MAX_NUM_OF_SPKS=2
 export CUDA_VISIBLE_DEVICES="0,1"
@@ -37,8 +37,6 @@ wandb login 7aff50100c43f8efc06542e5a9b0c5aaff35b4c1 \
     diarizer.clustering.parameters.oracle_num_speakers=True \
     diarizer.clustering.parameters.max_num_speakers=$MAX_NUM_OF_SPKS\
     diarizer.oracle_vad=True \
-    diarizer.collar=0.0\
-    diarizer.ignore_overlap=False\
     batch_size=$EMB_BATCH_SIZE\
     trainer.max_epochs=200\
     trainer.max_steps=-1\
@@ -55,10 +53,11 @@ wandb login 7aff50100c43f8efc06542e5a9b0c5aaff35b4c1 \
     msdd_model.validation_ds.emb_dir="$dev_emb_dir" \
     msdd_model.emb_batch_size=0\
     msdd_model.end_to_end_train=True\
-    msdd_model.data_simulator.manifest_path="/home/chooper/projects/chooper_dl/NeMo/scripts/speaker_tasks/train-clean-100-align.json"\
-    msdd_model.data_simulator.outputs.output_dir="/home/chooper/projects/chooper_dl/NeMo/examples/speaker_tasks/diarization/test"\
-    msdd_model.data_simulator.session_config.num_sessions=10\
-    msdd_model.data_simulator.session_config.session_length=1800\
+    msdd_model.data_simulator.manifest_path="/home/chooper/projects/chooper_dl_msdiar/NeMo/scripts/speaker_tasks/train-clean-100-align.json"\
+    msdd_model.data_simulator.outputs.output_dir="/home/chooper/projects/chooper_dl_msdiar/NeMo/examples/speaker_tasks/diarization/test"\
+    msdd_model.data_simulator.session_config.num_sessions=1\
+    msdd_model.data_simulator.session_config.session_length=600\
+    msdd_model.data_simulator.background_noise.background_dir='/home/chooper/projects/rir_isotropic_noises/train/'\
     num_workers=24\
     trainer.gpus=2\
     exp_manager.name=$EXP_NAME \
