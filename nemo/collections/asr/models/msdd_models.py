@@ -545,7 +545,7 @@ class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
             # if torch.cuda.current_device() == 0:
         # kwargs['dataset'].regen = True
         super().__init__(*args, **kwargs)
-        print('RANK: ', kwargs['dataset'].trainer.global_rank)
+        print('SDL RANK: ', kwargs['dataset'].trainer.global_rank)
         # if kwargs['dataset'].trainer.global_rank == 0:
         #     print('RANK INSIDE: ', kwargs['dataset'].trainer.global_rank)
         self.dataset.regenerate_dataset()
