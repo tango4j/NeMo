@@ -543,12 +543,12 @@ class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
         #avoid regenerating post-initialization
         # if kwargs['dataset'].regen:
             # if torch.cuda.current_device() == 0:
+        # kwargs['dataset'].regen = True
+        super().__init__(*args, **kwargs)
         print('RANK: ', kwargs['dataset'].trainer.global_rank)
         if kwargs['dataset'].trainer.global_rank == 0:
             print('RANK INSIDE: ', kwargs['dataset'].trainer.global_rank)
             self.dataset.regenerate_dataset()
-        # kwargs['dataset'].regen = True
-        super().__init__(*args, **kwargs)
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
     """Encoder decoder class for multiscale speaker diarization decoder.
