@@ -954,7 +954,7 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.include_base_ds = cfg.train_ds.include_base_ds
         self.manifest_filepath = manifest_filepath
         self.trainer = trainer
-        self.collection = None
+        self.collection = []
 
         # self.regenerate_dataset()
         # self.regen = False
