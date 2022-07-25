@@ -20,6 +20,7 @@ The simulator is reconfigurable and has several options including:
 * Session length
 * Speaker dominance
 * Turn taking
+* Background noise
 
 The simulator can be used in two modes: close talk (no Room Impulse Response) as well as far field (including synthetic RIR). When using synthetic RIR generation, multiple microhones can be placed in the simulated room environment for multichannel simulations.
 
@@ -30,6 +31,11 @@ Required Datasets
 
 * LibriSpeech
 * LibriSpeech word alignments from [here](https://github.com/CorentinJ/librispeech-alignments)
+
+Optional Datasets
+------------
+
+* Room Impulse Response and Noise Database from [here](https://www.openslr.org/resources/28/rirs_noises.zip)
 
 Installation (after installing NeMo)
 ------------
@@ -77,7 +83,8 @@ export PYTHONPATH=<NeMo base path>:$PYTHONPATH \
 && python multispeaker_simulator.py --config-path='conf' --config-name='data_simulator.yaml' \
   data_simulator.random_seed=42 \
   data_simulator.manifest_path=./train-clean-100-align.json \
-  data_simulator.outputs.output_dir=./test_closetalk
+  data_simulator.outputs.output_dir=./test_closetalk \
+  data_simulator.background_noise.background_dir=<Path to background noise directory>
 ```
 
 5. Create multi-microphone audio sessions (with synthetic RIR generation)
@@ -87,5 +94,6 @@ export PYTHONPATH=<NeMo base path>:$PYTHONPATH \
 && python multispeaker_simulator.py --config-path='conf' --config-name='data_simulator_multimic.yaml' \
   data_simulator.random_seed=42 \
   data_simulator.manifest_path=./train-clean-100-align.json \
-  data_simulator.outputs.output_dir=./test_multimic
+  data_simulator.outputs.output_dir=./test_multimic \
+  data_simulator.background_noise.background_dir=<Path to background noise directory>
 ```
