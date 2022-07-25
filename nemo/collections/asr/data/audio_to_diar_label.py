@@ -954,9 +954,9 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.include_base_ds = cfg.train_ds.include_base_ds
         self.manifest_filepath = manifest_filepath
         self.trainer = trainer
-        self.collection = []
+        # self.collection = []
 
-        # self.regenerate_dataset()
+        self.regenerate_dataset()
         # self.regen = False
 
     def _extract_timestamps(self, manifest_file: str):
