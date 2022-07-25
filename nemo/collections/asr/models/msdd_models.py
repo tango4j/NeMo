@@ -756,6 +756,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
             sample_rate=config['sample_rate'], int_values=config.get('int_values', False), augmentor=None
         )
 
+        print('__setup_dataloader_from_config RANK: ', self.trainer.global_rank)
+
         if 'manifest_filepath' in config and config['manifest_filepath'] is None and ('synthetic' not in config or config['synthetic'] == False or self.cfg_msdd_model.train_ds.include_base_ds):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
