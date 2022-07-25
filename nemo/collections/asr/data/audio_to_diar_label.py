@@ -1017,7 +1017,9 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
 
         return timestamps_dict
 
-    def _run_segmentation(self, window: float, shift: float, _speaker_dir: str, _speaker_manifest_path: str, scale_tag: str = ''):
+    def _run_segmentation(
+        self, window: float, shift: float, _speaker_dir: str, _speaker_manifest_path: str, scale_tag: str = ''
+    ):
 
         subsegments_manifest_path = os.path.join(_speaker_dir, f'subsegments{scale_tag}_rank{self.trainer.global_rank}.json')
         logging.info(
@@ -1046,26 +1048,23 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
 
         # Speech Activity Detection part
         _speaker_manifest_path = os.path.join(_speaker_dir, f'oracle_vad_manifest_rank{self.trainer.global_rank}.json')
-        _speaker_manifest_path = write_rttm2manifest(split_audio_rttm_map,
-                                                     _speaker_manifest_path,
-                                                     include_uniq_id=True)
+        _speaker_manifest_path = write_rttm2manifest(
+            split_audio_rttm_map, _speaker_manifest_path, include_uniq_id=True
+        )
 
         multiscale_and_timestamps = {}
+
         # Segmentation
         for scale_idx, (window, shift) in self.multiscale_args_dict['scale_dict'].items():
 
             # Segmentation for the current scale (scale_idx)
-            subsegments_manifest_path = self._run_segmentation(window,
-                                                               shift,
-                                                               _speaker_dir,
-                                                               _speaker_manifest_path,
-                                                               scale_tag=f'_scale{scale_idx}')
+            subsegments_manifest_path = self._run_segmentation(
+                window, shift, _speaker_dir, _speaker_manifest_path, scale_tag=f'_scale{scale_idx}'
+            )
             multiscale_timestamps = self._extract_timestamps(subsegments_manifest_path)
             multiscale_and_timestamps[scale_idx] = multiscale_timestamps
 
-        multiscale_timestamps_dict = self.get_timestamps(
-            multiscale_and_timestamps, self.multiscale_args_dict
-        )
+        multiscale_timestamps_dict = self.get_timestamps(multiscale_and_timestamps, self.multiscale_args_dict)
         return multiscale_timestamps_dict
 
     def regenerate_dataset(self):
