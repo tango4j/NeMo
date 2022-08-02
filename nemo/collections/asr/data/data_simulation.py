@@ -896,10 +896,6 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
         rt60 = self._params.data_simulator.rir_generation.absorbtion_params.T60  # The desired reverberation time
         sr = self._params.data_simulator.sr
 
-        # We invert Sabine's formula to obtain the parameters for the ISM simulator
-        e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
-        room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
-
         room_sz_tmp = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
         if room_sz_tmp.ndim == 2: #randomize
             room_sz = np.zeros(room_sz_tmp.shape[0])
@@ -916,6 +912,10 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
                     pos_src[i] = np.random.uniform(pos_src_tmp[i,j,0], pos_src_tmp[i,j,1])
         else:
             pos_src = pos_src_tmp
+
+        # We invert Sabine's formula to obtain the parameters for the ISM simulator
+        e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
+        room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
 
         if self._params.data_simulator.background_noise.add_bg:
             pos_src = np.vstack((pos_src, self._params.data_simulator.rir_generation.room_config.noise_src_pos))
