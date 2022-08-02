@@ -48,9 +48,9 @@ from nemo.collections.asr.parts.utils.manifest_utils import (
 )
 from nemo.utils import logging
 
-class LibriSpeechGenerator(object):
+class LibriSpeechSimulator(object):
     """
-    Librispeech Diarization Session Generator.
+    Librispeech Diarization Session Simulator.
 
     Args:
         cfg: OmegaConf configuration loaded from yaml file.
@@ -678,6 +678,7 @@ class LibriSpeechGenerator(object):
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
         array = torch.zeros(session_length_sr)
+        is_bg = torch.zeros(session_length_sr)
 
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
@@ -702,7 +703,9 @@ class LibriSpeechGenerator(object):
             end = start + length
             if end > len(array): #only occurs in enforce mode
                 array = torch.nn.functional.pad(array, (0, end - len(array)))
+                is_bg = torch.nn.functional.pad(is_bg, (0, end - len(is_bg)))
             array[start:end] += self._sentence
+            is_bg[start:end] = 1
 
             #build entries for output files
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
@@ -721,7 +724,7 @@ class LibriSpeechGenerator(object):
 
         #background noise augmentation
         if self._params.data_simulator.background_noise.add_bg:
-            avg_power_array = torch.mean(array**2)
+            avg_power_array = torch.mean(array[is_bg == 1]**2)
             bg = self._get_background(len(array), avg_power_array)
             array += bg
 
@@ -791,9 +794,9 @@ class LibriSpeechGenerator(object):
         ctmlist.close()
         textlist.close()
 
-class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
+class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
     """
-    Multi Microphone Librispeech Diarization Session Generator.
+    Multi Microphone Librispeech Diarization Session Simulator.
     """
 
     def _check_args(self):
@@ -838,12 +841,35 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         """
         Create simulated RIR
         """
-        room_sz = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
-        pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
+        room_sz_tmp = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
+        if room_sz_tmp.ndim == 2: #randomize
+            room_sz = np.zeros(room_sz_tmp.shape[0])
+            for i in range(0,room_sz_tmp.shape[0]):
+                room_sz[i] = np.random.uniform(room_sz_tmp[i,0], room_sz_tmp[i,1])
+        else:
+            room_sz = room_sz_tmp
+
+        pos_src_tmp = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
+        if pos_src_tmp.ndim == 3: #randomize
+            pos_src = np.zeros((pos_src_tmp.shape[0], pos_src_tmp.shape[1]))
+            for i in range(0,pos_src_tmp.shape[0]):
+                for j in range(0,pos_src_tmp.shape[1]):
+                    pos_src[i] = np.random.uniform(pos_src_tmp[i,j,0], pos_src_tmp[i,j,1])
+        else:
+            pos_src = pos_src_tmp
+
         if self._params.data_simulator.background_noise.add_bg:
             pos_src = np.vstack((pos_src, self._params.data_simulator.rir_generation.room_config.noise_src_pos))
 
-        pos_rcv = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
+        mic_pos_tmp = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
+        if mic_pos_tmp.ndim == 3: #randomize
+            mic_pos = np.zeros((mic_pos_tmp.shape[0], mic_pos_tmp.shape[1]))
+            for i in range(0,mic_pos_tmp.shape[0]):
+                for j in range(0,mic_pos_tmp.shape[1]):
+                    mic_pos[i] = np.random.uniform(mic_pos_tmp[i,j,0], mic_pos_tmp[i,j,1])
+        else:
+            mic_pos = mic_pos_tmp
+
         orV_rcv = self._params.data_simulator.rir_generation.mic_config.orV_rcv
         if orV_rcv: #not needed for omni mics
             orV_rcv = np.array(orV_rcv)
@@ -859,7 +885,8 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         Tmax = att2t_SabineEstimator(att_max, T60)  # Time to stop the simulation [s]
         nb_img = t2n(Tdiff, room_sz)  # Number of image sources in each dimension
         RIR = simulateRIR(room_sz, beta, pos_src, pos_rcv, nb_img, Tmax, sr, Tdiff=Tdiff, orV_rcv=orV_rcv, mic_pattern=mic_pattern)
-        return RIR
+        RIR_pad = RIR.shape[2] - 1
+        return RIR, RIR_pad
 
     def _generate_rir_pyroomacoustics(self):
         """
@@ -867,14 +894,29 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         """
 
         rt60 = self._params.data_simulator.rir_generation.absorbtion_params.T60  # The desired reverberation time
-        room_dim = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
         sr = self._params.data_simulator.sr
 
         # We invert Sabine's formula to obtain the parameters for the ISM simulator
         e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
         room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
 
-        pos_src = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
+        room_sz_tmp = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
+        if room_sz_tmp.ndim == 2: #randomize
+            room_sz = np.zeros(room_sz_tmp.shape[0])
+            for i in range(0,room_sz_tmp.shape[0]):
+                room_sz[i] = np.random.uniform(room_sz_tmp[i,0], room_sz_tmp[i,1])
+        else:
+            room_sz = room_sz_tmp
+
+        pos_src_tmp = np.array(self._params.data_simulator.rir_generation.room_config.pos_src)
+        if pos_src_tmp.ndim == 3: #randomize
+            pos_src = np.zeros((pos_src_tmp.shape[0], pos_src_tmp.shape[1]))
+            for i in range(0,pos_src_tmp.shape[0]):
+                for j in range(0,pos_src_tmp.shape[1]):
+                    pos_src[i] = np.random.uniform(pos_src_tmp[i,j,0], pos_src_tmp[i,j,1])
+        else:
+            pos_src = pos_src_tmp
+
         if self._params.data_simulator.background_noise.add_bg:
             pos_src = np.vstack((pos_src, self._params.data_simulator.rir_generation.room_config.noise_src_pos))
         for pos in pos_src:
@@ -889,34 +931,27 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             orientation=dir_vec,
             pattern_enum=mic_pattern,
         )
-        room.add_microphone_array(np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv).T, directivity=dir_obj)
+
+        mic_pos_tmp = np.array(self._params.data_simulator.rir_generation.mic_config.pos_rcv)
+        if mic_pos_tmp.ndim == 3: #randomize
+            mic_pos = np.zeros((mic_pos_tmp.shape[0], mic_pos_tmp.shape[1]))
+            for i in range(0,mic_pos_tmp.shape[0]):
+                for j in range(0,mic_pos_tmp.shape[1]):
+                    mic_pos[i] = np.random.uniform(mic_pos_tmp[i,j,0], mic_pos_tmp[i,j,1])
+        else:
+            mic_pos = mic_pos_tmp
+
+        room.add_microphone_array(mic_pos.T, directivity=dir_obj)
 
         room.compute_rir()
         rir_pad = 0
         for channel in room.rir:
             for pos in channel:
-                if pos.shape[0] > rir_pad:
-                    rir_pad = pos.shape[0]
+                if pos.shape[0] - 1 > rir_pad:
+                    rir_pad = pos.shape[0] - 1
         return room.rir,rir_pad
 
-    def _convolve_rir_gpuRIR(self, input, speaker_turn, RIR):
-        """
-        Augment sample using synthetic RIR
-
-        Args:
-            input (torch.tensor): Input audio.
-            speaker_turn (int): Current speaker turn.
-            RIR (torch.tensor): Room Impulse Response.
-        """
-        output_sound = []
-        for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(input, RIR[speaker_turn, channel, : len(input)]).tolist()
-            output_sound.append(out_channel)
-        output_sound = torch.tensor(output_sound)
-        output_sound = torch.transpose(output_sound, 0, 1)
-        return output_sound
-
-    def _convolve_rir_pyroomacoustics(self, input, speaker_turn, RIR):
+    def _convolve_rir(self, input, speaker_turn, RIR):
         """
         Augment sample using synthetic RIR
 
@@ -928,11 +963,14 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
         output_sound = []
         length = 0
         for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-            out_channel = convolve(input, RIR[channel][speaker_turn][:len(input)]).tolist()
+            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
+                out_channel = convolve(input, RIR[speaker_turn, channel, : len(input)]).tolist()
+            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
+                out_channel = convolve(input, RIR[channel][speaker_turn][:len(input)]).tolist()
             if len(out_channel) > length:
                 length = len(out_channel)
-            output_sound.append(torch.tensor(out_channel))
-        return output_sound,length
+            output_sound.append(out_channel)
+        return output_sound, length
 
     def _generate_session(self, idx, basepath, filename):
         """
@@ -960,8 +998,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         #Room Impulse Response Generation (performed once per batch of sessions)
         if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-            RIR = self._generate_rir_gpuRIR()
-            RIR_pad = RIR.shape[2] - 1
+            RIR, RIR_pad = self._generate_rir_gpuRIR()
         elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
             RIR,RIR_pad = self._generate_rir_pyroomacoustics()
         else:
@@ -974,6 +1011,7 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         session_length_sr = int((self._params.data_simulator.session_config.session_length * self._params.data_simulator.sr))
         array = torch.zeros((session_length_sr, self._params.data_simulator.rir_generation.mic_config.num_channels))
+        is_bg = torch.zeros(session_length_sr)
 
         while running_length_sr < session_length_sr or enforce:
             #enforce num_speakers
@@ -992,25 +1030,19 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
             elif max_sentence_duration_sr < self._params.data_simulator.session_params.end_buffer * self._params.data_simulator.sr:
                 break
             self._build_sentence(speaker_turn, speaker_ids, speaker_lists, max_sentence_duration_sr)
-
-            #augment sentence
-            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                augmented_sentence = self._convolve_rir_gpuRIR(self._sentence, speaker_turn, RIR)
-                length = augmented_sentence.shape[0]
-            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                augmented_sentence, length = self._convolve_rir_pyroomacoustics(self._sentence, speaker_turn, RIR)
+            augmented_sentence, length = self._convolve_rir(self._sentence, speaker_turn, RIR)
 
             start = self._add_silence_or_overlap(speaker_turn, prev_speaker, running_length_sr, length, session_length_sr, prev_length_sr, enforce)
             end = start + length
             if end > len(array):
                 array = torch.nn.functional.pad(array, (0, 0, 0, end - len(array)))
+                is_bg = torch.nn.functional.pad(is_bg, (0, end - len(is_bg)))
 
-            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                array[start:end, :] += augmented_sentence
-            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-                    len_ch = len(augmented_sentence[channel]) #acounts for how channels are slightly different lengths
-                    array[start:start+len_ch, channel] += augmented_sentence[channel]
+            is_bg[start:end] = 1
+
+            for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+                len_ch = len(augmented_sentence[channel]) #acounts for how channels are slightly different lengths
+                array[start:start+len_ch, channel] += augmented_sentence[channel]
 
             #build entries for output files
             new_rttm_entries = self._create_new_rttm_entry(start / self._params.data_simulator.sr, end / self._params.data_simulator.sr, speaker_ids[speaker_turn])
@@ -1029,16 +1061,12 @@ class MultiMicLibriSpeechGenerator(LibriSpeechGenerator):
 
         #background noise augmentation
         if self._params.data_simulator.background_noise.add_bg:
-            avg_power_array = torch.mean(array**2)
+            avg_power_array = torch.mean(array[is_bg == 1]**2)
             length = array.shape[0]
             bg = self._get_background(length, avg_power_array)
-            if self._params.data_simulator.rir_generation.toolkit == 'gpuRIR':
-                augmented_bg = self._convolve_rir_gpuRIR(bg, -1, RIR)
-                array += augmented_bg[:length,:]
-            elif self._params.data_simulator.rir_generation.toolkit == 'pyroomacoustics':
-                augmented_bg,_ = self._convolve_rir_pyroomacoustics(bg, -1, RIR)
-                for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
-                    array[:,channel] += augmented_bg[channel][:length]
+            augmented_bg,_ = self._convolve_rir(bg, -1, RIR)
+            for channel in range(0,self._params.data_simulator.rir_generation.mic_config.num_channels):
+                array[:,channel] += augmented_bg[channel][:length]
 
         array = array / (1.0 * torch.max(torch.abs(array)))  # normalize wav file to avoid clipping
         sf.write(os.path.join(basepath, filename + '.wav'), array, self._params.data_simulator.sr)

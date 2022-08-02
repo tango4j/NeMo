@@ -61,36 +61,57 @@ data_simulator:
     toolkit: 'pyroomacoustics' #pyroomacoustics or gpuRIR
     #parameters match those used by https://github.com/DavidDiazGuerra/gpuRIR
     room_config:
-      room_sz: # size of the shoebox room environment
-      - 3
-      - 3
-      - 2.5
+      room_sz: # size of the shoebox room environment (1d array for specific, 2d array for range)
+      - - 2
+        - 3
+      - - 2
+        - 3
+      - - 2
+        - 3
       pos_src: # positions of the speakers in the simulated room environment
-      - - 0.6
-        - 1.1
-        - 0.5
-      - - 1
-        - 2
-        - 0.5
-      - - 0.4
-        - 1.1
-        - 0.5
-      - - 1
-        - 2.1
-        - 0.5
-      noise_src_pos:
+      - - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+      - - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+      - - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+      - - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+      noise_src_pos: #position in room for the ambient background noise source
       - 1.5
       - 1.5
       - 2
     mic_config:
       num_channels: 2 # number of output audio channels
-      pos_rcv: # microphone positions in the simulated room environment
-      - - 0.5
-        - 1
-        - 0.5
-      - - 1
-        - 1
-        - 0.5
+      pos_rcv: # microphone positions in the simulated room environment (1d array for specific, 2d array for range)
+      - - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+      - - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
+        - - 0.5
+          - 1.5
       orV_rcv: null # microphone orientations (needed for non-omnidirectional microphones)
       mic_pattern: omni # microphone type (eg. omnidirectional)
     absorbtion_params: #only T60 is used for pyroomacoustics

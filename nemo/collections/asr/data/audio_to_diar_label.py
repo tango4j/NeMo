@@ -27,7 +27,7 @@ from nemo.collections.common.parts.preprocessing.collections import DiarizationS
 from nemo.core.classes import Dataset
 from nemo.core.neural_types import AudioSignal, EncodedRepresentation, LengthsType, NeuralType
 
-from nemo.collections.asr.data.data_simulation import LibriSpeechGenerator, MultiMicLibriSpeechGenerator
+from nemo.collections.asr.data.data_simulation import LibriSpeechSimulator, RIRAugmentedLibriSpeechSimulator
 from nemo.collections.asr.parts.utils.speaker_utils import write_rttm2manifest, segments_manifest_to_subsegments_manifest, get_uniq_id_with_dur
 from nemo.utils import logging
 
@@ -913,6 +913,8 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
             Directory for generating speaker embeddings
         ds_config (dict):
             Model config used to access data simulator parameters
+        trainer:
+            Pytorch trainer
     """
 
     def __init__(
@@ -947,9 +949,9 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         cfg = OmegaConf.create(ds_config)
         cfg.data_simulator.outputs.output_dir += f"_rank{trainer.global_rank}"
         if cfg.data_simulator.rir_generation.use_rir:
-            self.data_simulator = MultiMicLibriSpeechGenerator(cfg) #includes tmp dir
+            self.data_simulator = RIRAugmentedLibriSpeechSimulator(cfg) #includes tmp dir
         else:
-            self.data_simulator = LibriSpeechGenerator(cfg) #includes tmp dir
+            self.data_simulator = LibriSpeechSimulator(cfg) #includes tmp dir
         self.emb_dir = emb_dir
 
         self.include_base_ds = cfg.train_ds.include_base_ds
@@ -967,6 +969,10 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         """
         This method extracts speaker embeddings from segments passed through manifest_file
         Optionally you may save the intermediate speaker embeddings for debugging or any use.
+
+        Args:
+            manifest_file (str):
+                segment manifest file
         """
         logging.info("Extracting only timestamps for multiscale segmentation")
         time_stamps = {}
@@ -1020,7 +1026,6 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
     def _run_segmentation(
         self, window: float, shift: float, _speaker_dir: str, _speaker_manifest_path: str, scale_tag: str = ''
     ):
-
         subsegments_manifest_path = os.path.join(_speaker_dir, f'subsegments{scale_tag}_rank{self.trainer.global_rank}.json')
         logging.info(
             f"Subsegmentation for embedding extraction:{scale_tag.replace('_',' ')}, {subsegments_manifest_path}"
@@ -1068,6 +1073,9 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         return multiscale_timestamps_dict
 
     def regenerate_dataset(self):
+        """
+        Regenerate dataset and create subsegment manifest files
+        """
         #Regenerate synthetic diarization sessions
         self.data_simulator.generate_sessions()
 
