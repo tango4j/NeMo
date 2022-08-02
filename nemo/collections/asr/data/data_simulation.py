@@ -884,7 +884,7 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
         Tdiff = att2t_SabineEstimator(att_diff, T60)  # Time to start the diffuse reverberation model [s]
         Tmax = att2t_SabineEstimator(att_max, T60)  # Time to stop the simulation [s]
         nb_img = t2n(Tdiff, room_sz)  # Number of image sources in each dimension
-        RIR = simulateRIR(room_sz, beta, pos_src, pos_rcv, nb_img, Tmax, sr, Tdiff=Tdiff, orV_rcv=orV_rcv, mic_pattern=mic_pattern)
+        RIR = simulateRIR(room_sz, beta, pos_src, mic_pos, nb_img, Tmax, sr, Tdiff=Tdiff, orV_rcv=orV_rcv, mic_pattern=mic_pattern)
         RIR_pad = RIR.shape[2] - 1
         return RIR, RIR_pad
 
