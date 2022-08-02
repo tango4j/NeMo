@@ -914,7 +914,7 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
             pos_src = pos_src_tmp
 
         # We invert Sabine's formula to obtain the parameters for the ISM simulator
-        e_absorption, max_order = pra.inverse_sabine(rt60, room_dim)
+        e_absorption, max_order = pra.inverse_sabine(rt60, room_sz)
         room = pra.ShoeBox(room_dim, fs=sr, materials=pra.Material(e_absorption), max_order=max_order)
 
         if self._params.data_simulator.background_noise.add_bg:
