@@ -969,6 +969,7 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
                 out_channel = convolve(input, RIR[channel][speaker_turn][:len(input)]).tolist()
             if len(out_channel) > length:
                 length = len(out_channel)
+            out_channel = torch.tensor(out_channel)
             output_sound.append(out_channel)
         return output_sound, length
 
