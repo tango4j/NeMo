@@ -432,6 +432,8 @@ class LibriSpeechSimulator(object):
             #audio_file, sr = librosa.load(file['audio_filepath'], sr=self._params.data_simulator.sr)
             audio_file, sr = sf.read(file['audio_filepath'])
             audio_file = torch.from_numpy(audio_file)
+            if audio_file.ndim > 1:
+                audio_file = torch.mean(audio_file, 1, False)
             sentence_duration,sentence_duration_sr = self._add_file(file, audio_file, sentence_duration, sl, max_sentence_duration_sr)
 
         #look for split locations
@@ -558,14 +560,11 @@ class LibriSpeechSimulator(object):
         while running_len < len_array: #build background audio stream (the same length as the full file)
             file_id = np.random.randint(0, len(bg_files) - 1)
             file = bg_files[file_id]
-            audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
-            print(audio_file)
-            print(audio_file.shape)
+            # audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
             audio_file, sr = sf.read(os.path.join(bg_dir, file))
-            print(audio_file)
-            print(audio_file.shape)
-            print(os.path.join(bg_dir, file))
             audio_file = torch.from_numpy(audio_file)
+            if audio_file.ndim > 1:
+                audio_file = torch.mean(audio_file, 1, False)
 
             if running_len+len(audio_file) < len_array:
                 end_audio_file = running_len + len(audio_file)
