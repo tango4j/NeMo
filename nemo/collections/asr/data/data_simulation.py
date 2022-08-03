@@ -559,7 +559,7 @@ class LibriSpeechSimulator(object):
             file_id = np.random.randint(0, len(bg_files) - 1)
             file = bg_files[file_id]
             # audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
-            audio_file, sr = sf.read(file['audio_filepath'])
+            audio_file, sr = sf.read(os.path.join(bg_dir, file))
             audio_file = torch.from_numpy(audio_file)
 
             if running_len+len(audio_file) < len_array:
