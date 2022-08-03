@@ -114,6 +114,9 @@ class LibriSpeechSimulator(object):
     def _get_speaker_ids(self):
         """
         Randomly select speaker IDs from loaded manifest file
+
+        Returns:
+            speaker_ids (list): Speaker IDs
         """
         speaker_ids = []
         s = 0
@@ -132,6 +135,8 @@ class LibriSpeechSimulator(object):
 
         Args:
             speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
+        Returns:
+            speaker_lists (dict): Dictionary of manifest lines per speaker
         """
         speaker_lists = {}
         for i in range(0, self._params.data_simulator.session_config.num_speakers):
@@ -153,6 +158,8 @@ class LibriSpeechSimulator(object):
             speaker_lists (list): List of samples for each speaker in the session.
             speaker_ids (list): LibriSpeech speaker IDs for each speaker in the current session.
             speaker_turn (int): Current speaker turn.
+        Returns:
+            file_path (str): Path to the desired audio file
         """
         speaker_id = speaker_ids[speaker_turn]
         file_id = np.random.randint(0, len(speaker_lists[str(speaker_id)]) - 1)
@@ -162,6 +169,9 @@ class LibriSpeechSimulator(object):
     def _get_speaker_dominance(self):
         """
         Get the dominance value for each speaker
+
+        Returns:
+            dominance (list): Per-speaker dominance
         """
         dominance_mean = 1.0/self._params.data_simulator.session_config.num_speakers
         dominance = np.random.normal(loc=dominance_mean, scale=self._params.data_simulator.session_params.dominance_var, size=self._params.data_simulator.session_config.num_speakers)
@@ -188,6 +198,9 @@ class LibriSpeechSimulator(object):
         Args:
             base_speaker_dominance (list): Dominance values for each speaker.
             factor (int): Factor to increase dominance of unrepresented speakers by.
+        Returns:
+            dominance (list): Per-speaker dominance
+            enforce (bool): Whether to keep enforce mode turned on
         """
         increase_percent = []
         for i in range(0,self._params.data_simulator.session_config.num_speakers):
@@ -233,6 +246,8 @@ class LibriSpeechSimulator(object):
         Args:
             prev_speaker (int): Previous speaker turn.
             dominance (list): Dominance values for each speaker.
+        Returns:
+            prev_speaker/speaker_turn (int): Speaker turn
         """
         if np.random.uniform(0, 1) > self._params.data_simulator.session_params.turn_prob and prev_speaker != None:
             return prev_speaker
@@ -252,6 +267,9 @@ class LibriSpeechSimulator(object):
         Args:
             window_amount (int): Window length (in terms of number of samples).
             start (bool): If true, return first half of the window.
+
+        Returns:
+            window (tensor): Half window (either first half or second half)
         """
         if self._params.data_simulator.session_params.window_type == 'hamming':
             window = hamming(window_amount*2)
@@ -273,6 +291,9 @@ class LibriSpeechSimulator(object):
 
         Args:
             first_alignment (int): Start of the first word (in terms of number of samples).
+        Returns:
+            start_cutoff (int): Amount into the audio clip to start
+            window_amount (int): Window length
         """
         window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
         start_buffer = int(self._params.data_simulator.session_params.start_buffer*self._params.data_simulator.sr)
@@ -296,6 +317,9 @@ class LibriSpeechSimulator(object):
             current_sr (int): Current location in the target file (in terms of number of samples).
             remaining_duration_sr (int): Remaining duration in the target file (in terms of number of samples).
             remaining_len_audio_file (int): Length remaining in audio file (in terms of number of samples).
+        Returns:
+            release_buffer (int): Amount after the end of the last alignment to include
+            window_amount (int): Window length
         """
 
         window_amount = int(self._params.data_simulator.session_params.window_size*self._params.data_simulator.sr)
@@ -325,6 +349,9 @@ class LibriSpeechSimulator(object):
             sentence_duration (int): Running count for number of words in sentence
             max_sentence_duration (int): Maximum count for number of words in sentence
             max_sentence_duration_sr (int): Maximum length for sentence in terms of samples
+        Returns:
+            sentence_duration+nw (int): Running word count
+            len(self._sentence) (tensor): Current length of the audio file
         """
         if (sentence_duration == 0) and self._params.data_simulator.session_params.start_window: #cut off the start of the sentence
             first_alignment = int(file['alignments'][0]*self._params.data_simulator.sr)
@@ -442,6 +469,8 @@ class LibriSpeechSimulator(object):
             session_length_sr (int): Running length of the session in terms of number of samples
             prev_length_sr (int): Length of previous sentence (in terms of number of samples)
             enforce (bool): Whether speaker enforcement mode is being used
+        Returns:
+            new_start (int): New starting position in the session accounting for overlap or silence
         """
         overlap_prob = self._params.data_simulator.session_params.overlap_prob / (self._params.data_simulator.session_params.turn_prob)  #accounting for not overlapping the same speaker
         mean_overlap_percent = (self._params.data_simulator.session_params.mean_overlap / (1+self._params.data_simulator.session_params.mean_overlap)) /  self._params.data_simulator.session_params.overlap_prob
@@ -515,6 +544,8 @@ class LibriSpeechSimulator(object):
         Args:
             len_array (int): Length of background noise required.
             avg_power_array (float): Average power of the audio file.
+        Returns:
+            bg_array (tensor): Tensor containing background noise
         """
 
         bg_dir = self._params.data_simulator.background_noise.background_dir
@@ -552,6 +583,8 @@ class LibriSpeechSimulator(object):
             start (int): Current start of the audio file being inserted.
             end (int): End of the audio file being inserted.
             speaker_id (int): LibriSpeech speaker ID for the current entry.
+        Returns:
+            rttm_list (list): List of rttm entries
         """
         rttm_list = []
         new_start = start
@@ -582,6 +615,8 @@ class LibriSpeechSimulator(object):
             speaker_id (int): LibriSpeech speaker ID for the current entry.
             rttm_filepath (str): Output rttm filepath.
             ctm_filepath (str): Output ctm filepath.
+        Returns:
+            dict (dict): JSON entry
         """
         start = float(round(start,self._params.data_simulator.outputs.output_precision))
         length = float(round(length,self._params.data_simulator.outputs.output_precision))
@@ -604,6 +639,8 @@ class LibriSpeechSimulator(object):
             session_name (str): Current session name.
             start (int): Current start of the audio file being inserted.
             speaker_id (int): LibriSpeech speaker ID for the current entry.
+        Returns:
+            arr (list): List of ctm entries
         """
         arr = []
         start = float(round(start,self._params.data_simulator.outputs.output_precision))
@@ -619,6 +656,9 @@ class LibriSpeechSimulator(object):
     def create_base_manifest_ds(self):
         """
         Create base diarization manifest file (for online data simulation)
+
+        Returns:
+            self.base_manifest_filepath (str): Path to manifest file
         """
         basepath = self._params.data_simulator.outputs.output_dir
         wav_path = os.path.join(basepath, 'synthetic_wav.list')
@@ -635,6 +675,9 @@ class LibriSpeechSimulator(object):
     def create_segment_manifest_ds(self):
         """
         Create segmented diarization manifest file (for online data simulation)
+
+        Returns:
+            self.segment_manifest_filepath (str): Path to manifest file
         """
         basepath = self._params.data_simulator.outputs.output_dir
         output_manifest_path = os.path.join(basepath, 'segment_manifest.json')
@@ -842,6 +885,10 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
     def _generate_rir_gpuRIR(self):
         """
         Create simulated RIR
+
+        Returns:
+            RIR (tensor): Generated RIR
+            RIR_pad (int): Length of padding added when convolving the RIR with an audio file
         """
         room_sz_tmp = np.array(self._params.data_simulator.rir_generation.room_config.room_sz)
         if room_sz_tmp.ndim == 2: #randomize
@@ -893,6 +940,10 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
     def _generate_rir_pyroomacoustics(self):
         """
         Create simulated RIR
+
+        Returns:
+            RIR (tensor): Generated RIR
+            RIR_pad (int): Length of padding added when convolving the RIR with an audio file
         """
 
         rt60 = self._params.data_simulator.rir_generation.absorbtion_params.T60  # The desired reverberation time
@@ -961,6 +1012,9 @@ class RIRAugmentedLibriSpeechSimulator(LibriSpeechSimulator):
             input (torch.tensor): Input audio.
             speaker_turn (int): Current speaker turn.
             RIR (torch.tensor): Room Impulse Response.
+        Returns:
+            output_sound (list): List of tensors containing augmented audio
+            length (int): Length of output audio channels (or of the longest if they have different lengths)
         """
         output_sound = []
         length = 0

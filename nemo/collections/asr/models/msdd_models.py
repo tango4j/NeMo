@@ -1282,11 +1282,11 @@ class NeuralDiarizer:
                     ),
                 )
                 target_clus_label_bool = target_clus_label_tensor == test_data_collection.target_spks[spk_idx]
-                
+
                 # There are cases where there is no corresponding speaker in split range, so any(target_clus_label_bool) could be False.
                 if any(target_clus_label_bool) == True:
                     emb_vectors_split[:, :, spk_idx] = torch.mean(emb_seq[target_clus_label_bool], dim=0)
-                
+
                 # In case when the loop reaches the end of the sequence
                 if seq_len < self.diar_window_length:
                     emb_seq = torch.cat(
@@ -1307,7 +1307,7 @@ class NeuralDiarizer:
 
     def get_range_clus_avg_emb(self, test_batch, _test_data_collection, split_count):
         """
-        
+
 
         split_count
 

@@ -35,6 +35,8 @@ def rreplace(s, old, new):
         s (str): string to operate on
         old (str): ending of string to replace
         new (str): replacement for ending of string
+    Returns:
+        new.join(li) (string): new string with end replaced
     """
     li = s.rsplit(old, 1)
     return new.join(li)
@@ -45,6 +47,8 @@ def get_uniq_id_with_period(path):
 
     Args:
         path (str): path to audio file
+    Returns:
+        uniq_id (string): unique speaker ID
     """
     split_path = os.path.basename(path).split('.')[:-1]
     uniq_id = '.'.join(split_path) if len(split_path) > 1 else split_path[0]
@@ -59,6 +63,8 @@ def get_subsegment_dict(subsegments_manifest_file, window, shift, deci):
         window (float): Window length for segmentation
         shift (float): Shift length for segmentation
         deci (int): Rounding number of decimal places
+    Returns:
+        _subsegment_dict (_subsegment_dict): Subsegment dictionary
     """
     _subsegment_dict = {}
     with open(subsegments_manifest_file, 'r') as subsegments_manifest:
@@ -83,6 +89,8 @@ def get_input_manifest_dict(input_manifest_path):
 
     Args:
         input_manifest_path (str): Path to manifest file
+    Returns:
+        input_manifest_dict (dict): Dictionary from manifest file
     """
     input_manifest_dict = {}
     with open(input_manifest_path, 'r') as input_manifest_fp:
@@ -145,6 +153,8 @@ def read_file(pathlist):
 
     Args:
         pathlist (str): Input file path
+    Returns:
+        sorted(pathlist) (list): List of lines
     """
     pathlist = open(pathlist, 'r').readlines()
     return sorted(pathlist)
@@ -155,6 +165,8 @@ def get_dict_from_wavlist(pathlist):
 
     Args:
         pathlist (list): List of file paths
+    Returns:
+        path_dict (dict): Dictionary containing dictionaries read from files
     """
     path_dict = od()
     pathlist = sorted(pathlist)
@@ -170,6 +182,8 @@ def get_dict_from_list(data_pathlist, uniqids):
     Args:
         data_pathlist (list): List of file paths
         uniqids (list): List of file IDs
+    Returns:
+        path_dict (dict): Dictionary containing file paths
     """
     path_dict = {}
     for line_path in data_pathlist:
@@ -188,6 +202,8 @@ def get_path_dict(data_path, uniqids, len_wavs=None):
         data_path (str): Path to file containing list of files
         uniqids (list): List of file IDs
         len_wavs (int): Length of file list
+    Returns:
+        data_pathdict (dict): Dictionary containing file paths
     """
     if data_path is not None:
         data_pathlist = read_file(data_path)
@@ -321,6 +337,8 @@ def read_manifest(manifest):
 
     Args:
         manifest (str): Path to manifest file
+    Returns:
+        data (list): List of JSON items
     """
     data = []
     with open(manifest, 'r', encoding='utf-8') as f:
