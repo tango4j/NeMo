@@ -558,7 +558,9 @@ class LibriSpeechSimulator(object):
         while running_len < len_array: #build background audio stream (the same length as the full file)
             file_id = np.random.randint(0, len(bg_files) - 1)
             file = bg_files[file_id]
-            # audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
+            audio_file, sr = librosa.load(os.path.join(bg_dir, file), sr=self._params.data_simulator.sr)
+            print(audio_file)
+            print(audio_file.shape)
             audio_file, sr = sf.read(os.path.join(bg_dir, file))
             print(audio_file)
             print(audio_file.shape)
