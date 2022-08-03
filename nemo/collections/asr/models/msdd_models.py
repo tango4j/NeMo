@@ -41,7 +41,7 @@ from nemo.collections.asr.data.audio_to_diar_label import (
     AudioToSpeechMSDDTrainDataset,
     AudioToSpeechMSDDSyntheticTrainDataset,
     get_audio_rttm_map,
-
+    SyntheticDataLoader,
 )
 from torchmetrics import Metric
 from tqdm import tqdm
@@ -533,22 +533,6 @@ class ClusterEmbedding:
                 emb_dict[key] = val
             emb_scale_seq_dict[scale_index] = emb_dict
         return emb_scale_seq_dict
-
-class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
-    """
-    Modified dataloader for refreshing synthetic dataset
-    after a specified number of epochs.
-    """
-    def __init__(self, *args, **kwargs):
-        #avoid regenerating post-initialization
-        # if kwargs['dataset'].regen:
-            # if torch.cuda.current_device() == 0:
-        # kwargs['dataset'].regen = True
-        super().__init__(*args, **kwargs)
-        print('SDL RANK: ', kwargs['dataset'].trainer.global_rank)
-        # if kwargs['dataset'].trainer.global_rank == 0:
-        #     print('RANK INSIDE: ', kwargs['dataset'].trainer.global_rank)
-        self.dataset.regenerate_dataset()
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel, ClusterEmbedding):
     """Encoder decoder class for multiscale speaker diarization decoder.
