@@ -891,14 +891,8 @@ class SyntheticDataLoader(torch.utils.data.dataloader.DataLoader):
     after a specified number of epochs.
     """
     def __init__(self, *args, **kwargs):
-        #avoid regenerating post-initialization
-        # if kwargs['dataset'].regen:
-            # if torch.cuda.current_device() == 0:
-        # kwargs['dataset'].regen = True
         super().__init__(*args, **kwargs)
-        print('SDL RANK: ', kwargs['dataset'].trainer.global_rank)
-        # if kwargs['dataset'].trainer.global_rank == 0:
-        #     print('RANK INSIDE: ', kwargs['dataset'].trainer.global_rank)
+        logging.info("Reloading dataset in synthetic dataloader")
         self.dataset.regenerate_dataset()
 
 
@@ -974,13 +968,9 @@ class AudioToSpeechMSDDSyntheticTrainDataset(AudioToSpeechMSDDTrainDataset):
         self.include_base_ds = cfg.train_ds.include_base_ds
         self.manifest_filepath = manifest_filepath
         self.trainer = trainer
-        # self.collection = []
 
-        print('AudioToSpeechMSDDSyntheticTrainDataset RANK: ', self.trainer.global_rank)
-        # if self.trainer.global_rank == 0:
-        #     print('RANK INSIDE: ', self.trainer.global_rank)
+        logging.info("Initializing dataset in synthetic dataloader")
         self.regenerate_dataset()
-        # self.regen = False
 
     def _extract_timestamps(self, manifest_file: str):
         """
