@@ -564,6 +564,7 @@ class LibriSpeechSimulator(object):
             audio_file, sr = sf.read(os.path.join(bg_dir, file))
             print(audio_file)
             print(audio_file.shape)
+            print(os.path.join(bg_dir, file))
             audio_file = torch.from_numpy(audio_file)
 
             if running_len+len(audio_file) < len_array:
