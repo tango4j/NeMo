@@ -18,7 +18,7 @@ import pytest
 from nemo_text_processing.g2p.modules import IPAG2P
 
 
-class TestModules:
+class TestIPAG2P:
 
     PHONEME_DICT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phoneme_dict", "test_dict.txt")
 
@@ -40,11 +40,14 @@ class TestModules:
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p_parse_dict(self):
+    def test_normalize_dict_with_phonemes(self):
         # fmt: off
         expected_symbols = {
-            'h', 'ə', 'ˈ', 'ɫ', 'o', 'ʊ', 'ˈ',
-            'w', 'ɝ', 'ɫ', 'd'
+            'h', 'ə', 'ˈ', 'ɫ', 'o', 'ʊ',
+            'ˈ', 'w', 'ɝ', 'ɫ', 'd',
+            'ˈ', 'l', 'ɛ', 'd',
+            'ˈ', 'l', 'i', 'd',
+            'ɛ', 'n', 'ˈ', 'v', 'ɪ', 'd', 'i', 'ə'
         }
         # fmt: on
         g2p = self._create_g2p()
@@ -52,18 +55,27 @@ class TestModules:
         assert expected_symbols == g2p.symbols
         assert len(g2p.phoneme_dict["HELLO"]) == 1
         assert len(g2p.phoneme_dict["WORLD"]) == 1
-        assert g2p.phoneme_dict["HELLO"][0] == [char for char in "həˈɫoʊ"]
-        assert g2p.phoneme_dict["WORLD"][0] == [char for char in "ˈwɝɫd"]
+        assert len(g2p.phoneme_dict["LEAD"]) == 2
+        assert len(g2p.phoneme_dict["NVIDIA"]) == 1
+        assert g2p.phoneme_dict["HELLO"][0] == list("həˈɫoʊ")
+        assert g2p.phoneme_dict["WORLD"][0] == list("ˈwɝɫd")
+        assert g2p.phoneme_dict["LEAD"] == [list("ˈlɛd"), list("ˈlid")]
+        assert g2p.phoneme_dict["NVIDIA"][0] == list("ɛnˈvɪdiə")
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p_parse_dict_with_chars(self):
+    def test_normalize_dict_with_graphemes_and_phonemes(self):
         # fmt: off
         expected_symbols = {
             'H', 'E', 'L', 'L', 'O',
             'W', 'O', 'R', 'L', 'D',
+            'L', 'E', 'A', 'D',
+            'N', 'V', 'I', 'D', 'I', 'A',
             'h', 'ə', 'ˈ', 'ɫ', 'o', 'ʊ',
-            'ˈ', 'w', 'ɝ', 'ɫ', 'd'
+            'ˈ', 'w', 'ɝ', 'ɫ', 'd',
+            'ˈ', 'l', 'ɛ', 'd',
+            'ˈ', 'l', 'i', 'd',
+            'ɛ', 'n', 'ˈ', 'v', 'ɪ', 'd', 'i', 'ə'
         }
         # fmt: on
         g2p = self._create_g2p(use_chars=True)
@@ -71,12 +83,15 @@ class TestModules:
         assert expected_symbols == g2p.symbols
         assert len(g2p.phoneme_dict["HELLO"]) == 1
         assert len(g2p.phoneme_dict["WORLD"]) == 1
-        assert g2p.phoneme_dict["HELLO"][0] == [char for char in "həˈɫoʊ"]
-        assert g2p.phoneme_dict["WORLD"][0] == [char for char in "ˈwɝɫd"]
+        assert len(g2p.phoneme_dict["LEAD"]) == 2
+        assert len(g2p.phoneme_dict["NVIDIA"]) == 1
+        assert g2p.phoneme_dict["HELLO"][0] == list("həˈɫoʊ")
+        assert g2p.phoneme_dict["WORLD"][0] == list("ˈwɝɫd")
+        assert g2p.phoneme_dict["LEAD"] == [list("ˈlɛd"), list("ˈlid")]
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p(self):
+    def test_forward_call(self):
         input_text = "Hello world."
         expected_output = [char for char in "həˈɫoʊ ˈwɝɫd."]
         g2p = self._create_g2p()
@@ -86,7 +101,7 @@ class TestModules:
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p_with_oov(self):
+    def test_forward_call_with_oov_word(self):
         input_text = "Hello Kitty!"
         expected_output = [char for char in "həˈɫoʊ KITTY!"]
         g2p = self._create_g2p()
@@ -96,7 +111,7 @@ class TestModules:
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p_with_oov_func(self):
+    def test_forward_call_with_oov_func(self):
         input_text = "Hello Kitty!"
         expected_output = [char for char in "həˈɫoʊ test!"]
         g2p = self._create_g2p(apply_to_oov_word=lambda x: "test")
@@ -106,7 +121,7 @@ class TestModules:
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p_graphemes(self):
+    def test_forward_call_with_graphemes_uppercase(self):
         input_text = "Hello world."
         expected_output = [char for char in input_text.upper()]
         g2p = self._create_g2p(use_chars=True, phoneme_probability=0.0)
@@ -116,7 +131,7 @@ class TestModules:
 
     @pytest.mark.run_only_on('CPU')
     @pytest.mark.unit
-    def test_ipa_g2p_graphemes_lower(self):
+    def test_forward_call_with_graphemes_lowercase(self):
         input_text = "Hello world."
         expected_output = [char for char in input_text.lower()]
         g2p = self._create_g2p(use_chars=True, phoneme_probability=0.0, set_graphemes_upper=False)
