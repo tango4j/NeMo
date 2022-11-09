@@ -17,6 +17,10 @@ This script will merge prompt-specific train files into a single file per task.
 import json
 import os
 from argparse import ArgumentParser
+from nemo.collections.common.tokenizers import AutoTokenizer
+
+tokenizer = AutoTokenizer('gpt2')
+
 
 tasks = [
     'adversarial_qa',
@@ -83,9 +87,9 @@ def merge_train_folder(train_data_folder, merged_train_data_folder):
         os.makedirs(merged_train_data_folder)
     task_counter = {task: 0 for task in tasks}
     fptrs = {task: open(os.path.join(merged_train_data_folder, task + '.jsonl'), 'w') for task in tasks}
+    too_short = {task: 0 for task in tasks}
     for idx, fname in enumerate(os.listdir(train_data_folder)):
-        if idx % 10 == 0:
-            print(f'Processed {idx + 1}/{len(os.listdir(train_data_folder))} files ...')
+        print(f'Processed {idx + 1}/{len(os.listdir(train_data_folder))} files ...')
         if fname.endswith('.jsonl') and '_score_eval' not in fname:
             found = False
             for task in tasks:
@@ -95,8 +99,12 @@ def merge_train_folder(train_data_folder, merged_train_data_folder):
                     with open(os.path.join(train_data_folder, fname), 'r') as f:
                         for line in f:
                             line = json.loads(line)
-                            line['task_name_with_prompt'] = fname
-                            fptrs[task].write(json.dumps(line) + '\n')
+                            if len(tokenizer.text_to_ids(line['input'])) < 1 or len(tokenizer.text_to_ids(line['output'])) < 1 or line['input'].strip() == '' or line['output'].strip() == '':
+                                too_short[task] += 1
+                                print(line)
+                            else:
+                                line['task_name_with_prompt'] = fname
+                                fptrs[task].write(json.dumps(line) + '\n')
             if not found:
                 print(f'WARNING: Could not find task for {fname}')
 
@@ -108,6 +116,8 @@ def merge_train_folder(train_data_folder, merged_train_data_folder):
     for k, v in task_counter.items():
         print(f'Task {k} had {v} prompt templates.')
 
+    for k, v in too_short.items():
+        print(f'Task {k} had {v} too short samples.')
 
 if __name__ == '__main__':
     parser = ArgumentParser()
