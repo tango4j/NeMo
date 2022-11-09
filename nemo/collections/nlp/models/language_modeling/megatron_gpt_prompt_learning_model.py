@@ -892,6 +892,9 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
             output_tensor = model(input_ids, position_ids, attention_mask, taskname_ids, labels, inference=False)
  
             self.log('input_id_sum', torch.sum(input_ids), prog_bar=True, rank_zero_only=True)
+            self.log('lables_sum', torch.sum(labels), prog_bar=True, rank_zero_only=True)
+            self.log('position_ids_sum', torch.sum(position_ids), prog_bar=True, rank_zero_only=True)
+            self.log('taskname_ids_sum', torch.sum(taskname_ids), prog_bar=True, rank_zero_only=True)
             self.log('loss_mask_sum', torch.sum(loss_mask), prog_bar=True, rank_zero_only=True)
             self.log('attention_mask_sum', torch.sum(attention_mask), prog_bar=True, rank_zero_only=True)
 
