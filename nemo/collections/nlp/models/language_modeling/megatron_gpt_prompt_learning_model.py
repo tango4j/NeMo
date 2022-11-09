@@ -757,7 +757,7 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
                 add_eos=self.cfg.data.get('add_eos', True),
                 for_train=True,
                 drop_last=True,
-                shuffle=True,
+                shuffle=self.cfg.data.get('shuffle', True),
                 num_workers=self.cfg.data.num_workers,
                 pin_memory=True,
                 cache_data_path=self.cfg.data.get('train_cache_data_path', None),
@@ -890,9 +890,15 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
             batch = [x.cuda(non_blocking=True) for x in batch]
             input_ids, labels, loss_mask, position_ids, attention_mask, taskname_ids = batch
             output_tensor = model(input_ids, position_ids, attention_mask, taskname_ids, labels, inference=False)
+ 
+            self.log('input_id_sum', torch.sum(input_ids), prog_bar=True, rank_zero_only=True)
+            self.log('loss_mask_sum', torch.sum(loss_mask), prog_bar=True, rank_zero_only=True)
+            self.log('attention_mask_sum', torch.sum(attention_mask), prog_bar=True, rank_zero_only=True)
 
             if isinstance(output_tensor, tuple):
                 output_tensor, _ = output_tensor
+                self.log('output_tensor_sum', torch.sum(output_tensor), prog_bar=True, rank_zero_only=True)
+
 
             def loss_func(output_tensor):
                 loss = self.frozen_model.loss_func(loss_mask, output_tensor)

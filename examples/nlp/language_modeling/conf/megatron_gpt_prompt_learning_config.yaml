@@ -15,7 +15,7 @@ trainer:
   gradient_clip_val: 1.0
   resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
   benchmark: False
-
+  num_sanity_val_steps: 0
 
 exp_manager:
   explicit_log_dir: null
@@ -90,6 +90,14 @@ model:
     truncate_field: null
     answer_only_loss: True
     answer_field: "answer"
+
+  - taskname: "squad"
+    prompt_template: "<|VIRTUAL_PROMPT_0|> {question} {context} answer: {answer}"
+    total_virtual_tokens: 100
+    answer_only_loss: True 
+    answer_field: "answer"
+    virtual_token_splits: [100]
+    truncate_field: "context"
 
   prompt_tuning: # Prompt tunin specific params
     new_prompt_init_methods: ['text'] # List of 'text' or 'random', should correspond to tasks listed in new tasks
