@@ -321,9 +321,6 @@ class GPTPromptLearningDataset(Dataset):
     def collate_fn(self, batch, tp_workers=0):
         """ Prepares input_ids, labels, loss mask, attention_mask, and position ids for global batch """
         taskname_ids, input_ids, answer_starts = zip(*batch)
-        taskname_ids = copy.deepcopy(taskname_ids)
-        input_ids = copy.deepcopy(input_ids)
-        answer_starts = copy.deepcopy(answer_starts)
 
 
         # Pad taskname_ids to be the same length for the prompt encoder
@@ -369,6 +366,7 @@ class GPTPromptLearningDataset(Dataset):
     def pad_batch_and_build_loss_mask(self, input_ids, batch_max, answer_starts):
         """ Pad input_ids in batch to max batch length while building loss mask """
         batch_loss_masks = []
+        batch_input_ids = []
         for ids, answer_start_idx in zip(input_ids, answer_starts):
             if answer_start_idx is not None:
                 # Loss mask where answer tokens are 1.0 and all other tokens are 0.0
@@ -380,17 +378,19 @@ class GPTPromptLearningDataset(Dataset):
             # Pad to max length
             input_length = len(ids)
             padding_length = batch_max - input_length
-            ids.extend([self.pad_token_id] * padding_length)
+            ids = ids + [self.pad_token_id] * padding_length
 
             # Account for padding in loss mask
             loss_mask.extend([0.0] * padding_length)
             batch_loss_masks.append(torch.tensor(loss_mask, dtype=torch.float))
+            batch_input_ids.append(torch.LongTensor(ids))
+
 
         # Make into torch tensors
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
+        batch_input_ids = torch.stack(batch_input_ids)
         batch_loss_masks = torch.stack(batch_loss_masks)
 
-        return input_ids, batch_loss_masks
+        return batch_input_ids, batch_loss_masks
 
     def inference_collate_fn(self, batch):
         """
