@@ -29,6 +29,12 @@ def request_data(data, port_num=PORT_NUM):
     return output_json
 
 
+def modify_mlpgate(data, port_num=PORT_NUM):
+    resp = requests.put('http://localhost:{}/modify'.format(port_num), data=json.dumps(data), headers=headers)
+    output_json = resp.json()
+    return output_json
+
+
 def update_index(data, port_num=PORT_NUM_DYN):
     resp = requests.put('http://localhost:{}/knn'.format(port_num), data=json.dumps(data), headers=headers)
     output_json = resp.json()
@@ -94,6 +100,14 @@ def add_doc(doc, add_eos):
         "add_eos": add_eos,
     }
     return update_index(data)
+
+
+def modify_model(layer_number, mlp_gate):
+    data = {
+        "layer_number": layer_number,
+        "mlp_gate": mlp_gate,
+    }
+    return modify_mlpgate(data)
 
 
 def reset_index():
@@ -166,9 +180,13 @@ def get_retro_demo(share, username, password):
                 with gr.Row():
                     add_btn = gr.Button(value="Add")
                     reset_btn = gr.Button(value="Reset Index")
+                layer_number = gr.Slider(minimum=0, maximum=12, step=1, value=2, label='layer number')
+                mlp_gate = gr.Slider(minimum=0.0, maximum=1.0, step=0.02, value=0.0, label='mlp gate')
+                modify_btn = gr.Button(value="Modify MLP")
                 output_status = gr.Label(value='')
                 add_btn.click(add_doc, inputs=[add_retrival_doc, add_EOS], outputs=[output_status])
                 reset_btn.click(reset_index, inputs=[], outputs=[output_status])
+                modify_btn.click(modify_model, inputs=[layer_number, mlp_gate], outputs=[output_status])
 
             with gr.Column(scale=1, min_width=800):
                 input_prompt = gr.Textbox(

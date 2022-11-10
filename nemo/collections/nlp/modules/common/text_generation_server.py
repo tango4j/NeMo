@@ -44,6 +44,26 @@ API_ALLOWED_KEYS = set(
 )
 
 
+class MegatronModify(Resource):
+    def __init__(self, model):
+        self.model = model
+
+    def put(self):
+        logging.info("request IP: " + str(request.remote_addr))
+        logging.info(json.dumps(request.get_json()))
+        data = request.get_json()
+        layer_number = data['layer_number']
+        mlp_gate = data['mlp_gate']
+        for name, layer in self.model.named_modules():
+            if name.startswith('model.pre_decoder') or name.startswith('model.post_decoder'):
+                if hasattr(layer, 'mlp_gate') and hasattr(layer, 'layer_number'):
+                    if layer.layer_number == layer_number:
+                        layer.mlp_gate = mlp_gate
+                        return f'success! layer {layer_number} mlp gate {mlp_gate}'
+        else:
+            return 'no change'
+
+
 class MegatronGenerate(Resource):
     def __init__(self, model, inference_strategy=None):
         self.model = model
@@ -206,6 +226,7 @@ class MegatronServer(object):
         self.app = Flask(__name__, static_url_path='')
         api = Api(self.app)
         api.add_resource(MegatronGenerate, '/generate', resource_class_args=[model, inference_strategy])
+        api.add_resource(MegatronModify, '/modify', resource_class_args=[model])
 
     def run(self, url, port=5000):
         self.app.run(url, threaded=True, port=port, debug=False)

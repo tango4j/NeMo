@@ -1136,6 +1136,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
                 hidden_size % num_attention_heads == 0
             ), 'hidden_size must be divisible by num_attention_heads if kv_channels is None'
             kv_channels = hidden_size // num_attention_heads
+        self.mlp_gate = 1.0
 
         self.layer_number = layer_number
         self.layer_type = layer_type
@@ -1537,7 +1538,7 @@ class ParallelTransformerLayer_(MegatronModule, adapter_mixins.AdapterModuleMixi
             transformer_block_type=self.transformer_block_type, position_after='mlp'
         )
 
-        output = bias_dropout_add_func(mlp_output, mlp_bias, residual, self.hidden_dropout)
+        output = bias_dropout_add_func(mlp_output*self.mlp_gate, mlp_bias, residual, self.hidden_dropout)
         # print(f"Layer: {self.layer_number} MLP + Dropout + Residual checksum {output.sum()}")
 
         if self.transformer_block_type == 'post_ln':
