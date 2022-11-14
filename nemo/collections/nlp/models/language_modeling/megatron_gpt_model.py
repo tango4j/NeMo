@@ -310,7 +310,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             grad_scaler=self.trainer.precision_plugin.scaler if self.cfg.precision == 16 else None,
             custom_sync_context_handler=custom_sync_context_handler,
             sequence_parallel_enabled=self.cfg.get('sequence_parallel', False),
-            sync_batch_comm=False #self.cfg.get('sync_batch_comm', True),
+            sync_batch_comm=False, #self.cfg.get('sync_batch_comm', True),
             num_micro_batches_with_partial_activation_checkpoints=self.cfg.get(
                 'num_micro_batches_with_partial_activation_checkpoints', None
             ),
