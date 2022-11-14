@@ -541,9 +541,7 @@ class IPATokenizer(BaseTokenizer):
         if locale is not None:
             validate_locale(locale)
 
-        self.phoneme_probability = None
-        if hasattr(g2p, "phoneme_probability"):
-            self.phoneme_probability = g2p.phoneme_probability
+        self.phoneme_probability = g2p.get("phoneme_probability", None)
 
         # Build tokens list
         tokens = set(g2p.symbols)

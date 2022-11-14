@@ -31,7 +31,6 @@ __all__ = [
     "english_word_tokenize",
 ]
 
-# +
 # Derived from LJSpeech
 _synoglyphs = {
     "'": ['’'],
@@ -57,8 +56,6 @@ _WORDS_RE_EN = re.compile(
 _WORDS_RE_ANY_LOCALE = re.compile(
     fr"([{LATIN_CHARS_ALL}]+(?:[{LATIN_CHARS_ALL}\-']*[{LATIN_CHARS_ALL}]+)*)|(\|[^|]*\|)|([^{LATIN_CHARS_ALL}|]+)"
 )
-
-# -
 
 
 def read_wordids(wordid_map: str):
@@ -119,6 +116,7 @@ def remove_punctuation(text: str, exclude: List[str] = None):
     return text.strip()
 
 
+# TODO @xueyang: what is the relationship between this func and TN lib? Should this ops be done in TN?
 def english_text_preprocessing(text, lower=True):
     text = unicode(text)
     text = ''.join(char for char in unicodedata.normalize('NFD', text) if unicodedata.category(char) != 'Mn')
@@ -158,6 +156,10 @@ def german_text_preprocessing(text: str) -> str:
             res.append(c)
 
     return ''.join(res)
+
+
+def any_locale_text_preprocessing(text: str) -> str:
+    return german_text_preprocessing(text)
 
 
 def _word_tokenize(words: List[Tuple[str, str, str]]) -> List[Tuple[List[str], bool]]:
@@ -201,6 +203,7 @@ def _word_tokenize(words: List[Tuple[str, str, str]]) -> List[Tuple[List[str], b
 
         without_changes = False
         if maybe_word != '':
+            # TODO @xueyang: relax converting to lower cases.
             token = [maybe_word.lower()]
         elif maybe_punct != '':
             token = [maybe_punct]
@@ -228,13 +231,11 @@ def any_locale_word_tokenize(text):
     return _word_tokenize(words)
 
 
-def any_locale_text_preprocessing(text):
-    return text.lower()
-
-
+# TODO @xueyang: deprecate language-specific text preprocessing and use any_locale_text_preprocessing.
 def spanish_text_preprocessing(text):
     return text.lower()
 
 
+# TODO @xueyang: Chinese doesn't have cases for characters, but it may contain letters from other languages.
 def chinese_text_preprocessing(text):
     return text.lower()
