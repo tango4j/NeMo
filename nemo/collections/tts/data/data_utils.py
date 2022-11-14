@@ -13,10 +13,13 @@
 # limitations under the License.
 
 import json
+import os
 from pathlib import Path
 from typing import List
 
 import numpy as np
+
+from nemo.collections.tts.torch.tts_data_types import TTSDataType
 
 
 def read_manifest(manifest_path: Path) -> List[dict]:
@@ -33,6 +36,18 @@ def write_manifest(manifest_path: Path, entries: List[dict]) -> None:
     output_lines = [f"{json.dumps(entry, ensure_ascii=False)}\n" for entry in entries]
     with open(manifest_path, "w", encoding="utf-8") as output_f:
         output_f.writelines(output_lines)
+
+
+def get_sup_data_file_path(entry: dict, base_audio_path: Path, base_sup_path: Path, data_type: TTSDataType) -> Path:
+    audio_path = Path(entry["audio_filepath"])
+    rel_audio_path = audio_path.relative_to(base_audio_path).with_suffix("")
+    audio_id = str(rel_audio_path).replace("/", "_")
+    if "is_phoneme" in entry and entry["is_phoneme"] == 1:
+        audio_id += "_phoneme"
+    file_name = f"{audio_id}.pt"
+
+    file_path = os.path.join(base_sup_path, data_type.name, file_name)
+    return file_path
 
 
 def normalize_volume(audio: np.array, volume_level: float) -> np.array:
