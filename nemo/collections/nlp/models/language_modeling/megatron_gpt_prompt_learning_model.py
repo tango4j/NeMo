@@ -369,8 +369,6 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
         parameters. Matching load method for this class' custom state dict method. 
         """
         if self.frozen_model.model.pre_process:
-            print(state_dict)
-            print(self._prompt_table_key)
             if self._prompt_table_key in state_dict:
                 state_dict_ = state_dict[self._prompt_table_key]
             else:
@@ -382,7 +380,6 @@ class MegatronGPTPromptLearningModel(MegatronBaseModel, TextGeneration):
                         state_dict_[key_substring] = state_dict[key]
 
             self.prompt_table.load_state_dict(state_dict_, strict)
-            print(state_dict_)
             if (
                 self._prompt_encoder_key in state_dict
                 and self.virtual_prompt_source == VirtualPromptSource.PROMPT_ENCODER
