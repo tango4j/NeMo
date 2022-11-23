@@ -436,7 +436,7 @@ def _build_index_mappings(
     shuffle_idx_filename = _filename + '_shuffle_idx.npy'
 
     # Build the indexed mapping if not exist.
-    if torch.distributed.get_rank() == 0:
+    if is_global_rank_zero():
         if (
             (not os.path.isfile(doc_idx_filename))
             or (not os.path.isfile(sample_idx_filename))
@@ -497,10 +497,9 @@ def _build_index_mappings(
             assert doc_idx.dtype == np.int32
             assert sizes.dtype == np.int32
             try:
-                if is_global_rank_zero():
-                    from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import compile_helper
+                from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import compile_helper
 
-                    compile_helper()
+                compile_helper()
                 from nemo.collections.nlp.data.language_modeling.megatron import helpers
             except ImportError:
                 raise ImportError(

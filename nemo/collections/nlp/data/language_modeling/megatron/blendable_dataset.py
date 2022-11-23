@@ -21,6 +21,7 @@ import torch
 
 from nemo.utils import logging
 from nemo.utils.app_state import AppState
+from nemo.utils.get_rank import is_global_rank_zero
 
 
 class BlendableDataset(torch.utils.data.Dataset):
@@ -45,11 +46,10 @@ class BlendableDataset(torch.utils.data.Dataset):
         self.dataset_sample_index = np.zeros(self.size, dtype=np.int64)
         app_state = AppState()
         try:
-            if app_state.local_rank == 0:
+            if is_global_rank_zero():
                 from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import compile_helper
 
                 compile_helper()
-            torch.distributed.barrier()
             from nemo.collections.nlp.data.language_modeling.megatron import helpers
         except ImportError:
             raise ImportError(
