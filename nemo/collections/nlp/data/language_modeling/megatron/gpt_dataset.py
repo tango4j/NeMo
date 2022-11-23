@@ -16,6 +16,7 @@
 
 import os
 import time
+from nemo.utils.get_rank import is_global_rank_zero
 
 import numpy as np
 import torch
@@ -496,9 +497,10 @@ def _build_index_mappings(
             assert doc_idx.dtype == np.int32
             assert sizes.dtype == np.int32
             try:
-                from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import compile_helper
+                if is_global_rank_zero():
+                    from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import compile_helper
 
-                compile_helper()
+                    compile_helper()
                 from nemo.collections.nlp.data.language_modeling.megatron import helpers
             except ImportError:
                 raise ImportError(
