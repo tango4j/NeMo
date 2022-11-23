@@ -39,7 +39,7 @@ class BlendableDataset(torch.utils.data.Dataset):
         assert sum_weights > 0.0
         weights /= sum_weights
 
-        # Build indecies.
+        # Build indices.
         start_time = time.time()
         assert num_datasets < 255
         self.dataset_index = np.zeros(self.size, dtype=np.uint8)
@@ -50,6 +50,7 @@ class BlendableDataset(torch.utils.data.Dataset):
                 from nemo.collections.nlp.data.language_modeling.megatron.dataset_utils import compile_helper
 
                 compile_helper()
+            torch.distributed.barrier()
             from nemo.collections.nlp.data.language_modeling.megatron import helpers
         except ImportError:
             raise ImportError(
