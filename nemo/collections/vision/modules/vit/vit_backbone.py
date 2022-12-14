@@ -45,6 +45,43 @@ except (ImportError, ModuleNotFoundError):
 CLASS_TOKEN_LENGTH = 8
 
 
+class DropPatch(MegatronModule):
+    """
+    https://arxiv.org/abs/2212.00794
+    """
+
+    def __init__(self, prob, exclude_cls_tokens=True):
+        assert 0 <= prob < 1.
+        super(DropPatch, self).__init__()
+        self.prob = prob
+        self.exclude_cls_tokens = exclude_cls_tokens  # exclude CLS token
+
+    def __call__(self, x):
+        if self.prob == 0. or not self.training:
+            return x
+
+        if self.exclude_cls_tokens:
+            cls_tokens, x = x[:, :CLASS_TOKEN_LENGTH], x[:, CLASS_TOKEN_LENGTH:]
+
+        batch, num_tokens, _, device = *x.shape, x.device
+
+        batch_indices = torch.arange(batch, device=device)
+        batch_indices = batch_indices[..., None]
+
+        keep_prob = 1 - self.prob
+        num_patches_keep = max(1, int(num_tokens * keep_prob))
+
+        rand = torch.randn(batch, num_tokens, device=device)
+        patch_indices_keep = rand.topk(num_patches_keep, dim=-1).indices
+
+        x = x[batch_indices, patch_indices_keep]
+
+        if self.exclude_cls_tokens:
+            x = torch.cat((cls_tokens, x), dim=1)
+
+        return x
+
+
 class VitMlpHead(MegatronModule):
     """Pooler layer.
 
@@ -180,6 +217,7 @@ class VitBackbone(MegatronModule):
         self.img_w = model_cfg.img_w
         self.micro_batch_size = model_cfg.micro_batch_size
         self.single_token_output = single_token_output
+        self.drop_patch_rate = model_cfg.drop_patch_rate
         self.drop_path_rate = model_cfg.drop_path_rate
 
         assert self.img_h % self.patch_dim == 0
@@ -224,6 +262,7 @@ class VitBackbone(MegatronModule):
             )
 
             self.embedding_dropout = torch.nn.Dropout(model_cfg.hidden_dropout)
+            self.drop_patch = DropPatch(self.drop_patch_rate, exclude_cls_tokens=self.cls_token)
 
         self.transformer = ParallelVisionTransformer(
             init_method=init_method,
@@ -272,7 +311,7 @@ class VitBackbone(MegatronModule):
                 p2=self.patch_dim,
             )
 
-            # assert rearranged_input.dtype == torch.half # TODO (yuya)
+            # [b num_patch patch_dim*patch_dim*c] ->  [b, s, h]; s:=num_patch, h:=hidden
             encoder_output = self.linear_encoder(rearranged_input)
 
             concatenated_tokens = encoder_output
