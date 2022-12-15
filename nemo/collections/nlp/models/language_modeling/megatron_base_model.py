@@ -124,9 +124,8 @@ class MegatronBaseModel(NLPModel):
 
         # Convert the global-batch-based profile index to micro-batch index
         if hasattr(self, '_nsys_profile_enabled'):
-            grad_accum_steps = (
-                cfg.get('global_batch_size') //
-                (cfg.get('micro_batch_size') * parallel_state.get_data_parallel_world_size())
+            grad_accum_steps = cfg.get('global_batch_size') // (
+                cfg.get('micro_batch_size') * parallel_state.get_data_parallel_world_size()
             )
             self._nsys_profile_start_step *= grad_accum_steps
             self._nsys_profile_end_step *= grad_accum_steps
