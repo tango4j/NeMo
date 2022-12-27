@@ -323,6 +323,11 @@ class VitBackbone(MegatronModule):
 
             token_embeddings = concatenated_tokens + \
                                self.position_embeddings(self.position_ids[:, :concatenated_tokens.shape[1]])
+
+            # TODO (yuya): missing pre_ln for CLIP
+            # a patch_dropout of 0. would mean it is disabled and this function would do nothing but return what was passed in
+            token_embeddings = self.drop_patch(token_embeddings)
+
             # [b s h] => [s b h]
             token_embeddings = token_embeddings.transpose(0, 1).contiguous()
             hidden_states = self.embedding_dropout(token_embeddings)
