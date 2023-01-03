@@ -449,7 +449,7 @@ class MegatronVitClassificationModel(MegatronVisionModel):
                 batch = [x.cuda(non_blocking=True) for x in batch]
                 tokens, labels = batch
             else:
-                # GPT3 uses only causal mask, which doesn't need attention mask
+                # Vision transformer doesn't need attention mask
                 if parallel_state.is_pipeline_first_stage():
                     # Fist pipeline stage needs only the tokens and position_ids
                     tokens = batch[0].cuda(non_blocking=True)
@@ -594,13 +594,6 @@ class MegatronVitClassificationModel(MegatronVisionModel):
     def test_epoch_end(self, outputs):
         averaged_loss = average_losses_across_data_parallel_group(outputs)
         logging.info(f'test_loss: {averaged_loss[0]}')
-
-    # def loss_func(self, loss_mask, output_tensor):
-    #     losses = output_tensor.float()
-    #     loss_mask = loss_mask.view(-1).float()
-    #     # TODO: add nemo version here
-    #     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()  # sequence level nll
-    #     return loss
 
     def process_global_batch(self, global_batch, global_batch_size=None):
         """ Prepares the global batch for apex fwd/bwd functions.
