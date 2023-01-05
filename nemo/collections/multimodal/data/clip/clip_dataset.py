@@ -1,5 +1,5 @@
 from nemo.collections.multimodal.data.clip.wds_dataset import WebDatasetUrls, WDSDataset
-from nemo.collections.multimodal.data.clip.webdataset_utils import RandomSamplerIterableDataset
+from nemo.collections.multimodal.data.clip.wds_utils import RandomSamplerIterableDataset
 from nemo.collections.multimodal.data.clip.data_samplers import WDSUrlsRandomSampler
 
 

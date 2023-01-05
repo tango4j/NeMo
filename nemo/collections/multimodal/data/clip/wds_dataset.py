@@ -9,8 +9,8 @@ import torch.distributed as dist
 from torch.utils.data import Dataset, IterableDataset
 from botocore.config import Config
 from PIL import Image
-from nemo.collections.multimodal.data.clip.webdataset_utils import WebDataset
-from nemo.collections.multimodal.data.clip.image_transform import image_transform
+from nemo.collections.multimodal.data.clip.wds_utils import WebDataset
+from nemo.collections.multimodal.data.clip.clip_augment import image_transform
 from nemo.utils import logging
 
 try:
