@@ -36,7 +36,8 @@ class WDSUrlsRandomSampler:
         self.total_urls = total_urls
         self.chunk_size = chunk_size
         self.consumed_samples = consumed_samples
-        self.consumed_urls = consumed_samples // chunk_size
+        assert consumed_samples % data_parallel_size == 0
+        self.consumed_urls = consumed_samples // data_parallel_size // chunk_size * data_parallel_size
 
         self.data_parallel_rank = data_parallel_rank
         self.data_parallel_size = data_parallel_size
@@ -52,6 +53,9 @@ class WDSUrlsRandomSampler:
             return (self.total_urls + self.data_parallel_size - 1) // self.data_parallel_size
 
     def __iter__(self):
+        self.consumed_urls = self.consumed_samples // self.data_parallel_size \
+                             // self.chunk_size * self.data_parallel_size
+
         if self.drop_last or self.remaining_urls == 0:
             active_total_urls = self.total_urls - self.remaining_urls
         else:
@@ -59,7 +63,6 @@ class WDSUrlsRandomSampler:
 
         self.epoch = self.consumed_urls // active_total_urls
         current_epoch_urls = self.consumed_urls % active_total_urls
-        assert current_epoch_urls % self.data_parallel_size == 0
 
         if isinstance(self.dataset, RandomSeedDataset):
             self.dataset.set_epoch(self.epoch)
@@ -84,9 +87,8 @@ class WDSUrlsRandomSampler:
             idx_range_active = idx_range_total[full_bucket_offset:]
             idx_range = idx_range_active[self.data_parallel_rank::self.data_parallel_size]
 
+        # Use additional permutation to replace out-of-range indices when drop_last is False
         additional_random_idx = torch.randperm(self.total_urls, generator=g).tolist()
-
-        # Last batch if not complete will be dropped.
         for idx in idx_range:
             self.consumed_samples += self.data_parallel_size * self.chunk_size
             if idx < self.total_urls:

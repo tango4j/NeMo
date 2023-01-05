@@ -239,37 +239,37 @@ class WebDataset(DataPipeline, FluidInterface):
             # )
 
 
-class BatchSamplerIterableDataset(IterableDataset):
+class RandomSamplerIterableDataset(IterableDataset):
     r"""
-    Wrapping a pytorch dataset with given batch sampler into an
-    IterableDataset. _BatchSamplerIterableDataset can be consumed by Webdataset.
+    Wrapping a pytorch dataset with given random sampler into an
+    IterableDataset. _RandomSamplerIterableDataset can be consumed by Webdataset.
     This class uses a batch sampler to handle sharding, shuffling and resuming.
     """
 
     def __init__(
             self,
             dataset,
-            batch_sampler,
+            sampler,
             **kwargs,
     ):
         r"""Create a IterableDataset with sharding, shuffling and resuming.
         Args:
             dataset (Dataset): dataset
-            batch_sampler (Any): a batch sampler to handle sharding, shuffling and resuming
+            sampler (Any): a sampler to handle sharding, shuffling and resuming
             **kwargs (Any): additional kwargs will be set as class attributes
         """
         super().__init__()
 
         self.dataset = dataset
-        self.batch_sampler = batch_sampler
+        self.sampler = sampler
 
         # Set additional attributes with **kwargs
         for key, value in kwargs.items():
             setattr(self, key, value)
 
     def __iter__(self):
-        for index in self.batch_sampler:
+        for index in self.sampler:
             yield dict(url=self.dataset[index])
 
     def __len__(self):
-        return len(batch_sampler)
+        return len(self.sampler)
