@@ -22,11 +22,11 @@ def gather_features(
     data_parallel_group = parallel_state.get_data_parallel_group()
 
     if gather_with_grad:
-        # TODO (yuya): this is not working!
+        # TODO (yuya): this is not working in current version of pytorch
         # https://github.com/mlfoundations/open_clip/blob/main/src/open_clip/loss.py#L48
-        # all_image_features = torch.cat(torch.distributed.nn.all_gather(image_features), dim=0)
-        # all_text_features = torch.cat(torch.distributed.nn.all_gather(text_features), dim=0)
-        raise NotImplementedError
+        all_image_features = torch.cat(torch.distributed.nn.all_gather(image_features), dim=0)
+        all_text_features = torch.cat(torch.distributed.nn.all_gather(text_features), dim=0)
+
     else:
         gathered_image_features = [torch.zeros_like(image_features) for _ in range(data_parallel_world_size)]
         gathered_text_features = [torch.zeros_like(text_features) for _ in range(data_parallel_world_size)]

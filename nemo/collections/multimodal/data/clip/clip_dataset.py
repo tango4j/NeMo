@@ -48,7 +48,7 @@ def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
     # Create a dataset of WebDataset Urls
     train_url_dataset = WebDatasetUrls(model_cfg.data)
     val_url_dataset = None
-    if model_cfg.data.get("val") is not None and model_cfg.data.val.get("dataset_info"):
+    if model_cfg.data.get("validation") is not None and model_cfg.data.validation.get("dataset_info"):
         val_url_dataset = WebDatasetUrls(model_cfg.data, is_train=False)
 
     # Create a random sampler to shard, shuffle and resume with Urls
@@ -70,8 +70,8 @@ def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
             consumed_samples=0,
             data_parallel_rank=parallel_state.get_data_parallel_rank(),
             data_parallel_size=parallel_state.get_data_parallel_world_size(),
-            drop_last=model_cfg.data.val.get("drop_last", True),
-            data_sharding=model_cfg.data.val.get("data_sharding", True),
+            drop_last=model_cfg.data.validation.get("drop_last", True),
+            data_sharding=model_cfg.data.validation.get("data_sharding", True),
         )
 
     # Wrapping the Url dataset with the random sampler

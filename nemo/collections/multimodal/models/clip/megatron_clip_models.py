@@ -22,12 +22,8 @@ from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.nlp.modules.common.megatron.language_model import get_language_model
-from nemo.collections.vision.data.megatron.vit_dataset import build_train_valid_datasets
-from nemo.collections.vision.data.megatron.data_samplers import MegatronVisionPretrainingRandomBatchSampler
-from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_samplers import (
-    MegatronPretrainingBatchSampler,
-    MegatronPretrainingRandomBatchSampler,
-)
+from nemo.collections.multimodal.data.clip.clip_dataset import build_train_valid_datasets
+
 
 from nemo.collections.multimodal.models.multimodal_base_model import MegatronMultimodalModel
 from nemo.collections.vision.modules.vit.vit_backbone import VitBackbone, VitMlpHead
@@ -278,12 +274,12 @@ class CLIPModel(MegatronModule):
         self.pre_process = pre_process
         self.post_process = post_process
         self.vision_encoder = CLIPVisionTransformer(
-            model_cfg,
+            model_cfg.vision,
             pre_process=self.pre_process,
             post_process=self.post_process,
         )
         self.text_encoder = CLIPTextTransformer(
-            model_cfg,
+            model_cfg.text,
             pre_process=self.pre_process,
             post_process=self.post_process,
         )
@@ -740,29 +736,14 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         return [images, captions]
 
     def build_train_valid_test_datasets(self):
-        logging.info('Building datasets for ViT...')
+        logging.info('Building datasets for CLIP...')
         if self.trainer.limit_val_batches > 1.0 and isinstance(self.trainer.limit_val_batches, float):
             raise ValueError("limit_val_batches must be an integer or float less than or equal to 1.0.")
-        global_batch_size = self.cfg.global_batch_size
-        max_train_steps = self.trainer.max_steps
-        eval_iters = (max_train_steps // self.trainer.val_check_interval + 1) * self.trainer.limit_val_batches
-        test_iters = self.trainer.limit_test_batches
-
-        train_valid_test_num_samples = [
-            max_train_steps * global_batch_size,
-            eval_iters * global_batch_size,
-            test_iters * global_batch_size,
-        ]
-
-        if self.trainer.limit_val_batches <= 1.0 and isinstance(self.trainer.limit_val_batches, float):
-            train_valid_test_num_samples[
-                1
-            ] = 1  # This is to make sure we only have one epoch on every validation iteration
 
         self._train_ds, self._validation_ds = build_train_valid_datasets(
             model_cfg=self.cfg,
-            data_path=self.cfg.data.data_path,
-            image_size=(self.cfg.img_h, self.cfg.img_w),
+            consumed_samples=self.compute_consumed_samples(0),
+            tokenizer=self.tokenizer,
         )
         self._test_ds = None
 
@@ -776,42 +757,12 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         return self._train_ds, self._validation_ds, self._test_ds
 
-    def build_pretraining_data_loader(self, dataset, consumed_samples, dataset_type=None, drop_last=True):
-        """Buld dataloader given an input dataset."""
-
-        logging.info(f'Building dataloader with consumed samples: {consumed_samples}')
-        # Megatron sampler
-        if hasattr(self.cfg.data, 'dataloader_type') and self.cfg.data.dataloader_type is not None:
-            if self.cfg.data.dataloader_type == 'single':
-                batch_sampler = MegatronPretrainingBatchSampler(
-                    total_samples=len(dataset),
-                    consumed_samples=consumed_samples,
-                    micro_batch_size=self.cfg.micro_batch_size,
-                    global_batch_size=self.cfg.global_batch_size,
-                    data_parallel_rank=parallel_state.get_data_parallel_rank(),
-                    data_parallel_size=parallel_state.get_data_parallel_world_size(),
-                    drop_last=drop_last,
-                )
-            elif self.cfg.data.dataloader_type == 'cyclic':
-                batch_sampler = MegatronVisionPretrainingRandomBatchSampler(
-                    dataset=dataset,
-                    total_samples=len(dataset),
-                    consumed_samples=consumed_samples,
-                    micro_batch_size=self.cfg.micro_batch_size,
-                    global_batch_size=self.cfg.global_batch_size,
-                    data_parallel_rank=parallel_state.get_data_parallel_rank(),
-                    data_parallel_size=parallel_state.get_data_parallel_world_size(),
-                    drop_last=drop_last,
-                    data_sharding=self.cfg.data.get("data_sharding", True),
-                )
-            else:
-                raise ValueError('cfg.data.dataloader_type must be "single" or "cyclic"')
-        else:
-            raise ValueError('cfg.data.dataloader_type not found. Must be "single" or "cyclic"')
-
-        return torch.utils.data.DataLoader(
-            dataset, batch_sampler=batch_sampler, num_workers=self.cfg.data.num_workers, pin_memory=True,
-        )
+    # def build_pretraining_data_loader(self, dataset, consumed_samples, dataset_type=None, drop_last=True):
+    #     """Build dataloader given an input dataset."""
+    #
+    #     return torch.utils.data.DataLoader(
+    #         dataset, num_workers=self.cfg.data.num_workers, pin_memory=True,
+    #     )
 
     def setup(self, stage=None):
         """ PTL hook that is executed after DDP spawns.
@@ -886,7 +837,9 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             logging.info(
                 f'Setting up train dataloader with len(len(self._train_ds)): {len(self._train_ds)} and consumed samples: {consumed_samples}'
             )
-            self._train_dl = self.build_pretraining_data_loader(self._train_ds, consumed_samples)
+            self._train_dl = torch.utils.data.DataLoader(
+                self._train_ds, num_workers=cfg.num_workers, pin_memory=True,
+            )
 
     def setup_validation_data(self, cfg):
         if hasattr(self, '_validation_ds') and self._validation_ds is not None:
@@ -894,12 +847,8 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             logging.info(
                 f'Setting up validation dataloader with len(len(self._validation_ds)): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
             )
-            drop_last = True
-            if not self.cfg.data.get('validation_drop_last', True):
-                logging.info(f'Drop last in validation dataset is set to False')
-                drop_last = False
-            self._validation_dl = self.build_pretraining_data_loader(
-                self._validation_ds, consumed_samples, "validation", drop_last
+            self._validation_dl = torch.utils.data.DataLoader(
+                self._validation_ds, num_workers=cfg.num_workers, pin_memory=True,
             )
 
     def setup_test_data(self, cfg):
@@ -908,7 +857,9 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             logging.info(
                 f'Setting up test dataloader with len(len(self._test_ds)): {len(self._test_ds)} and consumed samples: {consumed_samples}'
             )
-            self._test_dl = self.build_pretraining_data_loader(self._test_ds, consumed_samples)
+            self._test_dl = torch.utils.data.DataLoader(
+                self._test_ds, num_workers=cfg.num_workers, pin_memory=True,
+            )
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: Optional[int] = None) -> Any:
         raise NotImplementedError
