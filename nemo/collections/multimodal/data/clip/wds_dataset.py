@@ -10,7 +10,6 @@ from torch.utils.data import Dataset, IterableDataset
 from botocore.config import Config
 from PIL import Image
 from nemo.collections.multimodal.data.clip.wds_utils import WebDataset
-from nemo.collections.multimodal.data.clip.clip_augment import image_transform
 from nemo.utils import logging
 
 try:
@@ -100,7 +99,8 @@ class WebDatasetUrls(Dataset):
 
 
 class WDSDataset(IterableDataset):
-    def __init__(self, data_cfg, url_dataset, is_train=True):
+    def __init__(self, data_cfg, url_dataset,
+                 image_transform, text_transform, is_train=True):
         r"""
         Webdataloader class
         Args:
@@ -137,14 +137,8 @@ class WDSDataset(IterableDataset):
             self.local_root_path = webdata_cfg.local_root_path
             logging.info(f'Read Webdataset locally. Data stores at {self.local_root_path}')
 
-
-        self.img_transform = image_transform(
-            224,
-            is_train=is_train,
-            mean=None,
-            std=None
-        )
-        self.text_transform = identical_transform
+        self.img_transform = image_transform
+        self.text_transform = text_transform
         self.build_dataset()
 
     def build_dataset(self):

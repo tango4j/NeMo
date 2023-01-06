@@ -31,6 +31,7 @@ from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_sampler
 
 from nemo.collections.multimodal.models.multimodal_base_model import MegatronMultimodalModel
 from nemo.collections.vision.modules.vit.vit_backbone import VitBackbone, VitMlpHead
+from nemo.collections.multimodal.losses.clip_loss import ClipLoss
 
 from nemo.collections.nlp.modules.common.megatron.module import (
     MegatronModule,
@@ -127,7 +128,6 @@ class CLIPTextTransformer(MegatronModule):
                  pre_process=True, post_process=True):
         super(CLIPTextTransformer, self).__init__()
 
-
         self.output_dim = model_cfg.output_dim
         self.pre_process = pre_process
         self.post_process = post_process
@@ -197,6 +197,11 @@ class CLIPTextTransformer(MegatronModule):
             init_method=init_method_normal(init_method_std), vocab_size=vocab_size, hidden_size=hidden_size
         )
 
+        # TODO (yuya): check this position id
+        self.position_ids = None
+        if self.pre_process:
+            self.position_ids = torch.arange(model_cfg.max_position_embeddings).expand(1, -1).cuda()
+
         if self.post_process:
             self.head = torch.nn.Linear(
                 self.hidden_size,
@@ -211,15 +216,6 @@ class CLIPTextTransformer(MegatronModule):
     def forward(
         self,
         input_ids,
-        position_ids,
-        attention_mask,
-        token_type_ids=None,
-        layer_past=None,
-        get_key_value=False,
-        encoder_input=None,
-        set_inference_key_value_memory=False,
-        inference_max_sequence_len=None,
-        checkpoint_activations_all_layers=None,
     ):
         # input_ids: [b, s]
         # position_ids: [b, s]
@@ -227,15 +223,15 @@ class CLIPTextTransformer(MegatronModule):
 
         hidden_states = self.language_model(
             input_ids,
-            position_ids,
-            attention_mask,
-            token_type_ids=token_type_ids,
-            layer_past=layer_past,
-            get_key_value=get_key_value,
-            encoder_input=encoder_input,
-            set_inference_key_value_memory=set_inference_key_value_memory,
-            inference_max_sequence_len=inference_max_sequence_len,
-            checkpoint_activations_all_layers=checkpoint_activations_all_layers,
+            position_ids=self.position_ids,
+            attention_mask=None,
+            token_type_ids=None,
+            layer_past=None,
+            get_key_value=False,
+            encoder_input=None,
+            set_inference_key_value_memory=False,
+            inference_max_sequence_len=None,
+            checkpoint_activations_all_layers=None,
         )
 
         if self.post_process:
@@ -298,10 +294,9 @@ class CLIPModel(MegatronModule):
         # TODO (yuya): fix this
         raise NotImplementedError
 
-    def forward(self, input):
-        text, image = input
-        image_features = self.vision_encoder(image)
-        text_features = self.text_encoder(text)
+    def forward(self, images, captions):
+        image_features = self.vision_encoder(images)
+        text_features = self.text_encoder(captions)
 
         if self.post_process:
             return F.normalize(image_features, dim=-1), \
@@ -319,6 +314,9 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             raise ImportError(
                 "Apex was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
             )
+
+        # this prevents base constructor from initializing tokenizer
+        self.tokenizer = None
         super().__init__(cfg, trainer=trainer)
 
         self._validate_trainer()
@@ -350,6 +348,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                     self.model.cuda(torch.cuda.current_device())
 
             # Model wrapper to convert both model and inputs to half precision
+            # TODO (yuya): check this; FP16 Module might not work; when self.model is a list?
             if isinstance(self.model, list):
                 converted_model = []
                 for module in self.model:
@@ -369,10 +368,8 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
     def model_provider_func(self, pre_process, post_process):
         """Model depends on pipeline paralellism."""
-        model = VitClassificationModel(
+        model = CLIPModel(
             model_cfg=self.cfg,
-            num_classes=self.cfg.get("num_classes"),  # TODO(yuya): clean this up
-            finetune=self.cfg.get("finetune", False),
             pre_process=pre_process,
             post_process=post_process,
         )
@@ -424,8 +421,8 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         return super().configure_optimizers()
 
-    def forward(self, tokens):
-        output_tensor = self.model(tokens)
+    def forward(self, image, text):
+        output_tensor = self.model(image, text)
         return output_tensor
 
     def _get_fwd_bwd_function(self):
@@ -493,6 +490,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             grad_scaler=self.trainer.precision_plugin.scaler if self.cfg.precision == 16 else None,
             custom_sync_context_handler=custom_sync_context_handler,
             sequence_parallel_enabled=self.cfg.get('sequence_parallel', False),
+            sync_batch_comm=self.cfg.get('sync_batch_comm', False),
         )
 
         # only the last stages of the pipeline return losses
@@ -509,11 +507,8 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             self.allreduce_sequence_parallel_gradients()
 
         if self.with_distributed_adam:
-            # launch grad reductions
-            # Note: grads in first pipeline stage have already been
-            # reduced
-            if not parallel_state.is_pipeline_first_stage():
-                self.reduce_overlap_gradients()
+            # gradients are reduced internally in distributed optimizer
+            pass
         elif self.megatron_amp_o2:
             # # when using pipeline parallelism grads must be all-reduced after the pipeline (not asynchronously)
             # if self.cfg.get('pipeline_model_parallel_size', 1) > 1 or self.cfg.get('sequence_parallel', False):
@@ -525,6 +520,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             # so we all-reduce gradients after the pipeline
             self.allreduce_gradients()  # @sangkug we think this is causing memory to blow up (hurts perf)
 
+        # TODO (yuya): check if this is needed in text transformer
         # if self.cfg.get('pipeline_model_parallel_size', 1) > 1:
         #     # when using pipeline parallelism the first and last stage must keep embeddings in sync
         #     self.allreduce_first_last_embeddings()
@@ -593,69 +589,31 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             buf.copy_(synced)
 
     def get_forward_output_and_loss_func(self):
-
-        def loss_func(labels, output_tensor):
-            logits = output_tensor.contiguous().float()
-            loss = torch.nn.functional.cross_entropy(logits, labels)
-
-            outputs = torch.argmax(logits, -1)
-            correct = (outputs == labels).float()
-            accuracy = torch.mean(correct)
-
-            averaged_loss = average_losses_across_data_parallel_group([loss, accuracy])
-
-            return loss, {"loss": averaged_loss[0], "accuracy": averaged_loss[1]}
+        # TODO (yuya): explore local_loss etc.
+        loss_func = ClipLoss()
 
         def fwd_output_and_loss_func(batch, model):
             if parallel_state.get_pipeline_model_parallel_world_size() == 1:
                 batch = [x.cuda(non_blocking=True) for x in batch]
-                tokens, labels = batch
+                images, captions = batch
             else:
                 # GPT3 uses only causal mask, which doesn't need attention mask
                 if parallel_state.is_pipeline_first_stage():
                     # Fist pipeline stage needs only the tokens and position_ids
-                    tokens = batch[0].cuda(non_blocking=True)
-                    labels = None
-                elif parallel_state.is_pipeline_last_stage():
-                    # Last pipeline stage needs only the labels and loss_mask
-                    labels = batch[1].cuda(non_blocking=True)
-                    tokens = None
+                    images = batch[0].cuda(non_blocking=True)
+                    captions = batch[1].cuda(non_blocking=True)
                 else:
-                    # Intermediate pipeline stage doesn't need any inputs
-                    tokens, labels = None, None
+                    # Intermediate / Last pipeline stage doesn't need any inputs
+                    images, captions = None, None
 
-            output_tensor = model(tokens)
-            return output_tensor, partial(loss_func, labels)
+            output_tensor = model(images, captions)
+            return output_tensor, loss_func
 
         return fwd_output_and_loss_func
 
     def get_forward_output_only_func(self):
         def fwd_output_only_func(batch, model):
-            extra_arg = {}
-            if len(batch) == 3:
-                batch = [x.cuda() for x in batch]
-                tokens, attention_mask, position_ids = batch
-                attention_mask = attention_mask[0:1]
-            else:
-                (
-                    tokens,
-                    attention_mask,
-                    position_ids,
-                    set_inference_key_value_memory,
-                    inference_max_sequence_len,
-                ) = batch
-                tokens = tokens.cuda()
-                attention_mask = attention_mask.cuda()
-                position_ids = position_ids.cuda()
-                attention_mask = attention_mask[0:1]
-                extra_arg['set_inference_key_value_memory'] = set_inference_key_value_memory[0].item()
-                extra_arg['inference_max_sequence_len'] = inference_max_sequence_len[0].item()
-            output_tensor = model(tokens, position_ids, attention_mask, **extra_arg)
-
-            def id_func(output_tensor):
-                return output_tensor, {'logits': output_tensor}
-
-            return output_tensor, id_func
+            raise NotImplementedError
 
         return fwd_output_only_func
 
@@ -711,7 +669,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 loss_with_batch_size_list = []
             return loss_with_batch_size_list
 
-        return _get_metric_with_batch_size('loss'), _get_metric_with_batch_size('accuracy')
+        return _get_metric_with_batch_size('loss')
 
     def validation_epoch_end(self, outputs):
         # TODO (yuya): need fix later, check with Sean
@@ -720,7 +678,6 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         if parallel_state.is_pipeline_last_stage():
             loss_outputs = [output[0] for output in outputs]
-            acc_outputs = [output[1] for output in outputs]
 
             def _get_average_metric(metric_outputs):
                 # only the last pipeline parallel stages return metric with their batch size
@@ -737,19 +694,17 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 return avg_metric
 
             averaged_metrics = torch.tensor(
-                [_get_average_metric(loss_outputs), _get_average_metric(acc_outputs)],
+                [_get_average_metric(loss_outputs)],
                 dtype=torch.float32).cuda()
         else:
-            averaged_metrics = torch.tensor([0.0, 0.0], dtype=torch.float32).cuda()
+            averaged_metrics = torch.tensor([0.0], dtype=torch.float32).cuda()
 
         # we can only log on one rank if it is rank zero so we broadcast from last rank
         torch.distributed.broadcast(averaged_metrics, get_last_rank())
-
-        averaged_loss, averaged_acc = averaged_metrics
+        averaged_loss = averaged_metrics
 
         self.log('global_step', self.trainer.global_step, prog_bar=True, rank_zero_only=True)
         self.log('val_loss', averaged_loss, prog_bar=True, rank_zero_only=True)
-        self.log('val_accuracy', averaged_acc, prog_bar=True, rank_zero_only=True)
 
     def test_step(self, batch, batch_idx):
         return self.validation_step(batch, batch_idx)
@@ -762,13 +717,13 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         """ Prepares the global batch for apex fwd/bwd functions.
             Global batch is a list of micro batches.
         """
-        tokens = global_batch[0]  # images
-        labels = global_batch[1]
+        images = global_batch["images"]  # images
+        captions = global_batch["captions"]
 
         expected_batch_size = None
         if global_batch_size is not None:
             expected_batch_size = global_batch_size // parallel_state.get_data_parallel_world_size()
-        current_batch_size = tokens.shape[0]
+        current_batch_size = images.shape[0]
         if expected_batch_size is not None and expected_batch_size > current_batch_size:
             logging.info(
                 'Got batch size of '
@@ -778,11 +733,11 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 + '. Appending dummy data.'
             )
             pad_length = expected_batch_size - current_batch_size
-            pad_dim = (int(pad_length), tokens.shape[1])
-            tokens = torch.cat((tokens, torch.ones(pad_dim, dtype=tokens.dtype)))
-            labels = torch.cat((labels, torch.ones(pad_dim, dtype=labels.dtype)))
+            pad_dim = (int(pad_length), images.shape[1])
+            images = torch.cat((images, torch.ones(pad_dim, dtype=tokens.dtype)))
+            captions = torch.cat((captions, torch.ones(pad_dim, dtype=labels.dtype)))
 
-        return [tokens, labels]
+        return [images, captions]
 
     def build_train_valid_test_datasets(self):
         logging.info('Building datasets for ViT...')

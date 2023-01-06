@@ -182,6 +182,8 @@ class MegatronMultimodalModel(MultimodalModel):
         if trainer is None:
             raise ValueError(f"Trainer cannot be None for Megatron-based models. Please provide a PTL trainer object.")
 
+        # this prevents base constructor from initializing tokenizer
+        self.tokenizer = None
         super().__init__(cfg, trainer=trainer)
 
         self._validate_config()
@@ -212,6 +214,15 @@ class MegatronMultimodalModel(MultimodalModel):
         )
 
         self.grad_clip_pl_default = False  # use pytorch default for gradient clipping. Default False
+
+        if hasattr(self._cfg, "tokenizer") or (
+            hasattr(self._cfg, "encoder_tokenizer") and hasattr(self._cfg, "decoder_tokenizer")
+        ):
+            # build tokenizer (defaults to nemo supported tokenizers)
+            self._build_tokenizer()
+
+            # manipulate vocabulary (e.g., pad vocabulary for better efficiency)
+            self._build_vocab()
 
         # TODO: remove this when PTL 1.7.3 is released
         _FxValidator.functions["configure_gradient_clipping"] = {
@@ -250,6 +261,51 @@ class MegatronMultimodalModel(MultimodalModel):
         else:
             # Not a Nvidia container. NVFUSER Dependency check is on users
             pass
+
+    def _build_tokenizer(self):
+        """
+        Default tokenizer is based on available nemo tokenizers.
+        Override this method to use an external tokenizer.
+        All tokenizers are expected to provide compatible interface.
+        Override default Encoder-decoder tokenizer to use legacy=True for sentencepiece.
+        """
+        if hasattr(self._cfg.tokenizer, "sentencepiece_legacy"):
+            legacy = self._cfg.tokenizer.sentencepiece_legacy
+        else:
+            legacy = True if self._cfg.tokenizer.library == 'sentencepiece' else False
+        self.tokenizer = get_nmt_tokenizer(
+            library=self._cfg.tokenizer.library,
+            model_name=self._cfg.tokenizer.type,
+            tokenizer_model=self.register_artifact("tokenizer.model", self._cfg.tokenizer.model),
+            vocab_file=self.register_artifact("tokenizer.vocab_file", self._cfg.tokenizer.vocab_file),
+            merges_file=self.register_artifact("tokenizer.merge_file", self._cfg.tokenizer.merge_file),
+            delimiter=self.cfg.tokenizer.get('delimiter', None),
+            legacy=legacy,
+        )
+
+    def _build_vocab(self):
+        """
+        Manipulate vocabulary (e.g., pad vocabulary for increased performance)/
+        """
+        # TODO: add config to allow to disable it?
+        self.padded_vocab_size = self._vocab_size_with_padding(
+            orig_vocab_size=self.tokenizer.vocab_size,
+            make_vocab_size_divisible_by=self._cfg.get('make_vocab_size_divisible_by', 128),
+            tensor_model_parallel_size=self._cfg.get('tensor_model_parallel_size', 1),
+        )
+
+    def _vocab_size_with_padding(self, orig_vocab_size, make_vocab_size_divisible_by, tensor_model_parallel_size):
+        """Pad vocab size so it is divisible by model parallel size and
+        still having GPU friendly size."""
+
+        after = orig_vocab_size
+        multiple = make_vocab_size_divisible_by * tensor_model_parallel_size
+        while (after % multiple) != 0:
+            after += 1
+        logging.info(
+            f'Padded vocab_size: {after}, original vocab_size: {orig_vocab_size}, dummy tokens: {after - orig_vocab_size}.'
+        )
+        return after
 
     def on_train_start(self) -> None:
         super().on_train_start()
