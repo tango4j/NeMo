@@ -217,7 +217,6 @@ class VitBackbone(MegatronModule):
         self.patch_dim = model_cfg.patch_dim
         self.img_h = model_cfg.img_h
         self.img_w = model_cfg.img_w
-        self.micro_batch_size = model_cfg.micro_batch_size
         self.single_token_output = single_token_output
         self.drop_patch_rate = model_cfg.drop_patch_rate
         self.drop_path_rate = model_cfg.drop_path_rate
@@ -264,7 +263,7 @@ class VitBackbone(MegatronModule):
             )
 
             self.embedding_dropout = torch.nn.Dropout(model_cfg.hidden_dropout)
-            self.drop_patch = DropPatch(self.drop_patch_rate, exclude_cls_tokens=self.cls_token)
+            self.drop_patch = DropPatch(self.drop_patch_rate, exclude_cls_tokens=self.class_token)
 
         self.transformer = ParallelVisionTransformer(
             init_method=init_method,
@@ -288,7 +287,7 @@ class VitBackbone(MegatronModule):
             attention_dropout=model_cfg.attention_dropout,
             drop_path_rate=model_cfg.drop_path_rate,
             use_cpu_initialization=model_cfg.use_cpu_initialization,
-            bias_activation_fusion=model_cfg.bias_gelu_fusion,
+            bias_activation_fusion=model_cfg.bias_activation_fusion,
             persist_layer_norm=model_cfg.persist_layer_norm,
             openai_gelu=model_cfg.openai_gelu,
             onnx_safe=model_cfg.onnx_safe,

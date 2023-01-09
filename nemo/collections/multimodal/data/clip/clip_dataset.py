@@ -1,11 +1,18 @@
+import torch
 from functools import partial
-from typing import Any, Union, Dict, Optional
+from typing import Any, List, Union, Dict, Optional
 
 from nemo.collections.multimodal.data.clip.wds_dataset import WebDatasetUrls, WDSDataset
 from nemo.collections.multimodal.data.clip.wds_utils import RandomSamplerIterableDataset
 from nemo.collections.multimodal.data.clip.data_samplers import WDSUrlsRandomSampler
 from nemo.collections.multimodal.data.clip.clip_augment import image_transform
 
+try:
+    from apex.transformer import parallel_state
+
+    HAVE_APEX = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_APEX = False
 
 def tokenize(texts: Union[str, List[str]], tokenizer: Any, context_length: int = 77) -> torch.LongTensor:
     """
@@ -24,12 +31,14 @@ def tokenize(texts: Union[str, List[str]], tokenizer: Any, context_length: int =
     -------
     A two-dimensional tensor containing the resulting tokens, shape = [number of input strings, context_length]
     """
+    texts_is_str = False
     if isinstance(texts, str):
         texts = [texts]
+        texts_is_str = True
 
     bos_id = tokenizer.bos_id
     eos_id = tokenizer.eos_id
-    all_tokens = [[bos_id] + _tokenizer.text_to_ids(text) + [eos_id] for text in texts]
+    all_tokens = [[bos_id] + tokenizer.text_to_ids(text) + [eos_id] for text in texts]
     result = torch.zeros(len(all_tokens), context_length, dtype=torch.long)
 
     for i, tokens in enumerate(all_tokens):
@@ -38,12 +47,14 @@ def tokenize(texts: Union[str, List[str]], tokenizer: Any, context_length: int =
             tokens[-1] = eot_token
         result[i, :len(tokens)] = torch.tensor(tokens)
 
+    if texts_is_str:
+        result = result[0]
     return result
 
 def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
-    img_size = model_cfg.get("image_size")
-    img_mean = model_cfg.get("image_mean")
-    img_std = model_cfg.get("image_std")
+    img_size = (model_cfg.vision.get("img_h"), model_cfg.vision.get("img_w"))
+    img_mean = model_cfg.vision.get("img_mean")
+    img_std = model_cfg.vision.get("img_std")
 
     # Create a dataset of WebDataset Urls
     train_url_dataset = WebDatasetUrls(model_cfg.data)
@@ -59,8 +70,8 @@ def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
         consumed_samples=consumed_samples,
         data_parallel_rank=parallel_state.get_data_parallel_rank(),
         data_parallel_size=parallel_state.get_data_parallel_world_size(),
-        drop_last=model_cfg.train.data.get("drop_last", True),
-        data_sharding=model_cfg.train.data.get("data_sharding", True),
+        drop_last=model_cfg.data.train.get("drop_last", True),
+        data_sharding=model_cfg.data.train.get("data_sharding", True),
     )
     if val_url_dataset is not None:
         val_url_sampler = WDSUrlsRandomSampler(
@@ -91,7 +102,7 @@ def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
     text_transform = partial(
         tokenize,
         tokenizer=tokenizer,
-        context_length=model_cfg.get("max_position_embeddings"),
+        context_length=model_cfg.text.get("max_position_embeddings"),
     )
 
     # Create the actual WebDataset IterableDataset

@@ -59,12 +59,8 @@ class WebDatasetUrls(Dataset):
         self.webdata_cfg = data_cfg.webdataset
         if is_train:
             dataset_info = data_cfg.train.dataset_info
-            self.batch_size = self.data_cfg.train.batch_size
-            self.augmentations = self.data_cfg.train.augmentations
         else:
             dataset_info = data_cfg.validation.dataset_info
-            self.batch_size = self.validation.batch_size
-            self.augmentations = self.data_cfg.validation.augmentations
 
         # Concatenate all dataset infos
         # Create an url list of tar files

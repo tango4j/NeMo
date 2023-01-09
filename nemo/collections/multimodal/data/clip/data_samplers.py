@@ -54,7 +54,8 @@ class WDSUrlsRandomSampler:
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
-        worker_id, num_workers = worker_info.id, worker_info.num_workers
+        if worker_info is not None:
+            worker_id, num_workers = worker_info.id, worker_info.num_workers
 
         self.consumed_urls = self.consumed_samples // self.data_parallel_size \
                              // self.chunk_size * self.data_parallel_size
@@ -94,7 +95,7 @@ class WDSUrlsRandomSampler:
         additional_random_idx = torch.randperm(self.total_urls, generator=g).tolist()
         for n, idx in enumerate(idx_range):
             self.consumed_samples += self.data_parallel_size * self.chunk_size
-            if n % num_workers != worker_id:
+            if worker_info is not None and n % num_workers != worker_id:
                 continue
             if idx < self.total_urls:
                 yield idx

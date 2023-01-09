@@ -4,7 +4,9 @@ from torch.nn import functional as F
 
 import torch.distributed.nn
 from torch import distributed as dist
-
+from nemo.collections.nlp.modules.common.megatron.utils import (
+    average_losses_across_data_parallel_group,
+)
 try:
     from apex.transformer import parallel_state
     HAVE_APEX = True
@@ -63,7 +65,8 @@ class ClipLoss(nn.Module):
         self.world_size = parallel_state.get_data_parallel_world_size()
         self.rank = parallel_state.get_data_parallel_rank()
 
-    def forward(self, image_features, text_features, logit_scale):
+    def forward(self, output_tensor):
+        image_features, text_features, logit_scale = output_tensor
         device = image_features.device
         if self.world_size > 1:
             all_image_features, all_text_features = gather_features(
@@ -96,4 +99,6 @@ class ClipLoss(nn.Module):
             F.cross_entropy(logits_per_image, labels) +
             F.cross_entropy(logits_per_text, labels)
             ) / 2
-        return total_loss
+
+        reduced_loss = average_losses_across_data_parallel_group([total_loss])
+        return total_loss, {"loss": reduced_loss}

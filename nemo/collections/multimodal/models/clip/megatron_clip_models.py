@@ -18,6 +18,7 @@ from functools import partial
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 
@@ -59,6 +60,7 @@ try:
         _forward_backward_pipelining_with_interleaving,
     )
     from apex.transformer.pipeline_parallel.schedules.fwd_bwd_no_pipelining import forward_backward_no_pipelining
+    from apex.transformer.enums import AttnMaskType
 
     HAVE_APEX = True
 except (ImportError, ModuleNotFoundError):
@@ -120,7 +122,7 @@ class CLIPVisionTransformer(MegatronModule):
 
 class CLIPTextTransformer(MegatronModule):
     """Text Transformer Model."""
-    def __init__(self, model_cfg,
+    def __init__(self, model_cfg, padded_vocab_size,
                  pre_process=True, post_process=True):
         super(CLIPTextTransformer, self).__init__()
 
@@ -131,20 +133,13 @@ class CLIPTextTransformer(MegatronModule):
         self.sequence_parallel = model_cfg.sequence_parallel
         self.gradient_accumulation_fusion = model_cfg.gradient_accumulation_fusion
 
-        kv_channels = model_cfg.get("kv_channels")
-        if kv_channels is None:
-            assert (
-                hidden_size % num_attention_heads == 0
-            ), 'hidden_size must be divisible by num_attention_heads if kv_channels is None'
-            kv_channels = hidden_size // num_attention_heads
-
         scaled_init_method = (
             scaled_init_method_normal(model_cfg.init_method_std, model_cfg.num_layers)
             if model_cfg.use_scaled_init_method
             else init_method_normal(model_cfg.init_method_std)
         )
         self.language_model, self._language_model_key = get_language_model(
-            vocab_size=model_cfg.vocab_size,
+            vocab_size=padded_vocab_size,
             hidden_size=model_cfg.hidden_size,
             hidden_dropout=model_cfg.hidden_dropout,
             num_tokentypes=0,
@@ -152,7 +147,7 @@ class CLIPTextTransformer(MegatronModule):
             num_layers=model_cfg.num_layers,
             num_attention_heads=model_cfg.num_attention_heads,
             apply_query_key_layer_scaling=model_cfg.apply_query_key_layer_scaling,
-            kv_channels=kv_channels,
+            kv_channels=model_cfg.kv_channels,
             ffn_hidden_size=model_cfg.ffn_hidden_size,
             add_pooler=False,
             encoder_attn_mask_type=AttnMaskType.causal,
@@ -190,7 +185,9 @@ class CLIPTextTransformer(MegatronModule):
         )
 
         self.initialize_word_embeddings(
-            init_method=init_method_normal(init_method_std), vocab_size=vocab_size, hidden_size=hidden_size
+            init_method=init_method_normal(model_cfg.init_method_std),
+            vocab_size=padded_vocab_size,
+            hidden_size=model_cfg.hidden_size,
         )
 
         # TODO (yuya): check this position id
@@ -200,7 +197,7 @@ class CLIPTextTransformer(MegatronModule):
 
         if self.post_process:
             self.head = torch.nn.Linear(
-                self.hidden_size,
+                model_cfg.hidden_size,
                 self.output_dim,
                 bias=False,
             )
@@ -219,8 +216,8 @@ class CLIPTextTransformer(MegatronModule):
 
         hidden_states = self.language_model(
             input_ids,
-            position_ids=self.position_ids,
-            attention_mask=None,
+            self.position_ids,
+            None,
             token_type_ids=None,
             layer_past=None,
             get_key_value=False,
@@ -231,10 +228,9 @@ class CLIPTextTransformer(MegatronModule):
         )
 
         if self.post_process:
-            # TODO (yuya): check this shape
-            # x.shape = [bsz, seq, hidden]
+            # shape = [seq, bsz, hidden]
             # take features from the eot embedding (eot_token is the highest number in each sequence)
-            hidden_states = hidden_states[torch.arange(x.shape[0]), input_ids.argmax(dim=-1)]
+            hidden_states = hidden_states[input_ids.argmax(dim=-1), torch.arange(hidden_states.shape[1])]
             return self.head(hidden_states)
 
         return hidden_states
@@ -267,9 +263,9 @@ class CLIPTextTransformer(MegatronModule):
 class CLIPModel(MegatronModule):
     """CLIP Model"""
 
-    def __init__(self, model_cfg,
+    def __init__(self, model_cfg, padded_vocab_size,
                  pre_process=True, post_process=True):
-        super(VitClassificationModel, self).__init__()
+        super(CLIPModel, self).__init__()
 
         self.pre_process = pre_process
         self.post_process = post_process
@@ -280,15 +276,16 @@ class CLIPModel(MegatronModule):
         )
         self.text_encoder = CLIPTextTransformer(
             model_cfg.text,
+            padded_vocab_size,
             pre_process=self.pre_process,
             post_process=self.post_process,
         )
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.logit_scale = torch.nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def set_input_tensor(self, input_tensor):
         """See megatron.model.transformer.set_input_tensor()"""
         # TODO (yuya): fix this
-        raise NotImplementedError
+        pass
 
     def forward(self, images, captions):
         image_features = self.vision_encoder(images)
@@ -366,6 +363,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         """Model depends on pipeline paralellism."""
         model = CLIPModel(
             model_cfg=self.cfg,
+            padded_vocab_size=self.padded_vocab_size,
             pre_process=pre_process,
             post_process=post_process,
         )
@@ -455,7 +453,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             batch_for_pipeline = None
 
         # TODO (yuya): fix this shape
-        tensor_shape = [self.cfg.encoder_seq_length, self.cfg.micro_batch_size, self.cfg.hidden_size]
+        tensor_shape = [1, 1, 1]
 
         # handle asynchronous grad reduction
         if self.with_distributed_adam:
@@ -622,7 +620,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         """
 
         batch_for_pipeline = self.process_global_batch(batch, self.cfg.global_batch_size)
-        tensor_shape = [self.cfg.encoder_seq_length, self.cfg.micro_batch_size, self.cfg.hidden_size]
+        tensor_shape = [1, 1, 1] # Placeholder
 
         # run forward passes for an entire global batch
         # we do this inside validation_step to support pipeline parallelism
@@ -641,25 +639,29 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         def _get_metric_with_batch_size(metric_key):
             # only the last stage of the pipeline returns losses
             if losses_reduced_per_micro_batch:
-                actual_batch_size = batch[0].shape[0]  # Might be lesser than global_batch_size if drop_last=False
-                expected_batch_size = self.cfg.global_batch_size // parallel_state.get_data_parallel_world_size()
-                if actual_batch_size == expected_batch_size:
-                    loss_with_batch_size_list = [
-                        [loss_reduced[metric_key].item(), self.cfg.micro_batch_size]
-                        for loss_reduced in losses_reduced_per_micro_batch
-                    ]
-                else:
-                    loss_with_batch_size_list = []
-                    total_samples_remaining = actual_batch_size
-                    for loss_reduced in losses_reduced_per_micro_batch:
-                        if total_samples_remaining <= 0:
-                            break
-                        if total_samples_remaining // self.cfg.micro_batch_size >= 1:
-                            loss_with_batch_size_list.append(
-                                [loss_reduced[metric_key].item(), self.cfg.micro_batch_size])
-                        else:
-                            loss_with_batch_size_list.append([loss_reduced[metric_key].item(), total_samples_remaining])
-                        total_samples_remaining = total_samples_remaining - self.cfg.micro_batch_size
+                loss_with_batch_size_list = [
+                    [loss_reduced[metric_key].item(), self.cfg.micro_batch_size]
+                    for loss_reduced in losses_reduced_per_micro_batch
+                ]
+                # actual_batch_size = batch[0].shape[0]  # Might be lesser than global_batch_size if drop_last=False
+                # expected_batch_size = self.cfg.global_batch_size // parallel_state.get_data_parallel_world_size()
+                # if actual_batch_size == expected_batch_size:
+                #     loss_with_batch_size_list = [
+                #         [loss_reduced[metric_key].item(), self.cfg.micro_batch_size]
+                #         for loss_reduced in losses_reduced_per_micro_batch
+                #     ]
+                # else:
+                #     loss_with_batch_size_list = []
+                #     total_samples_remaining = actual_batch_size
+                #     for loss_reduced in losses_reduced_per_micro_batch:
+                #         if total_samples_remaining <= 0:
+                #             break
+                #         if total_samples_remaining // self.cfg.micro_batch_size >= 1:
+                #             loss_with_batch_size_list.append(
+                #                 [loss_reduced[metric_key].item(), self.cfg.micro_batch_size])
+                #         else:
+                #             loss_with_batch_size_list.append([loss_reduced[metric_key].item(), total_samples_remaining])
+                #         total_samples_remaining = total_samples_remaining - self.cfg.micro_batch_size
             else:
                 # we're not on the last pipeline stage so no losses
                 loss_with_batch_size_list = []
@@ -721,17 +723,19 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             expected_batch_size = global_batch_size // parallel_state.get_data_parallel_world_size()
         current_batch_size = images.shape[0]
         if expected_batch_size is not None and expected_batch_size > current_batch_size:
-            logging.info(
-                'Got batch size of '
-                + str(current_batch_size)
-                + ' , expected batch size :'
-                + str(expected_batch_size)
-                + '. Appending dummy data.'
-            )
-            pad_length = expected_batch_size - current_batch_size
-            pad_dim = (int(pad_length), images.shape[1])
-            images = torch.cat((images, torch.ones(pad_dim, dtype=tokens.dtype)))
-            captions = torch.cat((captions, torch.ones(pad_dim, dtype=labels.dtype)))
+            raise NotImplementedError
+            # logging.info(
+            #     'Got batch size of '
+            #     + str(current_batch_size)
+            #     + ' , expected batch size :'
+            #     + str(expected_batch_size)
+            #     + '. Appending dummy data.'
+            # )
+            # pad_length = expected_batch_size - current_batch_size
+            # pad_dim = (int(pad_length), images.shape[1])
+            # images = torch.cat((images, torch.ones(pad_dim, dtype=images.dtype)))
+            # pad_dim = (int(pad_length), images.shape[1])
+            # captions = torch.cat((captions, torch.ones(pad_dim, dtype=captions.dtype)))
 
         return [images, captions]
 
@@ -816,6 +820,11 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         # allowing restored models to optionally setup datasets
         self.build_train_valid_test_datasets()
+
+        # Batch size need to be provided for webdatset
+        self._num_micro_batches = self.cfg.global_batch_size // (self.cfg.micro_batch_size * parallel_state.get_data_parallel_world_size())
+        self._global_batch_size_on_this_data_parallel_rank = self._num_micro_batches * self.cfg.micro_batch_size
+
         self.setup_training_data(self.cfg.data)
         self.setup_validation_data(self.cfg.data)
         self.setup_test_data(self.cfg.data)
@@ -838,7 +847,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 f'Setting up train dataloader with len(len(self._train_ds)): {len(self._train_ds)} and consumed samples: {consumed_samples}'
             )
             self._train_dl = torch.utils.data.DataLoader(
-                self._train_ds, num_workers=cfg.num_workers, pin_memory=True,
+                self._train_ds, batch_size=self._global_batch_size_on_this_data_parallel_rank, num_workers=cfg.num_workers, pin_memory=True,
             )
 
     def setup_validation_data(self, cfg):
@@ -848,7 +857,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 f'Setting up validation dataloader with len(len(self._validation_ds)): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
             )
             self._validation_dl = torch.utils.data.DataLoader(
-                self._validation_ds, num_workers=cfg.num_workers, pin_memory=True,
+                self._validation_ds, batch_size=self._global_batch_size_on_this_data_parallel_rank, num_workers=cfg.num_workers, pin_memory=True,
             )
 
     def setup_test_data(self, cfg):
@@ -858,7 +867,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 f'Setting up test dataloader with len(len(self._test_ds)): {len(self._test_ds)} and consumed samples: {consumed_samples}'
             )
             self._test_dl = torch.utils.data.DataLoader(
-                self._test_ds, num_workers=cfg.num_workers, pin_memory=True,
+                self._test_ds, batch_size=self._global_batch_size_on_this_data_parallel_rank, num_workers=cfg.num_workers, pin_memory=True,
             )
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: Optional[int] = None) -> Any:
