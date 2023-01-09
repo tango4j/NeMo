@@ -241,20 +241,20 @@ class CLIPTextTransformer(MegatronModule):
         state_dict_[self._language_model_key] = self.language_model.state_dict_for_save_checkpoint(
             destination, prefix, keep_vars
         )
-        # Save word_embeddings.
-        # TODO (yuya): check if this is necessary
-        # if self.post_process and not self.pre_process:
-        #     state_dict_[self._word_embeddings_for_head_key] = self.word_embeddings.state_dict(
-        #         destination, prefix, keep_vars
-        #     )
+        # Save head
+        # TODO (yuya): check if this is correct; it seems never used
+        if self.post_process:
+            state_dict_["head"] = self.head.state_dict(
+                destination, prefix, keep_vars
+            )
         return state_dict_
 
     def load_state_dict(self, state_dict, strict=True):
         """Customized load."""
 
-        # Load word_embeddings.
-        # if self.post_process and not self.pre_process:
-        #     self.word_embeddings.load_state_dict(state_dict[self._word_embeddings_for_head_key], strict=strict)
+        # Load head.
+        if self.post_process:
+            self.head.load_state_dict(state_dict["head"], strict=strict)
         if self._language_model_key in state_dict:
             state_dict = state_dict[self._language_model_key]
         self.language_model.load_state_dict(state_dict, strict=strict)
@@ -280,6 +280,8 @@ class CLIPModel(MegatronModule):
             pre_process=self.pre_process,
             post_process=self.post_process,
         )
+
+        #TODO (yuya): this may not work as expected in (1) saving and loading (2) sync in TP
         self.logit_scale = torch.nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def set_input_tensor(self, input_tensor):
@@ -438,6 +440,10 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             Microbatches are then moved to GPU during the pipeline.
             The list of microbatches is then piped through the pipeline using Apex fwd/bwd functions.
         """
+
+        # for name, param in self.model.state_dict().items():
+        #     print(name)
+        # exit(0)
 
         # we zero grads here because we also call backward in the apex fwd/bwd functions
         self._optimizer.zero_grad()
