@@ -235,30 +235,6 @@ class CLIPTextTransformer(MegatronModule):
 
         return hidden_states
 
-    def state_dict_for_save_checkpoint(self, destination=None, prefix='', keep_vars=False):
-
-        state_dict_ = {}
-        state_dict_[self._language_model_key] = self.language_model.state_dict_for_save_checkpoint(
-            destination, prefix, keep_vars
-        )
-        # Save head
-        # TODO (yuya): check if this is correct; it seems never used
-        if self.post_process:
-            state_dict_["head"] = self.head.state_dict(
-                destination, prefix, keep_vars
-            )
-        return state_dict_
-
-    def load_state_dict(self, state_dict, strict=True):
-        """Customized load."""
-
-        # Load head.
-        if self.post_process:
-            self.head.load_state_dict(state_dict["head"], strict=strict)
-        if self._language_model_key in state_dict:
-            state_dict = state_dict[self._language_model_key]
-        self.language_model.load_state_dict(state_dict, strict=strict)
-
 
 class CLIPModel(MegatronModule):
     """CLIP Model"""

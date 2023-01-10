@@ -44,7 +44,7 @@ def tokenize(texts: Union[str, List[str]], tokenizer: Any, context_length: int =
     for i, tokens in enumerate(all_tokens):
         if len(tokens) > context_length:
             tokens = tokens[:context_length]  # Truncate
-            tokens[-1] = eot_token
+            tokens[-1] = eos_id
         result[i, :len(tokens)] = torch.tensor(tokens)
 
     if texts_is_str:

@@ -150,10 +150,11 @@ class WDSDataset(IterableDataset):
                 out_dict['captions'] = input[1]
                 yield out_dict
 
+        webdata_cfg = self.data_cfg.get("webdataset", {})
         self.dataset = (
             WebDataset(
                 self.url_dataset,
-                load_from_object_store=self.data_cfg.get,
+                load_from_object_store=webdata_cfg.get("object_store"),
                 s3_client=self.s3,
                 s3_bucket_name=self.bucket,
                 local_root_path=self.local_root_path,
