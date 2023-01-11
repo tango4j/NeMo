@@ -100,5 +100,6 @@ class ClipLoss(nn.Module):
             F.cross_entropy(logits_per_text, labels)
             ) / 2
 
+        # TODO (yuya): this is not necessary
         reduced_loss = average_losses_across_data_parallel_group([total_loss])
         return total_loss, {"loss": reduced_loss}

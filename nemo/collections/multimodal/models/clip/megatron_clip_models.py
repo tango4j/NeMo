@@ -115,8 +115,7 @@ class CLIPVisionTransformer(MegatronModule):
             else:
                 hidden_states = hidden_states[:, 0]
             hidden_states = self.head(hidden_states)
-        # TODO (yuya): is this necessary?
-        hidden_states = hidden_states.contiguous()
+        # print("vision_head", hidden_states.shape)
         return hidden_states
 
 
@@ -417,10 +416,6 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             The list of microbatches is then piped through the pipeline using Apex fwd/bwd functions.
         """
 
-        # for name, param in self.model.state_dict().items():
-        #     print(name)
-        # exit(0)
-
         # we zero grads here because we also call backward in the apex fwd/bwd functions
         self._optimizer.zero_grad()
 
@@ -435,7 +430,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             batch_for_pipeline = None
 
         # TODO (yuya): fix this shape
-        tensor_shape = [1, 1, 1]
+        tensor_shape = None
 
         # handle asynchronous grad reduction
         if self.with_distributed_adam:
@@ -602,7 +597,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         """
 
         batch_for_pipeline = self.process_global_batch(batch, self.cfg.global_batch_size)
-        tensor_shape = [1, 1, 1] # Placeholder
+        tensor_shape = None # Placeholder
 
         # run forward passes for an entire global batch
         # we do this inside validation_step to support pipeline parallelism
@@ -704,8 +699,8 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         if global_batch_size is not None:
             expected_batch_size = global_batch_size // parallel_state.get_data_parallel_world_size()
         current_batch_size = images.shape[0]
-        if expected_batch_size is not None and expected_batch_size > current_batch_size:
-            raise NotImplementedError
+        # if expected_batch_size is not None and expected_batch_size > current_batch_size:
+        #     raise NotImplementedError
             # logging.info(
             #     'Got batch size of '
             #     + str(current_batch_size)
