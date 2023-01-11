@@ -28,6 +28,7 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
     scaled_init_method_normal,
 )
 from nemo.collections.nlp.modules.common.megatron.module import MegatronModule
+from nemo.collections.nlp.modules.common.megatron.fused_layer_norm import get_layer_norm
 
 try:
     import apex
@@ -265,6 +266,11 @@ class VitBackbone(MegatronModule):
             self.embedding_dropout = torch.nn.Dropout(model_cfg.hidden_dropout)
             self.drop_patch = DropPatch(self.drop_patch_rate, exclude_cls_tokens=self.class_token)
 
+            self.preprocess_layernorm = get_layer_norm(
+                model_cfg.hidden_size, model_cfg.layernorm_epsilon, model_cfg.persist_layer_norm,
+                sequence_parallel=model_cfg.sequence_parallel
+            )
+
         self.transformer = ParallelVisionTransformer(
             init_method=init_method,
             output_layer_init_method=scaled_init_method,
@@ -323,9 +329,10 @@ class VitBackbone(MegatronModule):
             token_embeddings = concatenated_tokens + \
                                self.position_embeddings(self.position_ids[:, :concatenated_tokens.shape[1]])
 
-            # TODO (yuya): missing pre_ln for CLIP
             # a patch_dropout of 0. would mean it is disabled and this function would do nothing but return what was passed in
             token_embeddings = self.drop_patch(token_embeddings)
+            # TODO (yuya): check this pre_ln for CLIP
+            token_embeddings = self.preprocess_layernorm(token_embeddings)
 
             # [b s h] => [s b h]
             token_embeddings = token_embeddings.transpose(0, 1).contiguous()

@@ -271,7 +271,7 @@ class CLIPModel(MegatronModule):
         if self.post_process:
             return F.normalize(image_features, dim=-1), \
                 F.normalize(text_features, dim=-1), \
-                self.logit_scale
+                self.logit_scale.exp()
 
         return image_features, text_features
 
@@ -699,8 +699,8 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         if global_batch_size is not None:
             expected_batch_size = global_batch_size // parallel_state.get_data_parallel_world_size()
         current_batch_size = images.shape[0]
-        # if expected_batch_size is not None and expected_batch_size > current_batch_size:
-        #     raise NotImplementedError
+        if expected_batch_size is not None and expected_batch_size > current_batch_size:
+            raise NotImplementedError("Please turn on drop_last.")
             # logging.info(
             #     'Got batch size of '
             #     + str(current_batch_size)
@@ -824,7 +824,11 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 f'Setting up train dataloader with len(len(self._train_ds)): {len(self._train_ds)} and consumed samples: {consumed_samples}'
             )
             self._train_dl = torch.utils.data.DataLoader(
-                self._train_ds, batch_size=self._global_batch_size_on_this_data_parallel_rank, num_workers=cfg.num_workers, pin_memory=True,
+                self._train_ds,
+                batch_size=self._global_batch_size_on_this_data_parallel_rank,
+                num_workers=cfg.num_workers,
+                pin_memory=True,
+                drop_last=cfg.train.get("drop_last", False),
             )
 
     def setup_validation_data(self, cfg):
@@ -834,7 +838,11 @@ class MegatronCLIPModel(MegatronMultimodalModel):
                 f'Setting up validation dataloader with len(len(self._validation_ds)): {len(self._validation_ds)} and consumed samples: {consumed_samples}'
             )
             self._validation_dl = torch.utils.data.DataLoader(
-                self._validation_ds, batch_size=self._global_batch_size_on_this_data_parallel_rank, num_workers=cfg.num_workers, pin_memory=True,
+                self._validation_ds,
+                batch_size=self._global_batch_size_on_this_data_parallel_rank,
+                num_workers=cfg.num_workers,
+                pin_memory=True,
+                drop_last=cfg.train.get("drop_last", False),
             )
 
     def setup_test_data(self, cfg):

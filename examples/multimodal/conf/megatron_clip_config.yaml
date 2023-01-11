@@ -122,7 +122,7 @@ model:
     output_dim: ${model.output_dim}
 
     # model architecture
-    encoder_seq_length: 80
+    encoder_seq_length: 77
     max_position_embeddings: ${.encoder_seq_length}
     num_layers: 12
     hidden_size: 512
@@ -214,31 +214,13 @@ model:
 #      bucket: datasets
 #      pbss_credentials_file: pbss_credential
 
-#  data:
-#    num_workers: 0
-#    use_webdataset: True
-#    train:
-#        dataset_info:
-#            - wdinfo-local.pkl
-#        drop_last: False
-#    validation:
-#        dataset_info:
-#            - wdinfo-local.pkl
-#        drop_last: False
-#    webdataset:
-#      use_webdataset: True
-#      object_store: False
-#      bucket: datasets
-#      pbss_credentials_file: pbss_credential
-#      local_root_path: /datasets/cc3m
-
   data:
-    num_workers: 0
+    num_workers: 4
     use_webdataset: True
     train:
         dataset_info:
             - wdinfo-train.pkl
-        drop_last: False
+        drop_last: True
     validation:
         dataset_info:
             - wdinfo-val.pkl
@@ -261,10 +243,10 @@ model:
   optim:
     name: fused_adam
     lr: 1e-3
-    weight_decay: 0.1
+    weight_decay: 0.2
     betas:
     - 0.9
-    - 0.999
+    - 0.98
     sched:
       name: CosineAnnealing
       warmup_steps: 2000
