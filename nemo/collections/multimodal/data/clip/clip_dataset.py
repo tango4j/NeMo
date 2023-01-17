@@ -51,15 +51,43 @@ def tokenize(texts: Union[str, List[str]], tokenizer: Any, context_length: int =
         result = result[0]
     return result
 
-def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
+def identical_transform(x):
+    return x
+
+def build_train_valid_datasets(
+        model_cfg,
+        consumed_samples,
+        tokenizer=None,
+):
+    # Define transforms
     img_size = (model_cfg.vision.get("img_h"), model_cfg.vision.get("img_w"))
     img_mean = model_cfg.vision.get("img_mean")
     img_std = model_cfg.vision.get("img_std")
+    train_image_transform = image_transform(
+        img_size,
+        is_train=True,
+        mean=img_mean,
+        std=img_std,
+    )
+    val_image_transform = image_transform(
+        img_size,
+        is_train=False,
+        mean=img_mean,
+        std=img_std,
+    )
+
+    text_transform = identical_transform
+    if tokenizer is not None:
+        text_transform = partial(
+            tokenize,
+            tokenizer=tokenizer,
+            context_length=model_cfg.text.get("max_position_embeddings"),
+        )
 
     # Create a dataset of WebDataset Urls
     train_url_dataset = WebDatasetUrls(model_cfg.data)
     val_url_dataset = None
-    if model_cfg.data.get("validation") is not None and model_cfg.data.validation.get("dataset_info"):
+    if model_cfg.data.get("validation") is not None and model_cfg.data.validation.get("data_path"):
         val_url_dataset = WebDatasetUrls(model_cfg.data, is_train=False)
 
     # Create a random sampler to shard, shuffle and resume with Urls
@@ -99,23 +127,12 @@ def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
             chunk_size=val_url_dataset.chunk_size,
         )
 
-    text_transform = partial(
-        tokenize,
-        tokenizer=tokenizer,
-        context_length=model_cfg.text.get("max_position_embeddings"),
-    )
-
     # Create the actual WebDataset IterableDataset
     # Expanding the url to actual samples with shuffling, decoding and transforming
     train_data = WDSDataset(
         model_cfg.data,
         train_url_dataset,
-        image_transform=image_transform(
-                img_size,
-                is_train=True,
-                mean=img_mean,
-                std=img_std,
-            ),
+        image_transform=train_image_transform,
         text_transform=text_transform,
         is_train=True
     )
@@ -125,12 +142,7 @@ def build_train_valid_datasets(model_cfg, consumed_samples, tokenizer):
         val_data = WDSDataset(
             model_cfg.data,
             train_url_dataset,
-            image_transform=image_transform(
-                    img_size,
-                    is_train=False,
-                    mean=img_mean,
-                    std=img_std,
-                ),
+            image_transform=val_image_transform,
             text_transform=text_transform,
             is_train=False
         )

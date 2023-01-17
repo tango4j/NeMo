@@ -202,11 +202,11 @@ model:
 #    num_workers: 0
 #    use_webdataset: True
 #    train:
-#      dataset_info:
+#      data_path:
 #          - wdinfo.pkl
 #      drop_last: False
 #    validation:
-#      dataset_info:
+#      data_path:
 #        - wdinfo.pkl
 #      drop_last: False
 #    webdataset:
@@ -216,21 +216,22 @@ model:
 
   data:
     num_workers: 4
-    use_webdataset: True
+    dataset_type: webdataset
     train:
-        dataset_info:
+        data_path: # List of paths to pkl files or tar files
             - wdinfo-train.pkl
-        drop_last: True
-    validation:
-        dataset_info:
+        drop_last: True # drop_last = False is not implemented yet
+    validation: # List of paths to pkl files or tar files
+        data_path:
             - wdinfo-val.pkl
-        drop_last: True
+        drop_last: True # drop_last = False is not implemented yet
     webdataset:
-      use_webdataset: True
       object_store: False
       bucket: datasets
       pbss_credentials_file: pbss_credential
-      local_root_path: /home/yuya/datasets/cc3m
+      local_root_path: /home/yuya/datasets/cc3m # tar files local root path
+      chunk_size: null # if data path is list of tar files, chunk_size needs to be provided
+    imagenet_val: null # Path to imagenet val set for conducting zero shot evaluation.
 
   # Nsys profiling options
   nsys_profile:

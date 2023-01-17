@@ -5,6 +5,8 @@ import pickle
 import os
 import io
 import re
+import itertools
+import webdataset as wds
 import torch.distributed as dist
 from torch.utils.data import Dataset, IterableDataset
 from botocore.config import Config
@@ -20,9 +22,6 @@ except (ImportError, ModuleNotFoundError):
 
 Image.MAX_IMAGE_PIXELS = 933120000
 _IMG_EXTENSIONS = "jpg jpeg png ppm pgm pbm pnm".split()
-
-def identical_transform(x):
-    return x
 
 def pil_loader(key, data):
     r"""
@@ -58,27 +57,33 @@ class WebDatasetUrls(Dataset):
         self.data_cfg = data_cfg
         self.webdata_cfg = data_cfg.webdataset
         if is_train:
-            dataset_info = data_cfg.train.dataset_info
+            data_path = data_cfg.train.data_path
         else:
-            dataset_info = data_cfg.validation.dataset_info
+            data_path = data_cfg.validation.data_path
 
-        # Concatenate all dataset infos
-        # Create an url list of tar files
         self.urls = []
         self.chunk_size = None
         self.total_key_count = 0
 
-        for ds_info_path in dataset_info:
-            with open(ds_info_path, 'rb') as fp:
-                ds_info = pickle.load(fp)
-                self.urls.extend(ds_info['tar_files'])
-                self.total_key_count += ds_info['total_key_count']
-                if self.chunk_size is None:
-                    self.chunk_size = ds_info['chunk_size']
-                else:
-                    assert self.chunk_size == ds_info['chunk_size'], \
-                        "Chunk size needs to be consistent across different shards."
+        if data_path[0].endswith(".pkl"):
+            # Concatenate all dataset infos
+            # Create an url list of tar files
 
+            for ds_info_path in data_path:
+                with open(ds_info_path, 'rb') as fp:
+                    ds_info = pickle.load(fp)
+                    self.urls.extend(ds_info['tar_files'])
+                    if self.chunk_size is None:
+                        self.chunk_size = ds_info['chunk_size']
+                    else:
+                        assert self.chunk_size == ds_info['chunk_size'], \
+                            "Chunk size needs to be consistent across different shards."
+        else:
+            self.urls = map(wds.shardlists.expand_urls, data_path)
+            self.urls = list(itertools.chain.from_iterable(a))
+            self.chunk_size = data_cfg.webdataset.get("chunk_size", 1000)
+
+        self.total_key_count += self.chunk_size * len(self.urls)
         assert self.total_key_count > 0, "No WebDataset data is found."
 
     def __getitem__(self, index: int) -> str:
