@@ -561,8 +561,10 @@ class MegatronCLIPModel(MegatronMultimodalModel):
             buf.copy_(synced)
 
     def get_forward_output_and_loss_func(self):
-        # TODO (yuya): explore local_loss etc.
-        loss_func = ClipLoss()
+        loss_func = ClipLoss(
+            local_loss=self.cfg.local_loss,
+            gather_with_grad=self.cfg.gather_with_grad,
+        )
 
         def fwd_output_and_loss_func(batch, model):
             if parallel_state.get_pipeline_model_parallel_world_size() == 1:
