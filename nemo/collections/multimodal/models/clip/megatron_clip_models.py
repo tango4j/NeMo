@@ -19,12 +19,12 @@ from functools import partial
 import numpy as np
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 from omegaconf.dictconfig import DictConfig
 from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.nlp.modules.common.megatron.language_model import get_language_model
-from nemo.collections.multimodal.data.clip.clip_dataset import build_train_valid_datasets
-
+from nemo.collections.multimodal.data.clip.clip_dataset import tokenize, build_train_valid_datasets, build_imagenet_validation_dataloader
 
 from nemo.collections.multimodal.models.multimodal_base_model import MegatronMultimodalModel
 from nemo.collections.vision.modules.vit.vit_backbone import VitBackbone, VitMlpHead
@@ -46,7 +46,7 @@ from nemo.collections.nlp.modules.common.megatron.utils import (
     get_params_for_weight_decay_optimization,
 )
 
-from nemo.collections.nlp.parts.utils_funcs import get_last_rank
+from nemo.collections.nlp.parts.utils_funcs import get_last_rank, is_last_rank
 from nemo.utils import logging
 from nemo.core.classes.common import PretrainedModelInfo
 
@@ -287,6 +287,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         # this prevents base constructor from initializing tokenizer
         self.tokenizer = None
+        self.imagenet_val = None
         super().__init__(cfg, trainer=trainer)
 
         self._validate_trainer()
@@ -588,6 +589,72 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         return fwd_output_only_func
 
+    def zero_shot_classifier(self):
+        if self.cfg.get("megatron_amp_O2", False):
+            text_encoder = self.model.module.text_encoder
+        else:
+            text_encoder = self.model.text_encoder
+
+        with torch.no_grad():
+            zeroshot_weights = []
+            for texts in self.imagenet_val["texts"]:
+                texts = texts.cuda(non_blocking=True)
+                # TODO (yuya): distributed not working
+                with torch.cuda.amp.autocast(
+                        enabled=self.autocast_dtype in (torch.half, torch.bfloat16),
+                        dtype=self.autocast_dtype,
+                ):
+                    class_embeddings = text_encoder(texts)
+                    class_embedding = F.normalize(class_embeddings, dim=-1).mean(dim=0)
+                    class_embedding /= class_embedding.norm()
+                zeroshot_weights.append(class_embedding)
+            zeroshot_weights = torch.stack(zeroshot_weights, dim=1)
+        return zeroshot_weights
+
+    def zero_shot_eval(self):
+
+        def accuracy(output, target, topk=(1,)):
+            pred = output.topk(max(topk), 1, True, True)[1].t()
+            correct = pred.eq(target.view(1, -1).expand_as(pred))
+            return [float(correct[:k].reshape(-1).float().sum(0, keepdim=True).cpu().numpy()) for k in topk]
+
+        logging.info('Starting zero-shot imagenet.')
+
+        logging.info('Building zero-shot classifier')
+        classifier = self.zero_shot_classifier()
+
+        logging.info('Using classifier')
+
+        if self.cfg.get("megatron_amp_O2", False):
+            vision_encoder = self.model.module.vision_encoder
+        else:
+            vision_encoder = self.model.vision_encoder
+        with torch.no_grad():
+            top1, top5, n = 0., 0., 0.
+            for images, target in tqdm(self.imagenet_val["images"], desc="Imagenet Zero-shot Evaluation", leave=False):
+                images = images.cuda(non_blocking=True).to(self.autocast_dtype)
+                target = target.cuda(non_blocking=True)
+                # predict
+                with torch.cuda.amp.autocast(
+                        enabled=self.autocast_dtype in (torch.half, torch.bfloat16),
+                        dtype=self.autocast_dtype,
+                ):
+                    image_features = vision_encoder(images)
+                    image_features = F.normalize(image_features, dim=-1)
+                    logits = 100. * image_features @ classifier
+
+                # measure accuracy
+                acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+                top1 += acc1
+                top5 += acc5
+                n += images.size(0)
+
+        logging.info('Finished zero-shot imagenet.')
+        top1 = (top1 / n)
+        top5 = (top5 / n)
+        return top1, top5
+
+
     def validation_step(self, batch, batch_idx):
         """
             Our dataloaders produce a micro-batch and then we fetch
@@ -650,6 +717,16 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         # TODO (yuya): need fix later, check with Sean
         if not outputs:
             return
+
+        # Run zero shot imagenet evaluation
+        if self.imagenet_val is not None:
+            imagenet_metric = torch.zeros(2).cuda()
+            if is_last_rank():
+                imagenet_metric[0], imagenet_metric[1] = self.zero_shot_eval()
+
+            torch.distributed.broadcast(imagenet_metric, get_last_rank())
+            self.log('imagenet_top1', imagenet_metric[0], prog_bar=True, rank_zero_only=True)
+            self.log('imagenet_top5', imagenet_metric[1], prog_bar=True, rank_zero_only=True)
 
         if parallel_state.is_pipeline_last_stage():
             loss_outputs = [output[0] for output in outputs]
@@ -805,6 +882,11 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         self.setup_training_data(self.cfg.data)
         self.setup_validation_data(self.cfg.data)
         self.setup_test_data(self.cfg.data)
+
+        if self.cfg.data.get("imagenet_val") is not None:
+            self.imagenet_val = "placeholder"
+            if is_last_rank():
+                self.imagenet_val = build_imagenet_validation_dataloader(self.cfg, self.tokenizer)
 
         # when using pipeline model parallel the final stage need to initialize word embeddings
         if parallel_state.get_pipeline_model_parallel_world_size() > 1:

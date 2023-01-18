@@ -215,8 +215,9 @@ model:
 #      pbss_credentials_file: pbss_credential
 
   data:
-    num_workers: 4
+    num_workers: 1
     dataset_type: webdataset
+
     train:
         data_path: # List of paths to pkl files or tar files
             - wdinfo-train.pkl
@@ -231,6 +232,7 @@ model:
       pbss_credentials_file: pbss_credential
       local_root_path: /home/yuya/datasets/cc3m # tar files local root path
       chunk_size: null # if data path is list of tar files, chunk_size needs to be provided
+
     imagenet_val: null # Path to imagenet val set for conducting zero shot evaluation.
 
   # Nsys profiling options

@@ -1,11 +1,19 @@
 import torch
 from functools import partial
 from typing import Any, List, Union, Dict, Optional
+from torch.utils.data import Dataset
 
 from nemo.collections.multimodal.data.clip.wds_dataset import WebDatasetUrls, WDSDataset
 from nemo.collections.multimodal.data.clip.wds_utils import RandomSamplerIterableDataset
 from nemo.collections.multimodal.data.clip.data_samplers import WDSUrlsRandomSampler
 from nemo.collections.multimodal.data.clip.clip_augment import image_transform
+from nemo.collections.multimodal.data.clip.imagenet_zeroshot_data import openai_imagenet_template, imagenet_classnames
+from nemo.collections.vision.data.megatron.image_folder import ImageFolder
+from nemo.collections.vision.data.megatron.vit_dataset import RandomSeedDataset
+from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_samplers import (
+    MegatronPretrainingBatchSampler,
+    MegatronPretrainingRandomBatchSampler,
+)
 
 try:
     from apex.transformer import parallel_state
@@ -51,14 +59,12 @@ def tokenize(texts: Union[str, List[str]], tokenizer: Any, context_length: int =
         result = result[0]
     return result
 
+
 def identical_transform(x):
     return x
 
-def build_train_valid_datasets(
-        model_cfg,
-        consumed_samples,
-        tokenizer=None,
-):
+
+def get_preprocess_fns(model_cfg, tokenizer=None):
     # Define transforms
     img_size = (model_cfg.vision.get("img_h"), model_cfg.vision.get("img_w"))
     img_mean = model_cfg.vision.get("img_mean")
@@ -83,12 +89,22 @@ def build_train_valid_datasets(
             tokenizer=tokenizer,
             context_length=model_cfg.text.get("max_position_embeddings"),
         )
+    return train_image_transform, val_image_transform, text_transform
+
+
+def build_train_valid_datasets(
+        model_cfg,
+        consumed_samples,
+        tokenizer=None,
+):
+    train_image_transform, val_image_transform, text_transform = get_preprocess_fns(model_cfg, tokenizer)
+    data_cfg = model_cfg.data
 
     # Create a dataset of WebDataset Urls
-    train_url_dataset = WebDatasetUrls(model_cfg.data)
+    train_url_dataset = WebDatasetUrls(data_cfg)
     val_url_dataset = None
-    if model_cfg.data.get("validation") is not None and model_cfg.data.validation.get("data_path"):
-        val_url_dataset = WebDatasetUrls(model_cfg.data, is_train=False)
+    if data_cfg.get("validation") is not None and data_cfg.validation.get("data_path"):
+        val_url_dataset = WebDatasetUrls(data_cfg, is_train=False)
 
     # Create a random sampler to shard, shuffle and resume with Urls
     train_url_sampler = WDSUrlsRandomSampler(
@@ -98,8 +114,8 @@ def build_train_valid_datasets(
         consumed_samples=consumed_samples,
         data_parallel_rank=parallel_state.get_data_parallel_rank(),
         data_parallel_size=parallel_state.get_data_parallel_world_size(),
-        drop_last=model_cfg.data.train.get("drop_last", True),
-        data_sharding=model_cfg.data.train.get("data_sharding", True),
+        drop_last=data_cfg.train.get("drop_last", True),
+        data_sharding=data_cfg.train.get("data_sharding", True),
     )
     if val_url_dataset is not None:
         val_url_sampler = WDSUrlsRandomSampler(
@@ -109,8 +125,8 @@ def build_train_valid_datasets(
             consumed_samples=0,
             data_parallel_rank=parallel_state.get_data_parallel_rank(),
             data_parallel_size=parallel_state.get_data_parallel_world_size(),
-            drop_last=model_cfg.data.validation.get("drop_last", True),
-            data_sharding=model_cfg.data.validation.get("data_sharding", True),
+            drop_last=data_cfg.validation.get("drop_last", True),
+            data_sharding=data_cfg.validation.get("data_sharding", True),
         )
 
     # Wrapping the Url dataset with the random sampler
@@ -130,7 +146,7 @@ def build_train_valid_datasets(
     # Create the actual WebDataset IterableDataset
     # Expanding the url to actual samples with shuffling, decoding and transforming
     train_data = WDSDataset(
-        model_cfg.data,
+        data_cfg,
         train_url_dataset,
         image_transform=train_image_transform,
         text_transform=text_transform,
@@ -140,7 +156,7 @@ def build_train_valid_datasets(
     val_data = None
     if val_url_dataset is not None:
         val_data = WDSDataset(
-            model_cfg.data,
+            data_cfg,
             train_url_dataset,
             image_transform=val_image_transform,
             text_transform=text_transform,
@@ -148,3 +164,63 @@ def build_train_valid_datasets(
         )
 
     return train_data, val_data
+
+
+# For zero-shot imagenet validation
+def build_imagenet_validation_dataloader(model_cfg, tokenizer=None):
+    _, val_image_transform, text_transform = get_preprocess_fns(model_cfg, tokenizer)
+    data_cfg = model_cfg.data
+
+    imagenet_val = {}
+
+    imagenet_path = data_cfg.get("imagenet_val")
+    if imagenet_path is None:
+        return None
+
+    image_dataset = ImageFolder(
+        root=imagenet_path,
+        transform=val_image_transform,
+    )
+    # image_dataset = RandomSeedDataset(val_data)
+    # image_batch_sampler = MegatronPretrainingBatchSampler(
+    #     total_samples=len(image_dataset),
+    #     consumed_samples=0,
+    #     micro_batch_size=model_cfg.micro_batch_size,
+    #     global_batch_size=model_cfg.global_batch_size,
+    #     data_parallel_rank=parallel_state.get_data_parallel_rank(),
+    #     data_parallel_size=parallel_state.get_data_parallel_world_size(),
+    #     drop_last=False, # TODO (yuya): check this
+    # )
+    imagenet_val["images"] = torch.utils.data.DataLoader(
+        image_dataset,
+        batch_size=model_cfg.micro_batch_size,
+        num_workers=data_cfg.num_workers,
+        pin_memory=True,
+        persistent_workers=False,
+        drop_last=False,
+    )
+
+    text_dataset = ImagenetClassnameDataset(imagenet_classnames, openai_imagenet_template, text_transform)
+    imagenet_val["texts"] = torch.utils.data.DataLoader(
+        text_dataset,
+        batch_size=text_dataset.num_templates,
+        num_workers=0,
+        pin_memory=True,
+        persistent_workers=False,
+        drop_last=False,
+    )
+    return imagenet_val
+
+class ImagenetClassnameDataset(Dataset):
+    def __init__(self, classnames, templates, text_transform):
+        self.num_templates = len(templates)
+        self.samples = []
+        for classname in classnames:
+            texts = [template(classname) for template in templates]
+            self.samples.extend(text_transform(texts))
+
+    def __getitem__(self, index):
+        return self.samples[index]
+
+    def __len__(self):
+        return len(self.samples)
