@@ -77,6 +77,7 @@ model:
     drop_path_rate: 0.0
     global_average_pool: False
     output_dim: ${model.output_dim}
+    class_token_length: 8
 
     # model architecture
     encoder_seq_length: 196
@@ -196,8 +197,8 @@ model:
   gradient_as_bucket_view: True # PyTorch DDP argument. Allocate gradients in a contiguous bucket to save memory (less fragmentation and buffer memory)
 
   tokenizer:
-    library: 'megatron'
-    type: 'GPT2BPETokenizer'
+    library: 'huggingface'
+    type: 'openai/clip-vit-large-patch14'
     model: null
     vocab_file: null
     merge_file: null

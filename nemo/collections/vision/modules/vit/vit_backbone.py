@@ -43,26 +43,26 @@ except (ImportError, ModuleNotFoundError):
     AttnMaskType = ApexGuardDefaults()
     LayerType = ApexGuardDefaults()
 
-CLASS_TOKEN_LENGTH = 8
-
 
 class DropPatch(MegatronModule):
     """
     https://arxiv.org/abs/2212.00794
     """
 
-    def __init__(self, prob, exclude_cls_tokens=True):
+    def __init__(self, prob, class_token_length=8, exclude_cls_tokens=True):
         assert 0 <= prob < 1.
         super(DropPatch, self).__init__()
         self.prob = prob
+        self.class_token_length = class_token_length
         self.exclude_cls_tokens = exclude_cls_tokens  # exclude CLS token
 
     def __call__(self, x):
         if self.prob == 0. or not self.training:
             return x
 
+        class_token_length = self.class_token_length
         if self.exclude_cls_tokens:
-            cls_tokens, x = x[:, :CLASS_TOKEN_LENGTH], x[:, CLASS_TOKEN_LENGTH:]
+            cls_tokens, x = x[:, :class_token_length], x[:, class_token_length:]
 
         batch, num_tokens, _, device = *x.shape, x.device
 
@@ -133,6 +133,7 @@ def twod_interpolate_position_embeddings_hook(
     num_patches_per_dim_w = model_cfg.img_w // model_cfg.patch_dim
     num_patches = num_patches_per_dim_h * num_patches_per_dim_w
     hidden_size = model_cfg.hidden_size
+    class_token_length = model_cfg.get("class_token_length", 8)
 
     key = prefix + "weight"
 
@@ -141,18 +142,18 @@ def twod_interpolate_position_embeddings_hook(
         input_param = state_dict[key]
 
         input_seq_len = input_param.shape[0]
-        assert (isPerfectSquare(input_seq_len) or isPerfectSquare(input_seq_len - CLASS_TOKEN_LENGTH))
+        assert (isPerfectSquare(input_seq_len) or isPerfectSquare(input_seq_len - class_token_length))
         input_has_class_token = not isPerfectSquare(input_seq_len)
-        num_tok_input = input_seq_len - CLASS_TOKEN_LENGTH if input_has_class_token else input_seq_len
+        num_tok_input = input_seq_len - class_token_length if input_has_class_token else input_seq_len
         num_tok_output = num_patches
         output_has_class_token = class_token_present
 
         # update input_param and load it to state_dict[key]
         if input_has_class_token:
-            input_param_tok = input_param[:CLASS_TOKEN_LENGTH, :]
-            input_param_grid = input_param[CLASS_TOKEN_LENGTH:, :]
+            input_param_tok = input_param[:class_token_length, :]
+            input_param_grid = input_param[class_token_length:, :]
         else:
-            input_param_tok = torch.zeros(CLASS_TOKEN_LENGTH, hidden_size)
+            input_param_tok = torch.zeros(class_token_length, hidden_size)
             input_param_grid = input_param
 
         assert input_param.shape[1] == hidden_size
@@ -227,7 +228,8 @@ class VitBackbone(MegatronModule):
         self.num_patches_per_dim_h = self.img_h // self.patch_dim
         self.num_patches_per_dim_w = self.img_w // self.patch_dim
         self.num_patches = self.num_patches_per_dim_h * self.num_patches_per_dim_w
-        self.seq_length = self.num_patches + (CLASS_TOKEN_LENGTH if self.class_token else 0)
+        class_token_length = model_cfg.get("class_token_length", 8)
+        self.seq_length = self.num_patches + (class_token_length if self.class_token else 0)
         self.flatten_dim = self.patch_dim * self.patch_dim * model_cfg.num_channels
         self.input_tensor = None
         self.position_ids = None
@@ -236,7 +238,7 @@ class VitBackbone(MegatronModule):
             # cls_token
             if self.class_token:
                 self.cls_token = torch.nn.Parameter(
-                    torch.randn(1, CLASS_TOKEN_LENGTH, self.hidden_size)
+                    torch.randn(1, class_token_length, self.hidden_size)
                 )
                 torch.nn.init.zeros_(self.cls_token)
             self.position_ids = torch.arange(self.seq_length).expand(1, -1).cuda()
@@ -264,8 +266,11 @@ class VitBackbone(MegatronModule):
             )
 
             self.embedding_dropout = torch.nn.Dropout(model_cfg.hidden_dropout)
-            self.drop_patch = DropPatch(self.drop_patch_rate, exclude_cls_tokens=self.class_token)
-
+            self.drop_patch = DropPatch(
+                self.drop_patch_rate,
+                class_token_length=class_token_length,
+                exclude_cls_tokens=self.class_token
+            )
             self.preprocess_layernorm = get_layer_norm(
                 model_cfg.hidden_size, model_cfg.layernorm_epsilon, model_cfg.persist_layer_norm,
                 sequence_parallel=model_cfg.sequence_parallel
