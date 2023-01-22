@@ -117,6 +117,8 @@ def build_train_valid_datasets(
         drop_last=data_cfg.train.get("drop_last", True),
         data_sharding=data_cfg.train.get("data_sharding", True),
     )
+    shared_epoch = train_url_sampler.epoch # shared epoch object is used to set_seed in rngs
+
     if val_url_dataset is not None:
         val_url_sampler = WDSUrlsRandomSampler(
             dataset=val_url_dataset,
@@ -150,7 +152,8 @@ def build_train_valid_datasets(
         train_url_dataset,
         image_transform=train_image_transform,
         text_transform=text_transform,
-        is_train=True
+        shared_epoch=shared_epoch,
+        is_train=True,
     )
 
     val_data = None
@@ -160,7 +163,8 @@ def build_train_valid_datasets(
             train_url_dataset,
             image_transform=val_image_transform,
             text_transform=text_transform,
-            is_train=False
+            shared_epoch=shared_epoch,
+            is_train=False,
         )
 
     return train_data, val_data
@@ -182,22 +186,21 @@ def build_imagenet_validation_dataloader(model_cfg, tokenizer=None):
         transform=val_image_transform,
     )
     # image_dataset = RandomSeedDataset(val_data)
-    # image_batch_sampler = MegatronPretrainingBatchSampler(
-    #     total_samples=len(image_dataset),
-    #     consumed_samples=0,
-    #     micro_batch_size=model_cfg.micro_batch_size,
-    #     global_batch_size=model_cfg.global_batch_size,
-    #     data_parallel_rank=parallel_state.get_data_parallel_rank(),
-    #     data_parallel_size=parallel_state.get_data_parallel_world_size(),
-    #     drop_last=False, # TODO (yuya): check this
-    # )
+    image_batch_sampler = MegatronPretrainingBatchSampler(
+        total_samples=len(image_dataset),
+        consumed_samples=0,
+        micro_batch_size=model_cfg.micro_batch_size,
+        global_batch_size=model_cfg.global_batch_size, # TODO (yuya): if grad acc is not 1, this might not work as expected.
+        data_parallel_rank=parallel_state.get_data_parallel_rank(),
+        data_parallel_size=parallel_state.get_data_parallel_world_size(),
+        drop_last=False,
+    )
     imagenet_val["images"] = torch.utils.data.DataLoader(
         image_dataset,
-        batch_size=model_cfg.micro_batch_size,
-        num_workers=data_cfg.num_workers,
+        batch_sampler=image_batch_sampler,
+        num_workers=min(data_cfg.num_workers, 2),
         pin_memory=True,
-        persistent_workers=False,
-        drop_last=False,
+        persistent_workers=True,
     )
 
     text_dataset = ImagenetClassnameDataset(imagenet_classnames, openai_imagenet_template, text_transform)
