@@ -723,10 +723,10 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         # Run zero shot imagenet evaluation
         if self.imagenet_val is not None:
             imagenet_metric = torch.zeros(2).cuda()
-            if is_last_rank():
-                imagenet_metric[0], imagenet_metric[1] = self.zero_shot_eval()
-
-            torch.distributed.broadcast(imagenet_metric, get_last_rank())
+            imagenet_metric[0], imagenet_metric[1] = self.zero_shot_eval()
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            # torch.distributed.broadcast(imagenet_metric, get_last_rank())
             self.log('imagenet_top1', imagenet_metric[0], prog_bar=True, rank_zero_only=True)
             self.log('imagenet_top5', imagenet_metric[1], prog_bar=True, rank_zero_only=True)
 
