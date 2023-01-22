@@ -7,10 +7,14 @@ import io
 import re
 import itertools
 import webdataset as wds
+from webdataset import warn_and_continue
+from webdataset.filters import _shuffle
+
 import torch.distributed as dist
 from torch.utils.data import Dataset, IterableDataset
 from botocore.config import Config
 from PIL import Image
+from nemo.collections.multimodal.data.clip.data_samplers import SharedEpoch
 from nemo.collections.multimodal.data.clip.wds_utils import WebDataset
 from nemo.utils import logging
 
@@ -42,6 +46,37 @@ def pil_loader(key, data):
         img = img.convert("RGB")
 
     return img
+
+
+class detshuffle2(wds.PipelineStage):
+    def __init__(
+            self,
+            bufsize=1000,
+            initial=100,
+            seed=0,
+            epoch=-1,
+    ):
+        self.bufsize = bufsize
+        self.initial = initial
+        self.seed = seed
+        self.epoch = epoch
+
+    def run(self, src):
+        if isinstance(self.epoch, SharedEpoch):
+            epoch = self.epoch.get_value()
+        else:
+            # NOTE: this is epoch tracking is problematic in a multiprocess (dataloader workers or train)
+            # situation as different workers may wrap at different times (or not at all).
+            self.epoch += 1
+            epoch = self.epoch
+        rng = random.Random()
+        # This seed to be deterministic AND the same across all nodes/workers in each epoch
+        if parallel_state.is_unitialized():
+            seed = self.seed + epoch
+        else:
+            seed = self.seed + epoch + (100 * parallel_state.get_data_parallel_rank())
+        rng.seed(seed)
+        return _shuffle(src, self.bufsize, self.initial, rng)
 
 
 class WebDatasetUrls(Dataset):
@@ -101,7 +136,8 @@ class WebDatasetUrls(Dataset):
 
 class WDSDataset(IterableDataset):
     def __init__(self, data_cfg, url_dataset,
-                 image_transform, text_transform, is_train=True):
+                 image_transform, text_transform,
+                 shared_epoch=None, is_train=True):
         r"""
         Webdataloader class
         Args:
@@ -140,6 +176,8 @@ class WDSDataset(IterableDataset):
 
         self.img_transform = image_transform
         self.text_transform = text_transform
+
+        self.epoch = shared_epoch
         self.build_dataset()
 
     def build_dataset(self):
@@ -163,8 +201,9 @@ class WDSDataset(IterableDataset):
                 s3_client=self.s3,
                 s3_bucket_name=self.bucket,
                 local_root_path=self.local_root_path,
+                handler=warn_and_continue,
             )
-            .shuffle(chunk_size)  # Shuffling the buffer
+            .compose(detshuffle2(bufsize=chunk_size, epoch=self.epoch))  # Shuffling the buffer
             .decode(pil_loader)   # Decoding the data
             .to_tuple("jpg txt")  # Splitting into tuple
             .map_tuple(

@@ -1,9 +1,21 @@
 import random
 import torch
 import numpy as np
+from multiprocessing import Value
 from torch.utils.data import Dataset
 from nemo.collections.nlp.data.language_modeling.megatron.megatron_batch_samplers import BaseMegatronBatchSampler
 from nemo.collections.vision.data.megatron.vit_dataset import RandomSeedDataset
+
+
+class SharedEpoch:
+    def __init__(self, epoch: int = 0):
+        self.shared_epoch = Value('i', epoch)
+
+    def set_value(self, epoch):
+        self.shared_epoch.value = epoch
+
+    def get_value(self):
+        return self.shared_epoch.value
 
 
 class WDSUrlsRandomSampler:
@@ -43,6 +55,7 @@ class WDSUrlsRandomSampler:
         self.data_parallel_size = data_parallel_size
         self.drop_last = drop_last
         self.data_sharding = data_sharding
+        self.epoch = SharedEpoch()
 
         self.remaining_urls =  self.total_urls % self.data_parallel_size
 
@@ -65,11 +78,11 @@ class WDSUrlsRandomSampler:
         else:
             active_total_urls = self.total_urls + self.data_parallel_size - self.remaining_urls
 
-        self.epoch = self.consumed_urls // active_total_urls
+        self.epoch.set_value(self.consumed_urls // active_total_urls)
         current_epoch_urls = self.consumed_urls % active_total_urls
 
         if isinstance(self.dataset, RandomSeedDataset):
-            self.dataset.set_epoch(self.epoch)
+            self.dataset.set_epoch(self.epoch.get_value())
 
         # data sharding and random sampling
         if self.data_sharding:
@@ -78,14 +91,14 @@ class WDSUrlsRandomSampler:
             start_idx = self.data_parallel_rank * bucket_size
 
             g = torch.Generator()
-            g.manual_seed(self.epoch)
+            g.manual_seed(self.epoch.get_value())
             random_idx = torch.randperm(bucket_size, generator=g).tolist()
             idx_range = [start_idx + x for x in random_idx[bucket_offset:]]
         else:
             full_bucket_size = active_total_urls
             full_bucket_offset = current_epoch_urls
             g = torch.Generator()
-            g.manual_seed(self.epoch)
+            g.manual_seed(self.epoch.get_value())
             idx_range_total = \
                 torch.randperm(full_bucket_size, generator=g).tolist()
             idx_range_active = idx_range_total[full_bucket_offset:]

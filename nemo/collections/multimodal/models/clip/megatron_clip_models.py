@@ -722,11 +722,9 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         # Run zero shot imagenet evaluation
         if self.imagenet_val is not None:
-            imagenet_metric = torch.zeros(2).cuda()
+            imagenet_metric = []
             imagenet_metric[0], imagenet_metric[1] = self.zero_shot_eval()
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            # torch.distributed.broadcast(imagenet_metric, get_last_rank())
+            imagenet_metric = average_losses_across_data_parallel_group(imagenet_metric)
             self.log('imagenet_top1', imagenet_metric[0], prog_bar=True, rank_zero_only=True)
             self.log('imagenet_top5', imagenet_metric[1], prog_bar=True, rank_zero_only=True)
 
@@ -886,9 +884,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
         self.setup_test_data(self.cfg.data)
 
         if self.cfg.data.get("imagenet_val") is not None:
-            self.imagenet_val = "placeholder"
-            if is_last_rank():
-                self.imagenet_val = build_imagenet_validation_dataloader(self.cfg, self.tokenizer)
+            self.imagenet_val = build_imagenet_validation_dataloader(self.cfg, self.tokenizer)
 
         # when using pipeline model parallel the final stage need to initialize word embeddings
         if parallel_state.get_pipeline_model_parallel_world_size() > 1:
