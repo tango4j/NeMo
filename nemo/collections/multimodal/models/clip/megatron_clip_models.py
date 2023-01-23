@@ -722,7 +722,7 @@ class MegatronCLIPModel(MegatronMultimodalModel):
 
         # Run zero shot imagenet evaluation
         if self.imagenet_val is not None:
-            imagenet_metric = []
+            imagenet_metric = torch.zeros(2).cuda()
             imagenet_metric[0], imagenet_metric[1] = self.zero_shot_eval()
             imagenet_metric = average_losses_across_data_parallel_group(imagenet_metric)
             self.log('imagenet_top1', imagenet_metric[0], prog_bar=True, rank_zero_only=True)
