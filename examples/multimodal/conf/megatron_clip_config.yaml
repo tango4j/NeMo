@@ -42,7 +42,12 @@ exp_manager:
     save_nemo_on_train_end: False # not recommended when training large models on clusters with short time limits
     filename: 'megatron_vit_classify--{val_loss:.2f}-{step}-{consumed_samples}'
     model_parallel_size: ${multiply:${model.tensor_model_parallel_size}, ${model.pipeline_model_parallel_size}}
-
+  ema:
+    enable: False
+    decay: 0.9999
+    validate_original_weights: False
+    every_n_steps: 1
+    cpu_offload: False
 
 model:
   precision: ${trainer.precision}
