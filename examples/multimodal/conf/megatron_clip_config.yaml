@@ -1,6 +1,4 @@
-# shared by ViT classification pretraining and fine-tuning
-
-name: megatron_vit_classify
+name: megatron_clip
 restore_from_path: null # used when starting from a .nemo file
 
 trainer:
@@ -88,6 +86,7 @@ model:
     # model architecture
     encoder_seq_length: 196
     max_position_embeddings: ${.encoder_seq_length}
+    position_embedding_type: learned_parameters
     num_layers: 12
     hidden_size: 768
     ffn_hidden_size: 3072 # Transformer FFN hidden size. Usually 4 * hidden_size.
@@ -138,6 +137,7 @@ model:
     # model architecture
     encoder_seq_length: 77
     max_position_embeddings: ${.encoder_seq_length}
+    position_embedding_type: learned_parameters
     num_layers: 12
     hidden_size: 512
     ffn_hidden_size: 2048 # Transformer FFN hidden size. Usually 4 * hidden_size.
