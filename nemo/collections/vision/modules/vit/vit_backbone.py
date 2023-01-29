@@ -249,21 +249,33 @@ class VitBackbone(MegatronModule):
             )
 
             # embedding
-            self.position_embeddings = torch.nn.Embedding(
-                self.seq_length, self.hidden_size
-            )
-            init_method_normal(model_cfg.init_method_std)(
-                self.position_embeddings.weight
-            )
+            self.position_embedding_type = model_cfg.get("position_embedding_type", "learned_absolute")
 
-            class_token_present = self.class_token
-            self.position_embeddings._register_load_state_dict_pre_hook(
-                partial(
-                    twod_interpolate_position_embeddings_hook,
-                    model_cfg,
-                    class_token_present
+            if self.position_embedding_type == "learned_absolute":
+                self.position_embeddings = torch.nn.Embedding(
+                    self.seq_length, self.hidden_size
                 )
-            )
+                init_method_normal(model_cfg.init_method_std)(
+                    self.position_embeddings.weight
+                )
+
+                class_token_present = self.class_token
+                self.position_embeddings._register_load_state_dict_pre_hook(
+                    partial(
+                        twod_interpolate_position_embeddings_hook,
+                        model_cfg,
+                        class_token_present
+                    )
+                )
+            elif self.position_embedding_type == "learned_parameters":
+                self.position_embeddings = torch.nn.Parameter(
+                    torch.empty(self.seq_length, self.hidden_size)
+                )
+                init_method_normal(model_cfg.init_method_std)(
+                    self.position_embeddings
+                )
+            else:
+                raise ValueError(f"Unrecognized positional embedding type {self.position_embedding_type}!")
 
             self.embedding_dropout = torch.nn.Dropout(model_cfg.hidden_dropout)
             self.drop_patch = DropPatch(
@@ -331,8 +343,11 @@ class VitBackbone(MegatronModule):
                 cls_tokens = self.cls_token.expand(encoder_output.shape[0], -1, -1)
                 concatenated_tokens = torch.cat((cls_tokens, encoder_output), dim=1)
 
-            token_embeddings = concatenated_tokens + \
-                               self.position_embeddings(self.position_ids[:, :concatenated_tokens.shape[1]])
+            if self.position_embedding_type == "learned_absolute":
+                token_embeddings = concatenated_tokens + \
+                                   self.position_embeddings(self.position_ids[:, :concatenated_tokens.shape[1]])
+            elif self.position_embedding_type == "learned_parameters":
+                token_embeddings = concatenated_tokens + self.position_embeddings
 
             # a patch_dropout of 0. would mean it is disabled and this function would do nothing but return what was passed in
             token_embeddings = self.drop_patch(token_embeddings)

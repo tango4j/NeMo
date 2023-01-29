@@ -151,7 +151,7 @@ class CLIPTextTransformer(MegatronModule):
             ffn_hidden_size=model_cfg.ffn_hidden_size,
             add_pooler=False,
             encoder_attn_mask_type=AttnMaskType.causal,
-            position_embedding_type=model_cfg.position_embedding_type,
+            position_embedding_type=model_cfg.get("position_embedding_type", "learned_absolute"),
             init_method=init_method_normal(model_cfg.init_method_std),
             scaled_init_method=scaled_init_method,
             pre_process=self.pre_process,
