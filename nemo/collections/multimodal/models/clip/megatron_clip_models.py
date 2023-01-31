@@ -173,6 +173,7 @@ class CLIPTextTransformer(MegatronModule):
             persist_layer_norm=model_cfg.persist_layer_norm,
             openai_gelu=model_cfg.openai_gelu,
             onnx_safe=model_cfg.onnx_safe,
+            megatron_legacy=model_cfg.megatron_legacy,
             sequence_parallel=model_cfg.sequence_parallel,
             transformer_engine=model_cfg.transformer_engine,
             fp8=model_cfg.fp8,
