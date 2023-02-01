@@ -24,7 +24,7 @@ trainer:
 exp_manager:
   explicit_log_dir: null
   exp_dir: null
-  name: megatron_vit_classify
+  name: megatron_clip
   create_wandb_logger: False
   wandb_logger_kwargs:
     project: null
@@ -86,7 +86,7 @@ model:
     # model architecture
     encoder_seq_length: 196
     max_position_embeddings: ${.encoder_seq_length}
-    position_embedding_type: learned_parameters
+    position_embedding_type: learned_absolute
     num_layers: 12
     hidden_size: 768
     ffn_hidden_size: 3072 # Transformer FFN hidden size. Usually 4 * hidden_size.
@@ -137,7 +137,7 @@ model:
     # model architecture
     encoder_seq_length: 77
     max_position_embeddings: ${.encoder_seq_length}
-    position_embedding_type: learned_parameters
+    position_embedding_type: learned_absolute
     num_layers: 12
     hidden_size: 512
     ffn_hidden_size: 2048 # Transformer FFN hidden size. Usually 4 * hidden_size.

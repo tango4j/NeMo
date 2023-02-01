@@ -37,6 +37,7 @@ def gather_features(
         # TODO (yuya): check what's this
         if not local_loss:
             # ensure grads for local rank when all_* features don't have a gradient
+            # https://amsword.medium.com/gradient-backpropagation-with-torch-distributed-all-gather-9f3941a381f8
             gathered_image_features[data_parallel_rank] = image_features
             gathered_text_features[data_parallel_rank] = text_features
         all_image_features = torch.cat(gathered_image_features, dim=0)
@@ -100,6 +101,6 @@ class ClipLoss(nn.Module):
             F.cross_entropy(logits_per_text, labels)
             ) / 2
 
-        # TODO (yuya): this is not necessary; not necessary!
+        # TODO (yuya): this is not necessary; not necessary if global!
         reduced_loss = average_losses_across_data_parallel_group([total_loss])
         return total_loss, {"loss": reduced_loss}
