@@ -66,7 +66,7 @@ model:
   #  `--gather-with-grad` and `--local-loss` are used. This alteration results in one-to-one
   #  numerical results as the naïve method.
   local_loss: False # calculate loss w/ local features @ global (instead of realizing full global @ global matrix)
-  gather_with_grad: False # enable full distributed gradient for feature gather
+  gather_with_grad: True # enable full distributed gradient for feature gather, set this to False may cause convergence issue
 
   vision:
     precision: ${trainer.precision}
