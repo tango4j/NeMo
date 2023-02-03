@@ -53,13 +53,13 @@ from nemo.utils import logging
 try:
     from apex.transformer import parallel_state
     from apex.transformer.pipeline_parallel.schedules.common import build_model
-    from apex.transformer.pipeline_parallel.schedules.fwd_bwd_pipelining_without_interleaving import (
-        forward_backward_pipelining_without_interleaving,
-    )
+    from apex.transformer.pipeline_parallel.schedules.fwd_bwd_no_pipelining import forward_backward_no_pipelining
     from apex.transformer.pipeline_parallel.schedules.fwd_bwd_pipelining_with_interleaving import (
         _forward_backward_pipelining_with_interleaving,
     )
-    from apex.transformer.pipeline_parallel.schedules.fwd_bwd_no_pipelining import forward_backward_no_pipelining
+    from apex.transformer.pipeline_parallel.schedules.fwd_bwd_pipelining_without_interleaving import (
+        forward_backward_pipelining_without_interleaving,
+    )
 
     HAVE_APEX = True
 except (ImportError, ModuleNotFoundError):
@@ -125,12 +125,12 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             else:
                 self.model = Float16Module(module=self.model, precision=cfg.precision)
 
-        if self.trainer.precision == 32:
-            self.autocast_dtype = torch.float
-        elif self.trainer.precision == 16:
-            self.autocast_dtype = torch.half
-        elif self.trainer.precision == 'bf16':
+        if self.trainer.precision == 'bf16':
             self.autocast_dtype = torch.bfloat16
+        elif int(self.trainer.precision) == 32:
+            self.autocast_dtype = torch.float
+        elif int(self.trainer.precision) == 16:
+            self.autocast_dtype = torch.half
         else:
             raise ValueError('precision must be in [32, 16, "bf16"]')
 
@@ -165,6 +165,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             fp16_lm_cross_entropy=self.cfg.get('fp16_lm_cross_entropy', False),
             use_cpu_initialization=self.cfg.get('use_cpu_initialization', False),
             hidden_dropout=self.cfg.get('hidden_dropout', 0.1),
+            attention_dropout=self.cfg.get('attention_dropout', 0.1),
             precision=self.cfg.get('precision', 16),
             fp32_residual_connection=self.cfg.get('fp32_residual_connection', False),
             activations_checkpoint_granularity=self.cfg.get('activations_checkpoint_granularity', None),
@@ -190,6 +191,7 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             fp8_interval=self.cfg.get('fp8_interval', 1),
             fp8_amax_history_len=self.cfg.get('fp8_amax_history_len', 1),
             fp8_amax_compute_algo=self.cfg.get('fp8_amax_compute_algo', 'most_recent'),
+            reduce_amax=self.cfg.get('reduce_amax', True),
             use_emha=self.cfg.get('use_emha', False),
         )
 
@@ -238,6 +240,36 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
                 if getattr(param, 'sequence_parallel_enabled', False):
                     param._disable_greedy_grad_copy = not self.megatron_amp_o2
                     param._disable_overlap_grad_sync = True
+
+            # Initialize parameter buckets for overlapped grad and param syncs
+            buckets = []
+            if self.cfg.get('virtual_pipeline_model_parallel_size', None) is not None:
+                # Initialize a bucket for each virtual pipeline stage
+                for module in self.model:
+                    if isinstance(module, Float16Module):
+                        module = module.module
+                    stage_bucket = []
+                    for layer in module.language_model.encoder.layers:
+                        stage_bucket.extend(
+                            p for p in layer.parameters() if not getattr(p, '_disable_overlap_grad_sync', False)
+                        )
+                    buckets.append(stage_bucket)
+            else:
+                # Initialize a bucket for each Transformer layer
+                modules = self.model if isinstance(self.model, list) else [self.model]
+                for module in modules:
+                    if isinstance(module, Float16Module):
+                        module = module.module
+                    for layer in module.language_model.encoder.layers:
+                        buckets.append(
+                            [p for p in layer.parameters() if not getattr(p, '_disable_overlap_grad_sync', False)]
+                        )
+            buckets.reverse()
+            used_params = set()
+            for bucket in buckets:
+                used_params.update(bucket)
+            buckets.append([p for p in self.parameters() if p not in used_params])
+            self.distributed_adam_buckets = buckets
 
         return super().configure_optimizers()
 
@@ -334,8 +366,10 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
             self.allreduce_sequence_parallel_gradients()
 
         if self.with_distributed_adam:
-            # gradients are reduced internally in distributed optimizer
-            pass
+            # synchronize asynchronous grad reductions
+            # note: not necessary, but reduces performance degradation
+            # from multiple simultaneous NCCL calls
+            self._optimizer._finish_bucket_grad_sync()
         elif self.megatron_amp_o2:
             # when using pipeline parallelism grads must be all-reduced after the pipeline (not asynchronously)
             if self.cfg.get('pipeline_model_parallel_size', 1) > 1 or self.cfg.get('sequence_parallel', False):
@@ -715,33 +749,9 @@ class MegatronGPTModel(MegatronBaseModel, TextGeneration):
         Args:
             stage (str, optional): Can be 'fit', 'validate', 'test' or 'predict'. Defaults to None.
         """
-
-        # log number of parameters
-        if isinstance(self.model, list):
-            num_parameters_on_device = sum(
-                [sum([p.nelement() for p in model_module.parameters()]) for model_module in self.model]
-            )
-            if parallel_state.get_pipeline_model_parallel_world_size() > 1 and parallel_state.is_pipeline_last_stage(
-                ignore_virtual=True
-            ):
-                # substract the embedding weights on the last virtual stage
-                num_word_embedding_parameters = sum([p.nelement() for p in self.model[-1].word_embeddings_weight()])
-                num_parameters_on_device -= num_word_embedding_parameters
-        else:
-            num_parameters_on_device = sum([p.nelement() for p in self.model.parameters()])
-
-            if parallel_state.get_pipeline_model_parallel_world_size() > 1 and parallel_state.is_pipeline_last_stage(
-                ignore_virtual=True
-            ):
-                # substract the embedding weights on the last stage
-                num_word_embedding_parameters = sum([p.nelement() for p in self.model.word_embeddings_weight()])
-
-                num_parameters_on_device -= num_word_embedding_parameters
-
-        # to be summed across data parallel group
-        total_num_parameters = torch.tensor(num_parameters_on_device).cuda()
-
-        torch.distributed.all_reduce(total_num_parameters, group=parallel_state.get_model_parallel_group())
+        num_parameters_on_device, total_num_parameters = self._get_total_params_across_model_parallel_groups_gpt_bert(
+            self.model
+        )
 
         logging.info(
             f'Pipeline model parallel rank: {parallel_state.get_pipeline_model_parallel_rank()}, '
