@@ -183,6 +183,7 @@ class CLIPTextTransformer(MegatronModule):
             fp8_interval=model_cfg.fp8_interval,
             fp8_amax_history_len=model_cfg.fp8_amax_history_len,
             fp8_amax_compute_algo=model_cfg.fp8_amax_compute_algo,
+            reduce_amax=model_cfg.get('reduce_amax', True),
             use_emha=model_cfg.use_emha,
         )
 
