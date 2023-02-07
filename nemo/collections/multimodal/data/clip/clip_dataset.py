@@ -160,7 +160,7 @@ def build_train_valid_datasets(
     if val_url_dataset is not None:
         val_data = WDSDataset(
             data_cfg,
-            train_url_dataset,
+            val_url_dataset,
             image_transform=val_image_transform,
             text_transform=text_transform,
             shared_epoch=shared_epoch,
