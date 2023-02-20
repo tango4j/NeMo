@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import gc
 import json
 import math
 import os
@@ -265,6 +264,7 @@ def get_timestamps(multiscale_timestamps, multiscale_args_dict):
         for uniq_id in time_stamps.keys():
             timestamps_dict[uniq_id]['scale_dict'][scale_idx] = {
                 'time_stamps': time_stamps[uniq_id],
+                # 'time_stamps': time_stamps[uniq_id].tolist(),
             }
 
     return timestamps_dict
@@ -476,7 +476,7 @@ def perform_clustering(embs_and_timestamps, AUDIO_RTTM_MAP, out_rttm_dir, cluste
             num_speakers = -1
 
         base_scale_idx = uniq_embs_and_timestamps['multiscale_segment_counts'].shape[0] - 1
-
+        
         cluster_labels = speaker_clustering.forward_infer(
             embeddings_in_scales=uniq_embs_and_timestamps['embeddings'],
             timestamps_in_scales=uniq_embs_and_timestamps['timestamps'],
@@ -883,6 +883,7 @@ def segments_manifest_to_subsegments_manifest(
     shift: float = 0.75,
     min_subsegment_duration: float = 0.05,
     include_uniq_id: bool = False,
+    get_dict: bool = False,
 ):
     """
     Generate subsegments manifest from segments manifest file
@@ -892,10 +893,13 @@ def segments_manifest_to_subsegments_manifest(
         window (float): window length for segments to subsegments length
         shift (float): hop length for subsegments shift
         min_subsegments_duration (float): exclude subsegments smaller than this duration value
+        include_uniq_id (bool): include uniq_id in subsegments manifest
+        get_dict (bool): Return subsegment dictionary instead of writing to a file
 
     Returns:
         returns path to subsegment manifest file
     """
+    subsegment_dict = {}
     if subsegments_manifest_file is None:
         pwd = os.getcwd()
         subsegments_manifest_file = os.path.join(pwd, 'subsegments.json')
@@ -913,27 +917,54 @@ def segments_manifest_to_subsegments_manifest(
                 uniq_id = dic['uniq_id']
             else:
                 uniq_id = None
-            for subsegment in subsegments:
-                start, dur = subsegment
-                if dur > min_subsegment_duration:
-                    meta = {
-                        "audio_filepath": audio,
-                        "offset": start,
-                        "duration": dur,
-                        "label": label,
-                        "uniq_id": uniq_id,
-                    }
+            if get_dict:
+                subsegments_mat = np.array(subsegments)
+                subsegments_intervals = subsegments_mat[:, 1] + subsegments_mat[:, 0]
+                subsegment_dict[uniq_id] = subsegments_intervals
+            else:
+                for subsegment in subsegments:
+                    start, dur = subsegment
+                    if dur > min_subsegment_duration:
+                        meta = {
+                            "audio_filepath": audio,
+                            "offset": start,
+                            "duration": dur,
+                            "label": label,
+                            "uniq_id": uniq_id,
+                        }
 
-                    json.dump(meta, subsegments_manifest)
-                    subsegments_manifest.write("\n")
+                        json.dump(meta, subsegments_manifest)
+                        subsegments_manifest.write("\n")
 
-    return subsegments_manifest_file
+    output = subsegment_dict if get_dict else subsegments_manifest_file
+    return output
 
+def _get_subsegments(offset: float, window: float, shift: float, duration: float):
+    """
+    Return subsegments from a segment of audio file
+    Args:
+        offset (float): start time of audio segment
+        window (float): window length for segments to subsegments length
+        shift (float): hop length for subsegments shift
+        duration (float): duration of segment
+    Returns:
+        subsegments (List[tuple[float, float]]): subsegments generated for the segments as list of tuple of start and duration of each subsegment
+    """
+    subsegments: torch.Tensor = torch.tensor([])
+    start = offset
+    slice_end = start + duration
+    base = math.ceil((duration - window) / shift)
+    slices = 1 if base < 0 else base + 1
+    start_col = torch.arange(offset, slice_end, shift)[:slices]
+    dur_col = window * torch.ones(slices)
+    dur_col[-1] = min(slice_end - start_col[-1], window)
+    subsegments = torch.stack([start_col, dur_col], dim=1)
+    return subsegments
 
 def get_subsegments(offset: float, window: float, shift: float, duration: float) -> List[List[float]]:
     """
     Return subsegments from a segment of audio file
-    Args:
+
         offset (float): start time of audio segment
         window (float): window length for segments to subsegments length
         shift (float): hop length for subsegments shift
@@ -1237,6 +1268,7 @@ def get_online_subsegments_from_buffer(
         subsegments = get_subsegments(
             offset=range_t[0], window=window, shift=shift, duration=(range_t[1] - range_t[0]),
         )
+        subsegments = [[float(x[0]), float(x[1])] for x in subsegments]
         ind_offset, sigs, ranges, inds = get_online_segments_from_slices(
             sig=audio_buffer,
             buffer_start=buffer_start,
@@ -1484,7 +1516,7 @@ def prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global
         subsegments_manifest_path = os.path.join(speaker_dir, f'subsegments_scale{scale_idx}.json')
         if not os.path.exists(subsegments_manifest_path):
             # Sub-segmentation for the current scale (scale_idx)
-            segments_manifest_to_subsegments_manifest(
+            subsegments_manifest_info = segments_manifest_to_subsegments_manifest(
                 segments_manifest_file=_speaker_manifest_path,
                 subsegments_manifest_file=subsegments_manifest_path,
                 window=window,
@@ -1496,6 +1528,7 @@ def prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global
             )
         multiscale_timestamps = extract_timestamps(subsegments_manifest_path)
         multiscale_timestamps_by_scale[scale_idx] = multiscale_timestamps
+        # multiscale_timestamps_by_scale[scale_idx] = subsegment_uniqid_dict
 
     multiscale_timestamps_dict = get_timestamps(multiscale_timestamps_by_scale, multiscale_args_dict)
     return multiscale_timestamps_dict

@@ -22,6 +22,7 @@ from statistics import mode
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import time
 import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig, open_dict
@@ -29,6 +30,7 @@ from pyannote.metrics.diarization import DiarizationErrorRate
 from pytorch_lightning import Trainer
 from pytorch_lightning.utilities import rank_zero_only
 from tqdm import tqdm
+import torch.nn.functional as F
 
 from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset
 from nemo.collections.asr.metrics.der import score_labels
@@ -49,8 +51,10 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
     get_id_tup_dict,
     get_scale_mapping_argmat,
     get_uniq_id_list_from_manifest,
+    get_uniqname_from_filepath,
     make_rttm_with_overlap,
     parse_scale_configs,
+    get_timestamps,
 )
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
@@ -70,6 +74,82 @@ except ImportError:
 
 __all__ = ['EncDecDiarLabelModel', 'ClusterEmbedding', 'NeuralDiarizer']
 
+def get_scale_dist_mat_t(source_scale_idx, ms_seg_timestamps, msdd_scale_n):
+    """
+    Get distance matrix between anchors of the source scale and base scale.
+
+    Args:
+        source_scale_idx (int): Source scale index
+        ms_seg_timestamps (Tensor): Multi-scale segment timestamps
+
+    Returns:
+        abs_dist_mat (Tensor): Distance matrix between anchors of the source scale and base scale
+    """
+    source_scale_anchor_zeros = torch.mean(ms_seg_timestamps[source_scale_idx, :, :], dim=1) 
+    base_scale_anchor_zeros = torch.mean(ms_seg_timestamps[msdd_scale_n-1, :, :], dim=1) 
+    # Get only non-zero timestamps (= Remove zero-padding)
+    source_scale_anchor = source_scale_anchor_zeros[source_scale_anchor_zeros.nonzero()].t()
+    base_scale_anchor = base_scale_anchor_zeros[base_scale_anchor_zeros.nonzero()].t()
+    # Calculate absolute distance matrix
+    curr_mat = torch.tile(source_scale_anchor, (base_scale_anchor.shape[0], 1))
+    base_mat = torch.tile(base_scale_anchor, (source_scale_anchor.shape[0], 1)).t()
+    abs_dist_mat = torch.abs(curr_mat - base_mat)
+    return abs_dist_mat
+
+def get_padded_timestamps_t(ms_ts_dict, base_scale):
+    """
+    Get zero-padded timestamps of all scales.
+
+    """
+    ms_seg_timestamps_list = []
+    max_length = len(ms_ts_dict[base_scale]['time_stamps'])
+    for scale_idx, data_dict in ms_ts_dict.items():
+        ms_seg_timestamps = data_dict['time_stamps']
+        ms_seg_timestamps = torch.tensor(ms_seg_timestamps)
+        padded_ms_seg_ts = F.pad(input=ms_seg_timestamps, pad=(0, 0, 0, max_length - len(ms_seg_timestamps)), mode='constant', value=0)
+        ms_seg_timestamps_list.append(padded_ms_seg_ts)
+    ms_seg_timestamps = torch.stack(ms_seg_timestamps_list)
+    return ms_seg_timestamps
+
+def interpolate_embs_t(emb_t, ms_seg_timestamps, base_seq_len, msdd_multiscale_args_dict, emb_scale_n, msdd_scale_n):
+    """
+    Interpolate embeddings to a finer scale.
+
+    Args:
+        emb_fix (torch.Tensor): embeddings of the base scale
+        ms_seg_timestamps (torch.Tensor): timestamps of the base scale
+        base_seq_len (int): length of the base scale
+    
+    Returns:
+        emb_fix (torch.Tensor): interpolated embeddings
+    """
+    half_scale = msdd_multiscale_args_dict['scale_dict'][emb_scale_n-1][1]
+    session_scale_dist_mat = get_scale_dist_mat_t(source_scale_idx=emb_scale_n-1, 
+                                                  ms_seg_timestamps=ms_seg_timestamps[:, :base_seq_len, :], 
+                                                  msdd_scale_n=msdd_scale_n)
+    max_length = ms_seg_timestamps[msdd_scale_n-1].shape[0]
+    target_bool = (session_scale_dist_mat < half_scale)
+    source_seq_len = target_bool.shape[1] 
+    session_scale_dist_mat.flatten()[target_bool.flatten() == False] = half_scale
+    dist_delta = (half_scale - session_scale_dist_mat.flatten()).reshape(base_seq_len, source_seq_len)
+    interpolated_weights = ((dist_delta ** 2).t() / torch.sum(dist_delta ** 2, dim=1).t()).t()  
+    interpolated_embs = interpolated_weights @ emb_t
+    rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0)
+    return rep_interpolated_embs
+
+def load_subsegment_to_dict(manifest_file: str):
+    time_stamps = {}
+    with open(manifest_file, 'r', encoding='utf-8') as manifest:
+        for i, line in enumerate(manifest.readlines()):
+            line = line.strip()
+            dic = json.loads(line)
+            uniq_name = get_uniqname_from_filepath(dic['audio_filepath'])
+            if uniq_name not in time_stamps:
+                time_stamps[uniq_name] = []
+            start = dic['offset']
+            end = start + dic['duration']
+            time_stamps[uniq_name].append([start, end])
+    return time_stamps
 
 class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
     """
@@ -106,24 +186,38 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         """
         self._trainer = trainer if trainer else None
         self.cfg_msdd_model = cfg
+        
 
+        self._init_segmentation_info()
         if self._trainer:
-            self._init_segmentation_info()
             self.world_size = trainer.num_nodes * trainer.num_devices
             self.emb_batch_size = self.cfg_msdd_model.emb_batch_size
             self.pairwise_infer = False
         else:
             self.world_size = 1
             self.pairwise_infer = True
+        
+        window_length_in_sec = self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec
+        self.msdd_multiscale_args_dict = self.multiscale_args_dict
+        if self.cfg_msdd_model.get('interpolated_scale', None) is not None:
+            # Use an interpolated scale so add another scale 
+            self.cfg_msdd_model.scale_n = len(window_length_in_sec) + 1 # Adding one interpolated scale
+            self.emb_scale_n = len(window_length_in_sec) # Scales that are extracted from the audio
+            self.msdd_multiscale_args_dict['scale_dict'][self.emb_scale_n] = (self.cfg_msdd_model.interpolated_scale, self.cfg_msdd_model.interpolated_scale/2)
+            self.msdd_multiscale_args_dict['multiscale_weights'] = [1.0] * (self.emb_scale_n+1)
+            self.msdd_scale_n = int(self.emb_scale_n+1) if self.cfg_msdd_model.interpolated_scale is not None else int(self.emb_scale_n)
+        else:
+            # Only use the scales in window_length_in_sec
+            self.cfg_msdd_model.scale_n = len(window_length_in_sec)
+            self.emb_scale_n = self.cfg_msdd_model.scale_n
+            self.msdd_scale_n = self.cfg_msdd_model.scale_n
         super().__init__(cfg=self.cfg_msdd_model, trainer=trainer)
 
-        window_length_in_sec = self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec
+        # window_length_in_sec = self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec
         if isinstance(window_length_in_sec, int) or len(window_length_in_sec) <= 1:
             raise ValueError("window_length_in_sec should be a list containing multiple segment (window) lengths")
         else:
-            self.cfg_msdd_model.scale_n = len(window_length_in_sec)
             self.cfg_msdd_model.msdd_module.scale_n = self.cfg_msdd_model.scale_n
-            self.scale_n = self.cfg_msdd_model.scale_n
 
         self.preprocessor = EncDecSpeakerLabelModel.from_config_dict(self.cfg_msdd_model.preprocessor)
         self.frame_per_sec = int(1 / self.preprocessor._cfg.window_stride)
@@ -209,10 +303,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         if 'manifest_filepath' in config and config['manifest_filepath'] is None:
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
+
         dataset = AudioToSpeechMSDDTrainDataset(
             manifest_filepath=config.manifest_filepath,
             emb_dir=config.emb_dir,
-            multiscale_args_dict=self.multiscale_args_dict,
+            multiscale_args_dict=self.msdd_multiscale_args_dict,
             soft_label_thres=config.soft_label_thres,
             featurizer=featurizer,
             window_stride=self.cfg_msdd_model.preprocessor.window_stride,
@@ -319,9 +414,58 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 "scale_weights": NeuralType(('B', 'T', 'C', 'D'), ProbsType()),
             }
         )
+   
+    def get_scale_dist_mat(self, source_scale_idx, ms_seg_timestamps):
+        """
+        Get distance matrix between anchors of the source scale and base scale.
+
+        Args:
+            source_scale_idx (int): Source scale index
+            ms_seg_timestamps (Tensor): Multi-scale segment timestamps
+
+        Returns:
+            abs_dist_mat (Tensor): Distance matrix between anchors of the source scale and base scale
+        """
+        self.deci = 100
+
+        source_scale_anchor_zeros = torch.mean(ms_seg_timestamps[source_scale_idx, :, :], dim=1) / self.deci
+        base_scale_anchor_zeros = torch.mean(ms_seg_timestamps[self.msdd_scale_n-1, :, :], dim=1) / self.deci
+        # Get only non-zero timestamps (= Remove zero-padding)
+        source_scale_anchor = source_scale_anchor_zeros[source_scale_anchor_zeros.nonzero()].t()
+        base_scale_anchor = base_scale_anchor_zeros[base_scale_anchor_zeros.nonzero()].t()
+        # Calculate absolute distance matrix
+        curr_mat = torch.tile(source_scale_anchor, (base_scale_anchor.shape[0], 1))
+        base_mat = torch.tile(base_scale_anchor, (source_scale_anchor.shape[0], 1)).t()
+        abs_dist_mat = torch.abs(curr_mat - base_mat)
+        return abs_dist_mat
+
+    def interpolate_embs(self, emb_t, ms_seg_timestamps, base_seq_len):
+        """
+        Interpolate embeddings to a finer scale.
+
+        Args:
+            emb_fix (torch.Tensor): embeddings of the base scale
+            ms_seg_timestamps (torch.Tensor): timestamps of the base scale
+            base_seq_len (int): length of the base scale
+        
+        Returns:
+            emb_fix (torch.Tensor): interpolated embeddings
+        """
+        half_scale = self.msdd_multiscale_args_dict['scale_dict'][self.emb_scale_n-1][1]
+        session_scale_dist_mat = self.get_scale_dist_mat(source_scale_idx=self.emb_scale_n-1, 
+                                                         ms_seg_timestamps=ms_seg_timestamps[:, :base_seq_len, :])
+        max_length = ms_seg_timestamps[self.msdd_scale_n-1].shape[0]
+        target_bool = (session_scale_dist_mat < half_scale)
+        source_seq_len = target_bool.shape[1] 
+        session_scale_dist_mat.flatten()[target_bool.flatten() == False] = half_scale
+        dist_delta = (half_scale - session_scale_dist_mat.flatten()).reshape(base_seq_len, source_seq_len)
+        interpolated_weights = ((dist_delta ** 2).t() / torch.sum(dist_delta ** 2, dim=1).t()).t()  
+        interpolated_embs = interpolated_weights @ emb_t
+        rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0)
+        return rep_interpolated_embs
 
     def get_ms_emb_seq(
-        self, embs: torch.Tensor, scale_mapping: torch.Tensor, ms_seg_counts: torch.Tensor
+        self, embs: torch.Tensor, scale_mapping: torch.Tensor, ms_seg_counts: torch.Tensor, ms_seg_timestamps: torch.Tensor,
     ) -> torch.Tensor:
         """
         Reshape the given tensor and organize the embedding sequence based on the original sequence counts.
@@ -333,16 +477,16 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 Merged embeddings without zero-padding in the batch. See `ms_seg_counts` for details.
                 Shape: (Total number of segments in the batch, emb_dim)
             scale_mapping (Tensor):
-		The element at the m-th row and the n-th column of the scale mapping matrix indicates the (m+1)-th scale
-		segment index which has the closest center distance with (n+1)-th segment in the base scale.
-		Example:
-		    scale_mapping_argmat[2][101] = 85
-		In the above example, it means that 86-th segment in the 3rd scale (python index is 2) is mapped with
-		102-th segment in the base scale. Thus, the longer segments bound to have more repeating numbers since
-		multiple base scale segments (since the base scale has the shortest length) fall into the range of the
-		longer segments. At the same time, each row contains N numbers of indices where N is number of
-		segments in the base-scale (i.e., the finest scale).
-                Shape: (batch_size, scale_n, self.diar_window_length)
+                The element at the m-th row and the n-th column of the scale mapping matrix indicates the (m+1)-th scale
+                segment index which has the closest center distance with (n+1)-th segment in the base scale.
+                Example:
+                    scale_mapping_argmat[2][101] = 85
+                In the above example, it means that 86-th segment in the 3rd scale (python index is 2) is mapped with
+                102-th segment in the base scale. Thus, the longer segments bound to have more repeating numbers since
+                multiple base scale segments (since the base scale has the shortest length) fall into the range of the
+                longer segments. At the same time, each row contains N numbers of indices where N is number of
+                segments in the base-scale (i.e., the finest scale).
+                    Shape: (batch_size, scale_n, self.diar_window_length)
             ms_seg_counts (Tensor):
                 Cumulative sum of the number of segments in each scale. This information is needed to reconstruct
                 the multi-scale input matrix during forward propagating.
@@ -361,22 +505,32 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 	        Multi-scale embedding sequence that is mapped, matched and repeated. The longer scales are less repeated,
                 while shorter scales are more frequently repeated following the scale mapping tensor.
         """
-        scale_n, batch_size = scale_mapping[0].shape[0], scale_mapping.shape[0]
-        split_emb_tup = torch.split(embs, ms_seg_counts.view(-1).tolist(), dim=0)
-        batch_emb_list = [split_emb_tup[i : i + scale_n] for i in range(0, len(split_emb_tup), scale_n)]
+        batch_size = scale_mapping.shape[0]
+        max_length = ms_seg_timestamps.shape[2]
+        split_emb_tup = torch.split(embs, ms_seg_counts[:, :self.emb_scale_n].flatten().tolist(), dim=0)
+        batch_emb_list = [split_emb_tup[i : i + self.emb_scale_n] for i in range(0, len(split_emb_tup), self.emb_scale_n)]
         ms_emb_seq_list = []
         for batch_idx in range(batch_size):
-            feats_list = []
-            for scale_index in range(scale_n):
-                repeat_mat = scale_mapping[batch_idx][scale_index]
-                feats_list.append(batch_emb_list[batch_idx][scale_index][repeat_mat, :])
-            repp = torch.stack(feats_list).permute(1, 0, 2)
+            rep_embs_list = []
+            base_seq_len = ms_seg_counts[batch_idx][self.msdd_scale_n-1].item()
+            for scale_index in range(self.msdd_scale_n):
+                if scale_index < self.emb_scale_n:
+                    repeat_mat = scale_mapping[batch_idx][scale_index][:base_seq_len]
+                    rep_embs_fit = batch_emb_list[batch_idx][scale_index][repeat_mat, :]
+                    rep_embs = F.pad(input=rep_embs_fit, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0)
+                    rep_embs_list.append(rep_embs)
+                elif self.cfg_msdd_model.interpolated_scale is not None and scale_index == self.msdd_scale_n - 1:
+                    emb_t = batch_emb_list[batch_idx][self.emb_scale_n-1]
+                    itp_emb = self.interpolate_embs(emb_t, ms_seg_timestamps[batch_idx], base_seq_len)
+                    rep_embs_list.append(itp_emb)
+            repp = torch.stack(rep_embs_list).permute(1, 0, 2)
             ms_emb_seq_list.append(repp)
         ms_emb_seq = torch.stack(ms_emb_seq_list)
         return ms_emb_seq
 
+
     @torch.no_grad()
-    def get_cluster_avg_embs_model(
+    def _get_cluster_avg_embs_model(
         self, embs: torch.Tensor, clus_label_index: torch.Tensor, ms_seg_counts: torch.Tensor, scale_mapping
     ) -> torch.Tensor:
         """
@@ -411,16 +565,17 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 each speaker to predict the speaker label for the given multi-scale embedding sequences.
                 Shape: (batch_size, scale_n, emb_dim, self.num_spks_per_model)
         """
-        scale_n, batch_size = scale_mapping[0].shape[0], scale_mapping.shape[0]
-        split_emb_tup = torch.split(embs, ms_seg_counts.view(-1).tolist(), dim=0)
-        batch_emb_list = [split_emb_tup[i : i + scale_n] for i in range(0, len(split_emb_tup), scale_n)]
+        # scale_n, batch_size = scale_mapping[0].shape[0], scale_mapping.shape[0]
+        batch_size = scale_mapping.shape[0]
+        split_emb_tup = torch.split(embs, ms_seg_counts[:, :self.emb_scale_n].flatten().tolist(), dim=0)
+        batch_emb_list = [split_emb_tup[i : i + self.emb_scale_n] for i in range(0, len(split_emb_tup), self.emb_scale_n)]
         ms_avg_embs_list = []
         for batch_idx in range(batch_size):
             oracle_clus_idx = clus_label_index[batch_idx]
-            max_seq_len = sum(ms_seg_counts[batch_idx])
-            clus_label_index_batch = torch.split(oracle_clus_idx[:max_seq_len], ms_seg_counts[batch_idx].tolist())
+            max_seq_len = sum(ms_seg_counts[batch_idx][:self.emb_scale_n])
+            clus_label_index_batch = torch.split(oracle_clus_idx[:max_seq_len], ms_seg_counts[batch_idx][:self.emb_scale_n].tolist())
             session_avg_emb_set_list = []
-            for scale_index in range(scale_n):
+            for scale_index in range(self.emb_scale_n):
                 spk_set_list = []
                 for idx in range(self.cfg_msdd_model.max_num_of_spks):
                     _where = (clus_label_index_batch[scale_index] == idx).clone().detach()
@@ -438,7 +593,53 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         assert (
             not ms_avg_embs.requires_grad
         ), "ms_avg_embs.requires_grad = True. ms_avg_embs should be detached from the torch graph."
+        if self.emb_scale_n < self.msdd_scale_n:
+            # If there is interpolated embeddings, reuse the finest scale's mean vectors.
+            ms_avg_embs = torch.cat((ms_avg_embs, ms_avg_embs[:, -1, :, :].unsqueeze(1)), 1)
         return ms_avg_embs
+
+    @torch.no_grad()
+    def get_cluster_avg_embs_model(
+        self,  ms_emb_seq:torch.Tensor, clus_label_index: torch.Tensor, ms_seg_counts: torch.Tensor, scale_mapping
+    ) -> torch.Tensor:
+        """
+        `max_base_seq_len` is the longest base scale sequence length can be used for batch processing.
+
+        """
+        self.max_num_speakers = 2
+        batch_size = ms_emb_seq.shape[0]
+        end_inds = ms_seg_counts.sum(axis=1)
+        stt_inds = ms_seg_counts[:, :self.msdd_scale_n-1].sum(dim=1)    
+        total_clus_label_len = torch.tensor(clus_label_index.shape[1]).repeat(batch_size).to(ms_emb_seq.device)
+        # If MSDD is using more scales (interpolated scales) than extracted embeddings, use the finest scale's sequence length.
+        if self.msdd_scale_n > self.emb_scale_n:
+            max_base_seq_len = min(min(total_clus_label_len - ms_seg_counts[:, :self.emb_scale_n].sum(dim=1)), ms_emb_seq.shape[1])
+        else:
+            max_base_seq_len = min(min(end_inds - stt_inds), ms_emb_seq.shape[1])
+        # for batch processing, indices should be created for ground-truth cluster labels
+        one = torch.tensor(0.0).unsqueeze(0).type(torch.float).to(ms_emb_seq.device)
+        cumsum_inds = torch.cumsum(total_clus_label_len, dim=0)[:-1].type(torch.float)
+        inds_offset = torch.cat((one, cumsum_inds))
+        stt_inds_flat, end_inds_flat = inds_offset + stt_inds, inds_offset + stt_inds + max_base_seq_len
+        stt_end_t = torch.stack((stt_inds_flat, end_inds_flat), 1).flatten().type(torch.long)
+        clus_label_split = torch.tensor_split(clus_label_index.flatten(), stt_end_t.tolist())
+        split_inds = torch.arange(1, stt_end_t.shape[0], 2)
+        base_scale_clus_labels = torch.stack([ clus_label_split[k] for k in split_inds ])
+
+        # Create 0 and 1 to mask embedding vectors with speaker labels 
+        spk_label_mask = torch.stack([ (base_scale_clus_labels == spk).float() for spk  in range(self.max_num_speakers) ]).permute(1, 2, 0)
+        spk_label_mask_sum = spk_label_mask.sum(dim=1)
+        spk_label_mask_sum[(spk_label_mask_sum == 0)] = 1 # avoid divide by zero for empty clusters
+        spk_label_mask_inv = 1/spk_label_mask_sum 
+        
+        # ms_emb_seq should be matched with spk_label_mask's length so truncate it 
+        ms_emb_seq_trunc = ms_emb_seq[:, :max_base_seq_len, :, :].view(batch_size, max_base_seq_len, -1)
+        ms_weighted_sum_raw = torch.bmm(spk_label_mask.permute(0, 2, 1), ms_emb_seq_trunc)
+        ms_weighted_sum = ms_weighted_sum_raw.permute(0, 2, 1).reshape(batch_size, self.msdd_scale_n, -1, self.max_num_speakers)
+        denom_label_count = torch.tile(spk_label_mask_inv.unsqueeze(1).unsqueeze(1), (1, self.msdd_scale_n, ms_emb_seq.shape[3], 1))
+        ms_avg_embs = ms_weighted_sum * denom_label_count
+        return ms_avg_embs
+
 
     @torch.no_grad()
     def get_ms_mel_feat(
@@ -489,13 +690,12 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         device = processed_signal.device
         _emb_batch_size = min(self.emb_batch_size, ms_seg_counts.sum().item())
         feat_dim = self.preprocessor._cfg.features
-        max_sample_count = int(self.multiscale_args_dict["scale_dict"][0][0] * self.frame_per_sec)
+        max_sample_count = int(self.msdd_multiscale_args_dict["scale_dict"][0][0] * self.frame_per_sec)
         ms_mel_feat_len_list, sequence_lengths_list, ms_mel_feat_list = [], [], []
-        total_seg_count = torch.sum(ms_seg_counts)
-
+        total_seg_count = torch.sum(ms_seg_counts[:, :self.emb_scale_n])
         batch_size = processed_signal.shape[0]
         for batch_idx in range(batch_size):
-            for scale_idx in range(self.scale_n):
+            for scale_idx in range(self.emb_scale_n):
                 scale_seg_num = ms_seg_counts[batch_idx][scale_idx]
                 for k, (stt, end) in enumerate(ms_seg_timestamps[batch_idx][scale_idx][:scale_seg_num]):
                     stt, end = int(stt.detach().item()), int(end.detach().item())
@@ -555,9 +755,10 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 processed_signal=audio_signal[detach_ids[0]], processed_signal_len=audio_signal_len[detach_ids[0]]
             )
             embs[detach_ids[0], :] = embs_a
+        stt = time.time()
+        ms_emb_seq = self.get_ms_emb_seq(embs, scale_mapping, ms_seg_counts, ms_seg_timestamps)
+        ms_avg_embs = self.get_cluster_avg_embs_model(ms_emb_seq, clus_label_index, ms_seg_counts, scale_mapping)
 
-        ms_emb_seq = self.get_ms_emb_seq(embs, scale_mapping, ms_seg_counts)
-        ms_avg_embs = self.get_cluster_avg_embs_model(embs, clus_label_index, ms_seg_counts, scale_mapping)
         preds, scale_weights = self.msdd(
             ms_emb_seq=ms_emb_seq, length=sequence_lengths, ms_avg_embs=ms_avg_embs, targets=targets
         )
@@ -582,6 +783,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
         self.log('train_f1_acc', f1_acc, sync_dist=True)
+        # print("train_f1_acc", f1_acc)
         self._accuracy_train.reset()
         return {'loss': loss}
 
@@ -602,6 +804,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         f1_acc = self._accuracy_valid.compute()
         self.log('val_loss', loss, sync_dist=True)
         self.log('val_f1_acc', f1_acc, sync_dist=True)
+        # print("val_f1_acc", f1_acc)
         return {
             'val_loss': loss,
             'val_f1_acc': f1_acc,
@@ -666,7 +869,7 @@ class ClusterEmbedding:
             This is a placeholder for class instance of `EncDecSpeakerLabelModel`
         self.scale_window_length_list (list):
             List containing the window lengths (i.e., scale length) of each scale.
-        self.scale_n (int):
+        self.emb_scale_n (int):
             Number of scales for multi-scale clustering diarizer
         self.base_scale_index (int):
             The index of the base-scale which is the shortest scale among the given multiple scales
@@ -680,7 +883,7 @@ class ClusterEmbedding:
         self.scale_window_length_list = list(
             self.cfg_diar_infer.diarizer.speaker_embeddings.parameters.window_length_in_sec
         )
-        self.scale_n = len(self.scale_window_length_list)
+        self.emb_scale_n = len(self.scale_window_length_list)
         self.base_scale_index = len(self.scale_window_length_list) - 1
 
     def prepare_cluster_embs_infer(self):
@@ -710,15 +913,16 @@ class ClusterEmbedding:
                 Dictionary containing clustering labels of all scales. Indexed by scale_index in integer format.
 
         """
-        all_scale_clus_label_dict = {scale_index: {} for scale_index in range(self.scale_n)}
+        all_scale_clus_label_dict = {scale_index: {} for scale_index in range(self.msdd_scale_n)}
         for uniq_id, uniq_scale_mapping_dict in session_scale_mapping_dict.items():
             base_scale_clus_label = np.array([x[-1] for x in base_clus_label_dict[uniq_id]])
-            all_scale_clus_label_dict[self.base_scale_index][uniq_id] = base_scale_clus_label
-            for scale_index in range(self.scale_n - 1):
+            all_scale_clus_label_dict[self.msdd_scale_n-1][uniq_id] = base_scale_clus_label.tolist()
+            # assert (
+            #     # uniq_scale_mapping_dict[self.emb_scale_n-1].shape[0] == base_scale_clus_label.shape[0]
+            #     max(uniq_scale_mapping_dict[self.emb_scale_n-1]) == base_scale_clus_label.shape[0] - 1
+            # ), "The number of base scale labels does not match the segment numbers in uniq_scale_mapping_dict"
+            for scale_index in range(self.msdd_scale_n - 1):
                 new_clus_label = []
-                assert (
-                    uniq_scale_mapping_dict[scale_index].shape[0] == base_scale_clus_label.shape[0]
-                ), "The number of base scale labels does not match the segment numbers in uniq_scale_mapping_dict"
                 max_index = max(uniq_scale_mapping_dict[scale_index])
                 for seg_idx in range(max_index + 1):
                     if seg_idx in uniq_scale_mapping_dict[scale_index]:
@@ -729,32 +933,28 @@ class ClusterEmbedding:
                 all_scale_clus_label_dict[scale_index][uniq_id] = new_clus_label
         return all_scale_clus_label_dict
 
-    def get_base_clus_label_dict(self, clus_labels: List[str], emb_scale_seq_dict: Dict[int, dict]):
-        """
-        Retrieve base scale clustering labels from `emb_scale_seq_dict`.
+    # def get_base_clus_label_dict(self, session_clus_labels: List[str], emb_scale_seq_dict: Dict[int, dict]):
+    #     """
+    #     Retrieve base scale clustering labels from `emb_scale_seq_dict`.
 
-        Args:
-            clus_labels (list):
-                List containing cluster results generated by clustering diarizer.
-            emb_scale_seq_dict (dict):
-                Dictionary containing multiscale embedding input sequences.
-        Returns:
-            base_clus_label_dict (dict):
-                Dictionary containing start and end of base scale segments and its cluster label. Indexed by `uniq_id`.
-            emb_dim (int):
-                Embedding dimension in integer.
-        """
-        base_clus_label_dict = {key: [] for key in emb_scale_seq_dict[self.base_scale_index].keys()}
-        for line in clus_labels:
-            uniq_id = line.split()[0]
-            label = int(line.split()[-1].split('_')[-1])
-            stt, end = [round(float(x), 2) for x in line.split()[1:3]]
-            base_clus_label_dict[uniq_id].append([stt, end, label])
-        emb_dim = emb_scale_seq_dict[0][uniq_id][0].shape[0]
-        return base_clus_label_dict, emb_dim
+    #     Args:
+    #         clus_labels (list):
+    #             List containing cluster results generated by clustering diarizer.
+    #         emb_scale_seq_dict (dict):
+    #             Dictionary containing multiscale embedding input sequences.
+
+    #     Returns:
+    #         base_clus_label_dict (dict):
+    #             Dictionary containing start and end of base scale segments and its cluster label. Indexed by `uniq_id`.
+    #         emb_dim (int):
+    #             Embedding dimension in integer.
+    #     """
+    #     # base_clus_label_dict = {key: [] for key in emb_scale_seq_dict[self.base_scale_index].keys()}
+    #     emb_dim = emb_scale_seq_dict[0][uniq_id][0].shape[0]
+    #     return base_clus_label_dict, emb_dim
 
     def get_cluster_avg_embs(
-        self, emb_scale_seq_dict: Dict, clus_labels: List, speaker_mapping_dict: Dict, session_scale_mapping_dict: Dict
+        self, emb_scale_seq_dict: Dict, session_clus_labels: List, speaker_mapping_dict: Dict, session_scale_mapping_dict: Dict, 
     ):
         """
         MSDD requires cluster-average speaker embedding vectors for each scale. This function calculates an average embedding vector for each cluster (speaker)
@@ -763,7 +963,7 @@ class ClusterEmbedding:
         Args:
             emb_scale_seq_dict (dict):
                 Dictionary containing embedding sequence for each scale. Keys are scale index in integer.
-            clus_labels (list):
+            session_clus_labels (list):
                 Clustering results from clustering diarizer including all the sessions provided in input manifest files.
             speaker_mapping_dict (dict):
                 Speaker mapping dictionary in case RTTM files are provided. This is mapping between integer based speaker index and
@@ -781,14 +981,16 @@ class ClusterEmbedding:
             output_clus_label_dict (dict):
                 Subegmentation timestamps in float type and Clustering result in integer type. Indexed by `uniq_id` keys.
         """
-        self.scale_n = len(emb_scale_seq_dict.keys())
+        # self.emb_scale_n = len(emb_scale_seq_dict.keys())
         emb_sess_avg_dict = {
-            scale_index: {key: [] for key in emb_scale_seq_dict[self.scale_n - 1].keys()}
+            scale_index: {key: [] for key in emb_scale_seq_dict[self.emb_scale_n - 1].keys()}
             for scale_index in emb_scale_seq_dict.keys()
         }
-        output_clus_label_dict, emb_dim = self.get_base_clus_label_dict(clus_labels, emb_scale_seq_dict)
+        # emb_dim = emb_scale_seq_dict[0][uniq_id][0].shape[0]
+        # output_clus_label_dict = session_clus_labels
+        # output_clus_label_dict, emb_dim = self.get_base_clus_label_dict(session_clus_labels, emb_scale_seq_dict)
         all_scale_clus_label_dict = self.assign_labels_to_longer_segs(
-            output_clus_label_dict, session_scale_mapping_dict
+            session_clus_labels, session_scale_mapping_dict
         )
         for scale_index in emb_scale_seq_dict.keys():
             for uniq_id, _emb_tensor in emb_scale_seq_dict[scale_index].items():
@@ -801,7 +1003,7 @@ class ClusterEmbedding:
 
                 # Create a label array which identifies clustering result for each segment.
                 label_array = torch.Tensor(clus_label_list)
-                avg_embs = torch.zeros(emb_dim, self.max_num_speakers)
+                avg_embs = torch.zeros(emb_tensor.shape[1], self.max_num_speakers)
                 for spk_idx in spk_set:
                     selected_embs = emb_tensor[label_array == spk_idx]
                     avg_embs[:, spk_idx] = torch.mean(selected_embs, dim=0)
@@ -812,7 +1014,12 @@ class ClusterEmbedding:
                     inv_map = None
 
                 emb_sess_avg_dict[scale_index][uniq_id] = {'mapping': inv_map, 'avg_embs': avg_embs}
-        return emb_sess_avg_dict, output_clus_label_dict
+
+        # Replace base scale clus label
+        if len(emb_sess_avg_dict.keys()) < self.msdd_scale_n:
+            emb_sess_avg_dict[self.msdd_scale_n-1] = emb_sess_avg_dict[self.emb_scale_n-1]
+        return emb_sess_avg_dict, session_clus_labels
+        # output_clus_label_dict
 
     def run_clustering_diarizer(self, manifest_filepath: str, emb_dir: str):
         """
@@ -855,6 +1062,8 @@ class ClusterEmbedding:
         logging.info(f"Multiscale Weights: {self.clus_diar_model.multiscale_args_dict['multiscale_weights']}")
         logging.info(f"Clustering Parameters: {clustering_params_str}")
         scores = self.clus_diar_model.diarize(batch_size=self.cfg_diar_infer.batch_size)
+        emb_scale_seq_dict = self.load_emb_scale_seq_dict(emb_dir)
+        session_clus_labels = self.load_clustering_labels(emb_dir)
 
         # If RTTM (ground-truth diarization annotation) files do not exist, scores is None.
         if scores is not None:
@@ -862,18 +1071,66 @@ class ClusterEmbedding:
         else:
             metric, speaker_mapping_dict = None, None
 
+        # Use embedding interpolation for speed-up and finer temporal resolution.
+        if self._cfg_msdd.get('interpolated_scale', None) is not None:
+            self._set_msdd_scale_args()
+            multiscale_timestamps_by_scale = {}
+            embeddings_by_scale = {}
+            emb_scale_seq_dict[self.msdd_scale_n - 1] = {}
+            for scale_idx in range(self.msdd_scale_n):
+                if scale_idx < self.msdd_scale_n - 1:
+                    multiscale_timestamps_by_scale[scale_idx] = self.clus_diar_model.multiscale_embeddings_and_timestamps[scale_idx][1]
+                elif scale_idx == self.msdd_scale_n - 1:
+                    self.clus_diar_model._run_segmentation(window=self.msdd_multiscale_args_dict['scale_dict'][self.msdd_scale_n-1][0],
+                                                          shift=self.msdd_multiscale_args_dict['scale_dict'][self.msdd_scale_n-1][1],
+                                                          scale_tag=f'_scale{self.msdd_scale_n-1}')
+                    time_stamps_by_scale = load_subsegment_to_dict(self.clus_diar_model.subsegments_manifest_path)
+                    multiscale_timestamps_by_scale[scale_idx] = time_stamps_by_scale
+                    self.clus_diar_model.multiscale_embeddings_and_timestamps.update({scale_idx: [embeddings_by_scale, time_stamps_by_scale]})
+            timestamps_by_sessions = get_timestamps(multiscale_timestamps_by_scale, self.msdd_multiscale_args_dict)
+            for uniq_id, msdd_ts_dict in timestamps_by_sessions.items():
+                ms_ts_dict = msdd_ts_dict['scale_dict']
+                ms_seg_timestamps = get_padded_timestamps_t(ms_ts_dict, self.msdd_scale_n-1)
+                finest_extracted_embs = self.clus_diar_model.multiscale_embeddings_and_timestamps[self.emb_scale_n-1][0][uniq_id]
+                interpolated_embs = interpolate_embs_t(emb_t=finest_extracted_embs,
+                                                       ms_seg_timestamps=ms_seg_timestamps,
+                                                       base_seq_len=ms_seg_timestamps.shape[1],
+                                                       msdd_multiscale_args_dict=self.msdd_multiscale_args_dict, 
+                                                       emb_scale_n=self.emb_scale_n, 
+                                                       msdd_scale_n=self.emb_scale_n+1)
+                self.clus_diar_model.multiscale_embeddings_and_timestamps[self.msdd_scale_n-1][0][uniq_id] = interpolated_embs
+                emb_scale_seq_dict[self.msdd_scale_n-1].update({uniq_id : interpolated_embs})
+                # if self.msdd_scale_n > self.emb_scale_n:
+                #     base_scale_clus_label = np.array([x[-1] for x in base_clus_label_dict[uniq_id]])
+
         # Get the mapping between segments in different scales.
         self._embs_and_timestamps = get_embs_and_timestamps(
             self.clus_diar_model.multiscale_embeddings_and_timestamps, self.clus_diar_model.multiscale_args_dict
         )
         session_scale_mapping_dict = self.get_scale_map(self._embs_and_timestamps)
-        emb_scale_seq_dict = self.load_emb_scale_seq_dict(emb_dir)
-        clus_labels = self.load_clustering_labels(emb_dir)
+        if self.msdd_scale_n > self.emb_scale_n:
+            for uniq_id, uniq_scale_mapping_dict in session_scale_mapping_dict.items():
+                base_scale_clus_label = np.array([x[-1] for x in session_clus_labels[uniq_id]])
+                itp_label = base_scale_clus_label[uniq_scale_mapping_dict[self.emb_scale_n-1]]
+                interpolated_labels = []
+                itp_ts = timestamps_by_sessions[uniq_id]['scale_dict'][self.msdd_scale_n-1]['time_stamps']
+                for ts, label in zip(itp_ts, itp_label):
+                    interpolated_labels.append([ts[0], ts[1], label])
+                session_clus_labels[uniq_id] = interpolated_labels
+
         emb_sess_avg_dict, base_clus_label_dict = self.get_cluster_avg_embs(
-            emb_scale_seq_dict, clus_labels, speaker_mapping_dict, session_scale_mapping_dict
+            emb_scale_seq_dict, session_clus_labels, speaker_mapping_dict, session_scale_mapping_dict, 
         )
         emb_scale_seq_dict['session_scale_mapping'] = session_scale_mapping_dict
         return emb_sess_avg_dict, emb_scale_seq_dict, base_clus_label_dict, metric
+
+    def _set_msdd_scale_args(self):
+        self.msdd_multiscale_args_dict = self.clus_diar_model.multiscale_args_dict
+        self.emb_scale_n = len(self.cfg_diar_infer.diarizer.speaker_embeddings.parameters.window_length_in_sec) # Scales that are extracted from the audio
+        self.msdd_multiscale_args_dict['scale_dict'][self.emb_scale_n] = (self._cfg_msdd.interpolated_scale, self._cfg_msdd.interpolated_scale/2)
+        self.msdd_multiscale_args_dict['multiscale_weights'] = [1.0] * (self.emb_scale_n+1)
+        self.msdd_scale_n = int(self.emb_scale_n+1) if self._cfg_msdd.interpolated_scale is not None else int(self.emb_scale_n)
+        self.base_scale_index = self.msdd_scale_n - 1
 
     def get_scale_map(self, embs_and_timestamps):
         """
@@ -927,9 +1184,17 @@ class ClusterEmbedding:
         """
         file_exists, clus_label_path = self.check_clustering_labels(out_dir)
         logging.info(f"Loading cluster label file from {clus_label_path}")
+        base_clus_label_dict = {}
         with open(clus_label_path) as f:
             clus_labels = f.readlines()
-        return clus_labels
+        for line in clus_labels:
+            uniq_id = line.split()[0]
+            if uniq_id not in base_clus_label_dict:
+                base_clus_label_dict[uniq_id] = []
+            label = int(line.split()[-1].split('_')[-1])
+            stt, end = [round(float(x), 2) for x in line.split()[1:3]]
+            base_clus_label_dict[uniq_id].append([stt, end, label])
+        return base_clus_label_dict
 
     def load_emb_scale_seq_dict(self, out_dir):
         """
@@ -967,7 +1232,6 @@ class NeuralDiarizer:
     def __init__(self, cfg: DictConfig):
         """ """
         self._cfg = cfg
-
         # Parameter settings for MSDD model
         self.use_speaker_model_from_ckpt = cfg.diarizer.msdd_model.parameters.get('use_speaker_model_from_ckpt', True)
         self.use_clus_as_main = cfg.diarizer.msdd_model.parameters.get('use_clus_as_main', False)
@@ -1310,26 +1574,26 @@ class NeuralDiarizer:
             signal_lengths (Tensor):
                 The actual Session length (number of steps = number of base-scale segments) without zero padding.
         """
+        # signals, signal_lengths, _targets, emb_vectors, ms_seg_timestamps, ms_seg_counts = test_batch
         signals, signal_lengths, _targets, emb_vectors = test_batch
-        if self._cfg.diarizer.msdd_model.parameters.split_infer:
-            split_count = torch.ceil(torch.tensor(signals.shape[1] / self.diar_window_length)).int()
-            sess_emb_vectors, sess_emb_seq, sess_sig_lengths = self.get_range_clus_avg_emb(
-                test_batch, test_data_collection, device=self.msdd_model.device
+        split_count = torch.ceil(torch.tensor(signals.shape[1] / self.diar_window_length)).int()
+        sess_emb_vectors, sess_emb_seq, sess_sig_lengths = self.get_range_clus_avg_emb(
+            test_batch, test_data_collection, device=self.msdd_model.device
+        )
+        with autocast():
+            _preds, scale_weights = self.msdd_model.forward_infer(
+                input_signal=sess_emb_seq,
+                input_signal_length=sess_sig_lengths,
+                emb_vectors=sess_emb_vectors,
+                targets=None,
             )
-            with autocast():
-                _preds, scale_weights = self.msdd_model.forward_infer(
-                    input_signal=sess_emb_seq,
-                    input_signal_length=sess_sig_lengths,
-                    emb_vectors=sess_emb_vectors,
-                    targets=None,
-                )
-            _preds = _preds.reshape(len(signal_lengths), split_count * self.diar_window_length, -1)
-            _preds = _preds[:, : signals.shape[1], :]
-        else:
-            with autocast():
-                _preds, scale_weights = self.msdd_model.forward_infer(
-                    input_signal=signals, input_signal_length=signal_lengths, emb_vectors=emb_vectors, targets=None
-                )
+        _preds = _preds.reshape(len(signal_lengths), split_count * self.diar_window_length, -1)
+        _preds = _preds[:, : signals.shape[1], :]
+        # else:
+        #     with autocast():
+        #         _preds, scale_weights = self.msdd_model.forward_infer(
+        #             input_signal=signals, input_signal_length=signal_lengths, emb_vectors=emb_vectors, targets=None
+        #         )
         self.max_pred_length = max(_preds.shape[1], self.max_pred_length)
         preds = torch.zeros(_preds.shape[0], self.max_pred_length, _preds.shape[2])
         targets = torch.zeros(_preds.shape[0], self.max_pred_length, _preds.shape[2])
@@ -1358,13 +1622,13 @@ class NeuralDiarizer:
         uniq_id_list = get_uniq_id_list_from_manifest(self.manifest_filepath)
         test_data_collection = [d for d in self.msdd_model.data_collection]
         for sidx, test_batch in enumerate(tqdm(self.msdd_model.test_dataloader())):
-            signals, signal_lengths, _targets, emb_vectors = test_batch
+            signals, signal_lengths, _targets, ms_emb_avg = test_batch
             cumul_sample_count.append(cumul_sample_count[-1] + signal_lengths.shape[0])
             preds, targets, signal_lengths = self.diar_infer(
                 test_batch, test_data_collection[cumul_sample_count[-2] : cumul_sample_count[-1]]
             )
             if self._cfg.diarizer.msdd_model.parameters.seq_eval_mode:
-                self.msdd_model._accuracy_test(preds, targets, signal_lengths)
+                self.msdd_model._accuracy_test(preds.type(torch.float), _targets.type(torch.float), signal_lengths)
 
             preds_list.extend(list(torch.split(preds, 1)))
             targets_list.extend(list(torch.split(targets, 1)))

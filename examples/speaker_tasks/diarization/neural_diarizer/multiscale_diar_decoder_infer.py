@@ -26,7 +26,6 @@ python multiscale_diar_decoder_infer.py --config-path='../conf/inference' --conf
     diarizer.out_dir=<test_temp_dir> \
 """
 
-
 @hydra_runner(config_path="../conf/inference", config_name="diar_infer_telephonic.yaml")
 def main(cfg):
     diarizer_model = NeuralDiarizer(cfg=cfg)
