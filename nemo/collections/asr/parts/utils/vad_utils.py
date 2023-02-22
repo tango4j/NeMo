@@ -17,7 +17,9 @@ import math
 import multiprocessing
 import os
 import shutil
+from collections import defaultdict
 from itertools import repeat
+from math import ceil, floor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -48,6 +50,43 @@ except ImportError:
 """
 This file contains all the utility functions required for voice activity detection. 
 """
+
+
+def align_labels_to_frames(probs, labels):
+    """
+    Aligns labels to frames when the frame length (e.g., 10ms) is different from the label length (e.g., 20ms)
+    """
+    frames_len = len(probs)
+    labels_len = len(labels)
+    probs = torch.tensor(probs).float()
+    labels = torch.tensor(labels).long()
+    if frames_len < labels_len:
+        ratio = labels_len / frames_len
+        res = labels_len % frames_len
+        if ceil(ratio) - ratio < 0.2:
+            labels = labels.tolist()
+            if len(labels) % ceil(ratio) != 0:
+                labels += [0] * (ceil(ratio) - len(labels) % ceil(ratio))
+            labels = torch.tensor(labels).long()
+            labels = labels.view(-1, ceil(ratio)).amax(1)
+            return align_labels_to_frames(probs.tolist(), labels.long().tolist())
+        if res > 0:
+            labels = labels[:-res]
+        labels = labels.view(-1, floor(ratio)).amax(1)
+        return labels.long().tolist()
+    elif frames_len > labels_len:
+        ratio = frames_len / labels_len
+        res = frames_len % labels_len
+        if ceil(ratio) - ratio < 0.2:  # e.g., ratio is 1.83
+            labels = labels.repeat_interleave(ceil(ratio), dim=0).long().tolist()
+            labels = labels[:frames_len]
+        else:
+            labels = labels.repeat_interleave(floor(ratio), dim=0).long().tolist()
+            if res > 0:
+                labels += labels[-res:]
+        return labels
+    else:
+        return labels.long().tolist()
 
 
 def prepare_manifest(config: dict) -> str:
@@ -1055,40 +1094,42 @@ def extract_labels(path2ground_truth_label: str, time: list) -> list:
 
 
 def generate_vad_frame_pred(
-    vad_model,
-    window_length_in_sec: float,
-    shift_length_in_sec: float,
-    manifest_vad_input: str,
-    out_dir: str,
-    use_feat: bool = False,
+    vad_model, window_length_in_sec: float, shift_length_in_sec: float, manifest_vad_input: str, out_dir: str
 ) -> str:
     """
     Generate VAD frame level prediction and write to out_dir
     """
-    time_unit = int(window_length_in_sec / shift_length_in_sec)
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+
+    time_unit = int(window_length_in_sec / shift_length_in_sec)  # num frames per window
     trunc = int(time_unit / 2)
     trunc_l = time_unit - trunc
     all_len = 0
 
     data = []
-    with open(manifest_vad_input, 'r', encoding='utf-8') as f:
-        for line in f:
-            file = json.loads(line)['audio_filepath'].split("/")[-1]
-            data.append(file.split(".wav")[0])
+    for line in open(manifest_vad_input, 'r', encoding='utf-8'):
+        filepath = json.loads(line)['audio_filepath']
+        file = filepath.split("/")[-1]
+        data.append(file.split(".wav")[0])
+
     logging.info(f"Inference on {len(data)} audio files/json lines!")
 
+    all_probs = defaultdict(list)
     status = get_vad_stream_status(data)
-    for i, test_batch in enumerate(tqdm(vad_model.test_dataloader(), total=len(vad_model.test_dataloader()))):
+    for i, test_batch in enumerate(vad_model.test_dataloader()):
         test_batch = [x.to(vad_model.device) for x in test_batch]
         with autocast():
-            if use_feat:
-                log_probs = vad_model(processed_signal=test_batch[0], processed_signal_length=test_batch[1])
-            else:
-                log_probs = vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
+            log_probs = vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
             probs = torch.softmax(log_probs, dim=-1)
-            pred = probs[:, 1]
+            if len(probs.shape) == 3:
+                # squeeze the batch dimension, since batch size is 1
+                probs = probs.squeeze(0)  # [1,T,C] -> [T,C]
+            pred = probs[:, 1]  # [T,]
 
-            if status[i] == 'start':
+            if window_length_in_sec == 0:
+                to_save = pred
+            elif status[i] == 'start':
                 to_save = pred[:-trunc]
             elif status[i] == 'next':
                 to_save = pred[trunc:-trunc_l]
@@ -1097,17 +1138,19 @@ def generate_vad_frame_pred(
             else:
                 to_save = pred
 
+            to_save = to_save.cpu().tolist()
             all_len += len(to_save)
             outpath = os.path.join(out_dir, data[i] + ".frame")
             with open(outpath, "a", encoding='utf-8') as fout:
-                for f in range(len(to_save)):
-                    fout.write('{0:0.4f}\n'.format(to_save[f]))
+                for p in to_save:
+                    fout.write(f'{p:0.4f}\n')
+            all_probs[data[i]].extend(to_save)
 
         del test_batch
         if status[i] == 'end' or status[i] == 'single':
             logging.debug(f"Overall length of prediction of {data[i]} is {all_len}!")
             all_len = 0
-    return out_dir
+    return out_dir, all_probs
 
 
 def init_vad_model(model_path: str):
