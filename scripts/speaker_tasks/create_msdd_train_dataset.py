@@ -31,6 +31,8 @@ import copy
 import itertools
 import os
 import random
+import itertools
+import concurrent.futures
 
 from tqdm import tqdm
 
@@ -39,6 +41,8 @@ from nemo.collections.asr.parts.utils.manifest_utils import (
     get_subsegment_dict,
     rreplace,
     write_truncated_subsegments,
+    read_manifest,
+    write_manifest,
 )
 from nemo.collections.asr.parts.utils.speaker_utils import (
     audio_rttm_map,
@@ -49,7 +53,45 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
 from nemo.utils import logging
 
 random.seed(42)
+from typing import Dict, List
+import json
 
+def _get_subsegment_dict(subsegments_manifest_file: str, window: float, shift: float, deci: int) -> Dict[str, dict]:
+    """
+    Get subsegment dictionary from manifest file.
+
+    Args:
+        subsegments_manifest_file (str): Path to subsegment manifest file
+        window (float): Window length for segmentation
+        shift (float): Shift length for segmentation
+        deci (int): Rounding number of decimal places
+    Returns:
+        _subsegment_dict (dict): Subsegment dictionary
+    """
+    _subsegment_dict = {}
+    with open(subsegments_manifest_file, 'r') as subsegments_manifest:
+        segments = subsegments_manifest.readlines()
+        for segment in segments:
+            segment = segment.strip()
+            try:
+                dic = json.loads(segment)
+            except:
+                print(f"Skipping f{segment} since this file path is broken")             
+                import ipdb; ipdb.set_trace()
+                continue
+            audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
+            subsegments = get_subsegments(offset=offset, window=window, shift=shift, duration=duration)
+            if dic['uniq_id'] is not None:
+                uniq_id = dic['uniq_id']
+            else:
+                uniq_id = get_uniq_id_with_period(audio)
+            if uniq_id not in _subsegment_dict:
+                _subsegment_dict[uniq_id] = {'ts': [], 'json_dic': []}
+            for subsegment in subsegments:
+                start, dur = subsegment
+            _subsegment_dict[uniq_id]['ts'].append([round(start, deci), round(start + dur, deci)])
+            _subsegment_dict[uniq_id]['json_dic'].append(dic)
+    return _subsegment_dict
 
 def labels_to_rttmfile(labels, uniq_id, filename, out_rttm_dir):
     """
@@ -123,8 +165,25 @@ def split_into_pairwise_rttm(audio_rttm_map, input_manifest_path, output_dir):
 
     return rttm_split_manifest_dict, split_audio_rttm_map
 
+def split_segments_manifest_files(segments_manifest_file, subsegments_manifest_file, num_workers=1):
+    total_list = read_manifest(segments_manifest_file)    
+    split_list, path_list = [], []
+    if len(total_list) > num_workers:
+        chunk_size = len(total_list) // num_workers
+        for i in range(0, len(total_list), chunk_size):        
+            split_list.append(total_list[i:i+chunk_size])
+        path_split_seg = os.path.splitext(segments_manifest_file)
+        path_split_subseg = os.path.splitext(subsegments_manifest_file)
+        for idx, chunk_list in enumerate(split_list):
+            temp_path_seg = f"{path_split_seg[0]}.split{idx}.json"
+            temp_path_subseg = f"{path_split_subseg[0]}.split{idx}.json"
+            write_manifest(output_path=temp_path_seg, target_manifest=chunk_list)
+            path_list.append([temp_path_seg, temp_path_subseg])
+    else:
+        path_list.append([segments_manifest_file, subsegments_manifest_file])
+    return path_list
 
-def main(input_manifest_path, output_manifest_path, pairwise_rttm_output_folder, window, shift, step_count, decimals):
+def main(input_manifest_path, output_manifest_path, pairwise_rttm_output_folder, window, shift, step_count, decimals, num_workers):
 
     if '.json' not in input_manifest_path:
         raise ValueError("input_manifest_path file should be .json file format")
@@ -156,19 +215,56 @@ def main(input_manifest_path, output_manifest_path, pairwise_rttm_output_folder,
     segments_manifest_file = write_rttm2manifest(AUDIO_RTTM_MAP, segment_manifest_path, decimals)
     subsegments_manifest_file = subsegment_manifest_path
 
-    logging.info("Creating subsegments.")
-    segments_manifest_to_subsegments_manifest(
-        segments_manifest_file=segments_manifest_file,
-        subsegments_manifest_file=subsegments_manifest_file,
-        window=window,
-        shift=shift,
-        min_subsegment_duration=min_subsegment_duration,
-        include_uniq_id=True,
-    )
-    subsegments_dict = get_subsegment_dict(subsegments_manifest_file, window, shift, decimals)
+    logging.info("Creating split-subsegments files.")
+    split_seg_manifest_files_list  = split_segments_manifest_files(segments_manifest_file, subsegments_manifest_file, num_workers=num_workers)
+
+    # Set up and execute concurrent audio conversion
+    tp = concurrent.futures.ProcessPoolExecutor(max_workers=64)
+    futures = []
+
+    subsegments_dict_list = []
+    for path_tup in tqdm(split_seg_manifest_files_list, desc="Submitting segment futures", unit="file"):
+        seg_path, subseg_path = path_tup
+        futures.append(tp.submit(segments_manifest_to_subsegments_manifest, seg_path, subseg_path, window, shift, min_subsegment_duration, True))
+        subsegments_dict_list.append(subseg_path)
+
+    pbar = tqdm(total=len(split_seg_manifest_files_list), desc="Writing Subseg files", unit="file")
+    count = 0
+    for f in concurrent.futures.as_completed(futures):
+        count += 1
+        pbar.update()
+    tp.shutdown()
+    pbar.close()
+
+    logging.info("Loading subsegments to a dictionary variable.")
+    subsegments_dict = {}
+    use_mp = False
+
+    if use_mp:
+        tp = concurrent.futures.ProcessPoolExecutor(max_workers=64)
+        with ProcessPoolExecutor() as pool:
+        futures_read_dict = []
+        for subseg_file in tqdm(subsegments_dict_list, desc="Submitting Read-dict futures", unit="file"):
+            seg_path, subseg_path = path_tup
+            futures_read_dict.append(tp.submit(get_subsegment_dict, subseg_file, window, shift, decimals))
+
+        logging.info("Reading dictionaries.")
+        pbar = tqdm(total=len(split_seg_manifest_files_list), desc="Reading Dictionaries", unit="file")
+        count = 0
+        for task in concurrent.futures.as_completed(futures_read_dict):
+            count += 1
+            pbar.update()
+            subsegments_dict.update(task.result())
+        tp.shutdown()
+        pbar.close()
+    else:
+        for subseg_file in tqdm(subsegments_dict_list, desc="Submitting Read-dict futures", unit="file"):
+            subsegments_dict.update(get_subsegment_dict(subseg_file, window, shift, decimals))
+
+    logging.info("Writing truncated subsegments.")
     write_truncated_subsegments(input_manifest_dict, subsegments_dict, output_manifest_path, step_count, decimals)
-    os.remove(segment_manifest_path)
-    os.remove(subsegment_manifest_path)
+    for path_tup in split_seg_manifest_files_list:
+        seg_path, subseg_path = path_tup
 
 
 if __name__ == "__main__":
@@ -190,6 +286,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--step_count", help="Number of the unit segments you want to create per utterance", required=True,
     )
+    parser.add_argument("--num_workers", help="Number of workers for multi-processing", type=int, default=16, required=False)
     args = parser.parse_args()
 
     main(
@@ -200,4 +297,5 @@ if __name__ == "__main__":
         args.shift,
         args.step_count,
         args.decimals,
+        args.num_workers,
     )

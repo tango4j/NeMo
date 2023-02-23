@@ -21,6 +21,7 @@ from collections import OrderedDict
 from statistics import mode
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+
 import numpy as np
 import time
 import torch
@@ -229,6 +230,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         else:
             self.msdd._speaker_model = EncDecSpeakerLabelModel.from_config_dict(cfg.speaker_model_cfg)
 
+        # self.setup_optimizer_param_groups()
         # Call `self.save_hyperparameters` in modelPT.py again since cfg should contain speaker model's config.
         self.save_hyperparameters("cfg")
 
@@ -236,6 +238,52 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
+
+
+    def setup_optimizer_param_groups(self):
+        """
+        Override function in ModelPT to allow for different parameter groups for the speaker model and the MSDD model.
+
+
+        """
+        if not hasattr(self, "parameters"):
+            self._optimizer_param_groups = None
+            return
+
+        known_groups = []
+        param_groups = []
+        if "optim_param_groups" in self.cfg:
+            param_groups_cfg = self.cfg.optim_param_groups
+            for group_lv1, group_cfg_lv1 in param_groups_cfg.items():
+                module_lv1 = getattr(self, group_lv1, None)
+                for group_lv2, group_cfg_lv2 in group_cfg_lv1.items():
+                    module = getattr(module_lv1, group_lv2, None)
+                    if module is None:
+                        raise ValueError(f"{group_lv2} not found in model.")
+                    elif hasattr(module, "parameters"):
+                        known_groups.append(group_lv2)
+                        new_group = {"params": module.parameters()}
+                        for k, v in group_cfg_lv2.items():
+                            new_group[k] = v
+                        param_groups.append(new_group)
+                    else:
+                        raise ValueError(f"{group} does not have parameters.")
+
+                other_params = []
+                for n, p in self.named_parameters():
+                    is_unknown = True
+                    for group in known_groups:
+                        if group in n :
+                            is_unknown = False
+                    if is_unknown:
+                        other_params.append(p)
+
+                if len(other_params):
+                    param_groups = [{"params": other_params}] + param_groups
+        else:
+            param_groups = [{"params": self.parameters()}]
+
+        self._optimizer_param_groups = param_groups
 
     def add_speaker_model_config(self, cfg):
         """
@@ -304,6 +352,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
             return None
 
+        logging.info(f"Loading dataset from {config.manifest_filepath}")
         dataset = AudioToSpeechMSDDTrainDataset(
             manifest_filepath=config.manifest_filepath,
             emb_dir=config.emb_dir,
@@ -415,9 +464,10 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             }
         )
    
-    def get_scale_dist_mat(self, source_scale_idx, ms_seg_timestamps):
+    def get_scale_dist_mat(self, source_scale_idx, ms_seg_timestamps, deci=100):
         """
         Get distance matrix between anchors of the source scale and base scale.
+        NOTE: There should be no segments which are start is equal to end. 
 
         Args:
             source_scale_idx (int): Source scale index
@@ -426,10 +476,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         Returns:
             abs_dist_mat (Tensor): Distance matrix between anchors of the source scale and base scale
         """
-        self.deci = 100
-
-        source_scale_anchor_zeros = torch.mean(ms_seg_timestamps[source_scale_idx, :, :], dim=1) / self.deci
-        base_scale_anchor_zeros = torch.mean(ms_seg_timestamps[self.msdd_scale_n-1, :, :], dim=1) / self.deci
+        source_scale_anchor_zeros = torch.mean(ms_seg_timestamps[source_scale_idx, :, :], dim=1) / deci
+        base_scale_anchor_zeros = torch.mean(ms_seg_timestamps[self.msdd_scale_n-1, :, :], dim=1) / deci
         # Get only non-zero timestamps (= Remove zero-padding)
         source_scale_anchor = source_scale_anchor_zeros[source_scale_anchor_zeros.nonzero()].t()
         base_scale_anchor = base_scale_anchor_zeros[base_scale_anchor_zeros.nonzero()].t()
@@ -741,7 +789,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 
         # For detached embeddings
         with torch.no_grad():
-            self.msdd._speaker_model.eval()
+            # self.msdd._speaker_model.eval()
             logits, embs_d = self.msdd._speaker_model.forward_for_export(
                 processed_signal=audio_signal[detach_ids[1]], processed_signal_len=audio_signal_len[detach_ids[1]]
             )
@@ -749,7 +797,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             embs[detach_ids[1], :] = embs_d.detach()
 
         # For attached embeddings
-        self.msdd._speaker_model.train()
+        # self.msdd._speaker_model.train()
         if len(detach_ids[0]) > 1:
             logits, embs_a = self.msdd._speaker_model.forward_for_export(
                 processed_signal=audio_signal[detach_ids[0]], processed_signal_len=audio_signal_len[detach_ids[0]]
@@ -776,6 +824,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
             targets=targets,
         )
+        # preds = torch.rand(ms_seg_timestamps.shape[0], ms_seg_timestamps.shape[2], ms_seg_timestamps.shape[3]).to(features.device)
+        # add_s = torch.rand(ms_seg_timestamps.shape[0], ms_seg_timestamps.shape[2], ms_seg_timestamps.shape[3]).to(features.device) 
+        # preds.requires_grad = True
+        # preds = (preds + add_s)/2
+
         loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
         self._accuracy_train(preds, targets, sequence_lengths)
         torch.cuda.empty_cache()
@@ -784,6 +837,10 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
         self.log('train_f1_acc', f1_acc, sync_dist=True)
         # print("train_f1_acc", f1_acc)
+        # print("_speaker_model weight change check:", self.state_dict()['msdd._speaker_model.encoder.encoder.0.mconv.0.conv.weight'][0][0][0].item())
+        # print("_speaker_model weight change check:", self.state_dict()['msdd._speaker_model.encoder.encoder.0.mconv.0.conv.weight'][1][0][0].item())
+        # print("_speaker_model weight change check:", self.state_dict()['msdd._speaker_model.encoder.encoder.0.mconv.0.conv.weight'][2][0][0].item())
+        # print("msdd weight change check:", self.state_dict()['msdd.lstm.weight_ih_l0'])
         self._accuracy_train.reset()
         return {'loss': loss}
 
@@ -799,6 +856,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
             targets=targets,
         )
+        # preds = torch.rand(ms_seg_timestamps.shape[0], ms_seg_timestamps.shape[2], ms_seg_timestamps.shape[3]).to(features.device)
+        # add_s = torch.rand(ms_seg_timestamps.shape[0], ms_seg_timestamps.shape[2], ms_seg_timestamps.shape[3]).to(features.device) 
+        # preds.requires_grad = True
+        # preds = (preds + add_s)/2
+
         loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
         self._accuracy_valid(preds, targets, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
@@ -932,26 +994,6 @@ class ClusterEmbedding:
                     new_clus_label.append(seg_clus_label)
                 all_scale_clus_label_dict[scale_index][uniq_id] = new_clus_label
         return all_scale_clus_label_dict
-
-    # def get_base_clus_label_dict(self, session_clus_labels: List[str], emb_scale_seq_dict: Dict[int, dict]):
-    #     """
-    #     Retrieve base scale clustering labels from `emb_scale_seq_dict`.
-
-    #     Args:
-    #         clus_labels (list):
-    #             List containing cluster results generated by clustering diarizer.
-    #         emb_scale_seq_dict (dict):
-    #             Dictionary containing multiscale embedding input sequences.
-
-    #     Returns:
-    #         base_clus_label_dict (dict):
-    #             Dictionary containing start and end of base scale segments and its cluster label. Indexed by `uniq_id`.
-    #         emb_dim (int):
-    #             Embedding dimension in integer.
-    #     """
-    #     # base_clus_label_dict = {key: [] for key in emb_scale_seq_dict[self.base_scale_index].keys()}
-    #     emb_dim = emb_scale_seq_dict[0][uniq_id][0].shape[0]
-    #     return base_clus_label_dict, emb_dim
 
     def get_cluster_avg_embs(
         self, emb_scale_seq_dict: Dict, session_clus_labels: List, speaker_mapping_dict: Dict, session_scale_mapping_dict: Dict, 
@@ -1100,15 +1142,15 @@ class ClusterEmbedding:
                                                        msdd_scale_n=self.emb_scale_n+1)
                 self.clus_diar_model.multiscale_embeddings_and_timestamps[self.msdd_scale_n-1][0][uniq_id] = interpolated_embs
                 emb_scale_seq_dict[self.msdd_scale_n-1].update({uniq_id : interpolated_embs})
-                # if self.msdd_scale_n > self.emb_scale_n:
-                #     base_scale_clus_label = np.array([x[-1] for x in base_clus_label_dict[uniq_id]])
+        else:
+            self.msdd_scale_n = self.emb_scale_n
 
         # Get the mapping between segments in different scales.
         self._embs_and_timestamps = get_embs_and_timestamps(
             self.clus_diar_model.multiscale_embeddings_and_timestamps, self.clus_diar_model.multiscale_args_dict
         )
         session_scale_mapping_dict = self.get_scale_map(self._embs_and_timestamps)
-        if self.msdd_scale_n > self.emb_scale_n:
+        if self._cfg_msdd.get('interpolated_scale', None) is not None:
             for uniq_id, uniq_scale_mapping_dict in session_scale_mapping_dict.items():
                 base_scale_clus_label = np.array([x[-1] for x in session_clus_labels[uniq_id]])
                 itp_label = base_scale_clus_label[uniq_scale_mapping_dict[self.emb_scale_n-1]]

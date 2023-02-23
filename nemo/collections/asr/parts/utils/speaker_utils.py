@@ -29,6 +29,8 @@ from tqdm import tqdm
 from nemo.collections.asr.data.audio_to_label import repeat_signal
 from nemo.collections.asr.parts.utils.offline_clustering import SpeakerClustering, get_argmin_mat, split_input_data
 from nemo.utils import logging
+import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor, wait
 
 
 """
@@ -60,7 +62,6 @@ def get_uniq_id_with_dur(meta, decimals=3):
     """
     Return basename with offset and end time labels
     """
-    # bare_uniq_id = get_uniqname_from_filepath(meta['audio_filepath'])
     bare_uniq_id = get_uniqname_from_filepath(meta['rttm_filepath'])
     if meta['offset'] is None and meta['duration'] is None:
         return bare_uniq_id
@@ -75,8 +76,10 @@ def get_uniq_id_with_dur(meta, decimals=3):
     uniq_id = f"{bare_uniq_id}_{offset}_{endtime}"
     return uniq_id
 
-
 def audio_rttm_map(manifest, attach_dur=False):
+    return get_audio_rttm_map(manifest, attach_dur)
+
+def get_audio_rttm_map(manifest, attach_dur=False):
     """
     This function creates AUDIO_RTTM_MAP which is used by all diarization components to extract embeddings,
     cluster and unify time stamps
@@ -264,7 +267,6 @@ def get_timestamps(multiscale_timestamps, multiscale_args_dict):
         for uniq_id in time_stamps.keys():
             timestamps_dict[uniq_id]['scale_dict'][scale_idx] = {
                 'time_stamps': time_stamps[uniq_id],
-                # 'time_stamps': time_stamps[uniq_id].tolist(),
             }
 
     return timestamps_dict
@@ -340,11 +342,21 @@ def labels_to_rttmfile(labels, uniq_id, out_rttm_dir):
     return filename
 
 
-def string_to_float(x, round_digits):
+def str_to_float(num, round_digits):
     """
     Convert string to float then round the number.
+
+    Args:
+        num (str):
+            String to be converted to float.
+        round_digits (int):
+            Number of digits to be rounded.
+
+    Returns:
+        float:
+            Converted float number with round_digits.
     """
-    return round(float(x), round_digits)
+    return round(float(num), round_digits)
 
 
 def convert_rttm_line(rttm_line, round_digits=3):
@@ -366,8 +378,8 @@ def convert_rttm_line(rttm_line, round_digits=3):
             speaker string in RTTM lines.
     """
     rttm = rttm_line.strip().split()
-    start = string_to_float(rttm[3], round_digits)
-    end = string_to_float(rttm[4], round_digits) + string_to_float(rttm[3], round_digits)
+    start = str_to_float(rttm[3], round_digits)
+    end = str_to_float(rttm[4], round_digits) + str_to_float(rttm[3], round_digits)
     speaker = rttm[7]
     return start, end, speaker
 
@@ -375,6 +387,15 @@ def convert_rttm_line(rttm_line, round_digits=3):
 def rttm_to_labels(rttm_filename):
     """
     Prepare time stamps label list from rttm file
+
+    Args:
+        rttm_filename (str):
+            Path to RTTM file which contains the timestamps of each segment.
+
+    Returns:
+        labels (list):
+            List of labels containing start and end time-stamps of each segment.
+            Example: ['0.000 0.500 speaker1', '0.500 1.000 speaker2']
     """
     labels = []
     with open(rttm_filename, 'r') as f:
@@ -561,7 +582,13 @@ def get_offset_and_duration(AUDIO_RTTM_MAP, uniq_id, decimals=5):
     return offset, duration
 
 
-def write_overlap_segments(outfile, AUDIO_RTTM_MAP, uniq_id, overlap_range_list, decimals=5):
+def write_overlap_segments(
+    outfile, 
+    AUDIO_RTTM_MAP, 
+    uniq_id, 
+    overlap_range_list, 
+    min_segment_duration, 
+    decimals=5):
     """
     Write the json dictionary into the specified manifest file.
 
@@ -577,15 +604,21 @@ def write_overlap_segments(outfile, AUDIO_RTTM_MAP, uniq_id, overlap_range_list,
         decimals (int):
             Number of decimals to round the offset and duration values.
     """
-    audio_path = AUDIO_RTTM_MAP[uniq_id]['audio_filepath']
     for (stt, end) in overlap_range_list:
+        # Skip the segment if its duration is less than min_segment_duration
+        if round(end - stt, decimals) < min_segment_duration:
+            continue
+
+        # Write the json dictionary into the specified manifest file.
         meta = {
-            "audio_filepath": audio_path,
+            "audio_filepath": AUDIO_RTTM_MAP[uniq_id]['audio_filepath'],
             "offset": round(stt, decimals),
             "duration": round(end - stt, decimals),
             "label": 'UNK',
             "uniq_id": uniq_id,
         }
+
+        # Write the json dictionary into the specified manifest file.
         json.dump(meta, outfile)
         outfile.write("\n")
 
@@ -614,12 +647,18 @@ def read_rttm_lines(rttm_file_path):
     return lines
 
 
-def validate_vad_manifest(AUDIO_RTTM_MAP, vad_manifest):
+def validate_vad_manifest(AUDIO_RTTM_MAP: dict, vad_manifest: str):
     """
     This function will check the valid speech segments in the manifest file which is either
     generated from NeMo voice activity detection(VAD) or oracle VAD.
     If an audio file does not contain any valid speech segments, we ignore the audio file
     (indexed by uniq_id) for the rest of the processing steps.
+
+    Args:
+        AUDIO_RTTM_MAP (dict):
+            Dictionary containing the input manifest information
+        vad_manifest (str):
+            Path to the manifest file which is generated from NeMo VAD or oracle VAD.
     """
     vad_uniq_ids = set()
     with open(vad_manifest, 'r') as vad_file:
@@ -681,9 +720,9 @@ def get_overlap_range(rangeA: List[float], rangeB: List[float]):
 def merge_int_intervals(intervals_in: List[List[int]]) -> List[List[int]]:
     """
     Interval merging algorithm which has `O(N*logN)` time complexity. (N is number of intervals)
-    Merge the range pairs if there is overlap exists between the given ranges.
+    Merge the intervals if there is overlap exists between the given ranges.
     This algorithm needs a sorted range list in terms of the start time.
-    Note that neighboring numbers lead to a merged range.
+    Note that neighboring numbers lead to an interval.
 
     Note: This function is designed to be compiled/imported with `@torch.jit.script` decorator.
 
@@ -717,15 +756,18 @@ def merge_int_intervals(intervals_in: List[List[int]]) -> List[List[int]]:
         stt2: int = 0
         end2: int = 0
 
+        # Sort the intervals based on the start time
         intervals_in = [[int(x[0]), int(x[1])] for x in intervals_in]
         interval_tensor: torch.Tensor = torch.tensor(intervals_in)
         _sorted, _ = torch.sort(interval_tensor, dim=0)
         _sorted_int: List[List[int]] = [[int(x[0]), int(x[1])] for x in _sorted.cpu()]
         intervals: List[List[int]] = _sorted_int
 
+        # Loop through the intervals and merge the overlapping ones
         start, end = intervals[0][0], intervals[0][1]
         for i in range(1, num_intervals):
             stt2, end2 = intervals[i][0], intervals[i][1]
+            # If the current interval overlaps with the previous one, combine them
             if end >= stt2:
                 end = max(end2, end)
             else:
@@ -734,6 +776,7 @@ def merge_int_intervals(intervals_in: List[List[int]]) -> List[List[int]]:
                 start = stt2
                 end = max(end2, end)
 
+        # Add the last interval
         start, end = int(start), int(end)
         merged_list.append([start, end])
         return merged_list
@@ -764,7 +807,8 @@ def merge_float_intervals(ranges: List[List[float]], decimals: int = 5, margin: 
     Args:
         ranges (list):
             List containing ranges.
-            Example: [(10.2, 10.83), (10.42, 10.91), (10.45, 12.09)]
+            Example: 
+                >>> ranges = [(10.2, 10.83), (10.42, 10.91), (10.45, 12.09)]
         decimals (int):
             Number of rounding decimals
         margin (int):
@@ -819,10 +863,10 @@ def get_sub_range_list(target_range: List[float], source_range_list: List[List[f
         source_range_list (list):
             List containing the subranges that need to be selected.
             source_range = [(start0, end0), (start1, end1), ...]
+
     Returns:
         out_range (list):
-            List containing the overlap between target_range and
-            source_range_list.
+            List containing the overlap between target_range and source_range_list.
     """
     if len(target_range) == 0:
         return []
@@ -836,7 +880,12 @@ def get_sub_range_list(target_range: List[float], source_range_list: List[List[f
 
 
 def write_rttm2manifest(
-    AUDIO_RTTM_MAP: str, manifest_file: str, include_uniq_id: bool = False, decimals: int = 5
+    AUDIO_RTTM_MAP: str, 
+    manifest_file: str, 
+    min_segment_duration,
+    include_uniq_id: bool = False,
+    decimals: int = 5, 
+    tqdm_enabled: bool = False
 ) -> str:
     """
     Write manifest file based on rttm files (or vad table out files). This manifest file would be used by
@@ -849,15 +898,20 @@ def write_rttm2manifest(
             these are used to extract oracle vad timestamps.
         manifest (str):
             The path to the output manifest file.
+        min_segment_duration (float):
+            Minimum duration of the segments to prevent errors in neural network training and inference.
+        include_uniq_id (bool):
+            If True, the unique id will be included in the manifest file.
+        decimals (int):
+            Number of rounding decimals
 
     Returns:
         manifest (str):
             The path to the output manifest file.
     """
     with open(manifest_file, 'w') as outfile:
-        for uniq_id in AUDIO_RTTM_MAP:
-            rttm_file_path = AUDIO_RTTM_MAP[uniq_id]['rttm_filepath']
-            rttm_lines = read_rttm_lines(rttm_file_path)
+        for uniq_id in tqdm(AUDIO_RTTM_MAP, desc="Writing VAD manifest file", unit="files", disable=not tqdm_enabled):
+            rttm_lines = read_rttm_lines(AUDIO_RTTM_MAP[uniq_id]['rttm_filepath'])
             offset, duration = get_offset_and_duration(AUDIO_RTTM_MAP, uniq_id, decimals)
             vad_start_end_list_raw = []
             for line in rttm_lines:
@@ -869,12 +923,137 @@ def write_rttm2manifest(
             elif duration <= 0:
                 logging.warning(f"File ID: {uniq_id}: The audio file has negative or zero duration.")
             else:
-                overlap_range_list = get_sub_range_list(
-                    source_range_list=vad_start_end_list, target_range=[offset, offset + duration]
+                overlap_range_list = get_sub_range_list(source_range_list=vad_start_end_list, 
+                                                        target_range=[offset, offset + duration]
                 )
-                write_overlap_segments(outfile, AUDIO_RTTM_MAP, uniq_id, overlap_range_list, decimals)
+                write_overlap_segments(outfile=outfile,
+                                       AUDIO_RTTM_MAP=AUDIO_RTTM_MAP,
+                                       uniq_id=uniq_id,
+                                       overlap_range_list=overlap_range_list, 
+                                       min_segment_duration=min_segment_duration,
+                                       decimals=decimals,
+                )
     return manifest_file
 
+def get_vad_segments_from_rttm(
+    rttm_file_path: str, 
+    offset: float, 
+    duration: float, 
+    decimals: int = 5
+    ) -> List[List[float]]:
+    """
+    Get the VAD segments from the rttm file.
+
+    Args:
+        rttm_file_path (str):
+            Path to the rttm file.
+        decimals (int):
+            Number of decimals to round the timestamps.
+
+    Returns:
+        vad_start_end_list (list):
+            List containing the VAD segments.
+            Example: [(10.2, 12.09)]
+    """
+    vad_start_end_list_raw = []
+    for line in rttm_lines:
+        start, dur = get_vad_out_from_rttm_line(line)
+        vad_start_end_list_raw.append([start, start + dur])
+    vad_start_end_list = merge_float_intervals(vad_start_end_list_raw, decimals)
+    overlap_range_list = []
+    if len(vad_start_end_list) == 0:
+        logging.warning(f"File ID: {uniq_id}: The VAD label is not containing any speech segments.")
+    elif duration <= 0:
+        logging.warning(f"File ID: {uniq_id}: The audio file has negative or zero duration.")
+    else:
+        overlap_range_list = get_sub_range_list(
+            source_range_list=vad_start_end_list, 
+            target_range=[offset, offset + duration]
+        )
+    return overlap_range_list
+
+
+# def mp_write_rttm2manifest(
+#     AUDIO_RTTM_MAP: str, manifest_file: str, include_uniq_id: bool = False, decimals: int = 5, tqdm_enabled: bool = False
+# ) -> str:
+#     """
+#     Write manifest file based on rttm files (or vad table out files). This manifest file would be used by
+#     speaker diarizer to compute embeddings and cluster them. This function takes care of overlapping VAD timestamps
+#     and trimmed with the given offset and duration value.
+
+#     Args:
+#         AUDIO_RTTM_MAP (dict):
+#             Dictionary containing keys to unique names, that contains audio filepath and rttm_filepath as its contents,
+#             these are used to extract oracle vad timestamps.
+#         manifest (str):
+#             The path to the output manifest file.
+
+#     Returns:
+#         manifest (str):
+#             The path to the output manifest file.
+#     """
+#     with open(manifest_file, 'w') as outfile:
+#         for uniq_id in tqdm(AUDIO_RTTM_MAP, desc="Writing VAD manifest file", unit="files", disable=not tqdm_enabled):
+#             rttm_file_path = AUDIO_RTTM_MAP[uniq_id]['rttm_filepath']
+#             rttm_lines = read_rttm_lines(rttm_file_path)
+#             offset, duration = get_offset_and_duration(AUDIO_RTTM_MAP, uniq_id, decimals)
+#             overlap_range_list = get_vad_segments_from_rttm(rttm_lines, offset, duration, decimals)
+#         # write_total_overlap_segments(outfile=outfile,
+#         #                             AUDIO_RTTM_MAP=AUDIO_RTTM_MAP,
+#         #                             uniq_id=uniq_id,
+#         #                             overlap_range_dict=overlap_range_dict, 
+#         #                             decimals=decimals)
+#     return manifest_file
+
+def start_dur_to_start_end(subsegments: List[List[float]]) -> List[List[float]]:
+    """
+    Convert subsegments from start and duration to start and end using array operations.
+    Array operations are faster than list operations for converting start and duration to start and end.
+
+    Args:
+        subsegments (list):
+            List containing the subsegments start and duration.
+            Example: 
+                [(10.24, 2.0), (11.24, 2.0), ..., (15.24, 1.81)]
+    
+    Returns:
+        ts_list (list):
+            List containing the subsegments start and end.
+    """
+    subsegments_mat = np.array(subsegments)
+    subsegments_ends = subsegments_mat[:, 1] + subsegments_mat[:, 0]
+    ts_list = np.stack((subsegments_mat[:, 0], subsegments_ends), axis=1).tolist()
+    return ts_list
+
+def write_subsegment2json(
+    uniq_id: str, 
+    audio_filepath: str, 
+    label: str, 
+    subsegment: List[List[float]], 
+    subsegments_manifest: str
+    ):
+    """
+    Write subsegment to subsegments into a json file.
+
+    Args:
+        audio_filepath (str):
+            Path to the audio file.
+        label (str):
+            Label of the segment (or subsegment).
+        subsegment (list):
+            List containing the subsegment start and duration.
+    """
+    start, dur = subsegment
+    meta = {
+        "audio_filepath": audio_filepath,
+        "offset": start,
+        "duration": dur,
+        "label": label,
+        "uniq_id": uniq_id,
+    }
+
+    json.dump(meta, subsegments_manifest)
+    subsegments_manifest.write("\n")
 
 def segments_manifest_to_subsegments_manifest(
     segments_manifest_file: str,
@@ -887,6 +1066,7 @@ def segments_manifest_to_subsegments_manifest(
 ):
     """
     Generate subsegments manifest from segments manifest file
+
     Args:
         segments_manifest file (str): path to segments manifest file, typically from VAD output
         subsegments_manifest_file (str): path to output subsegments manifest file (default (None) : writes to current working directory)
@@ -897,7 +1077,7 @@ def segments_manifest_to_subsegments_manifest(
         get_dict (bool): Return subsegment dictionary instead of writing to a file
 
     Returns:
-        returns path to subsegment manifest file
+        Return path to subsegment manifest file.
     """
     subsegment_dict = {}
     if subsegments_manifest_file is None:
@@ -907,41 +1087,114 @@ def segments_manifest_to_subsegments_manifest(
     with open(segments_manifest_file, 'r') as segments_manifest, open(
         subsegments_manifest_file, 'w'
     ) as subsegments_manifest:
-        segments = segments_manifest.readlines()
-        for segment in segments:
-            segment = segment.strip()
-            dic = json.loads(segment)
-            audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
-            subsegments = get_subsegments(offset=offset, window=window, shift=shift, duration=duration)
+        for segment in segments_manifest.readlines():
+            dic = json.loads(segment.strip())
+            audio_filepath, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
+            subsegments = get_subsegments(offset=offset, 
+                                          window=window, 
+                                          shift=shift, 
+                                          duration=duration, 
+                                          min_subsegment_duration=min_subsegment_duration)
+
+            if len(subsegments) == 0:
+                continue
+                
             if include_uniq_id and 'uniq_id' in dic:
                 uniq_id = dic['uniq_id']
             else:
                 uniq_id = None
+            # if uniq_id == 'libri_to5_diar_sim_4spks_240s_2384.1715_4993_170521_191329':
+            if duration < 0.01:
+                import ipdb; ipdb.set_trace()
             if get_dict:
-                subsegments_mat = np.array(subsegments)
-                subsegments_intervals = subsegments_mat[:, 1] + subsegments_mat[:, 0]
-                subsegment_dict[uniq_id] = subsegments_intervals
+                ts_list = start_dur_to_start_end(subsegments)
+                if uniq_id in subsegment_dict:
+                    subsegment_dict[uniq_id].extend(ts_list)
+                else:
+                    subsegment_dict[uniq_id] = ts_list
             else:
                 for subsegment in subsegments:
-                    start, dur = subsegment
-                    if dur > min_subsegment_duration:
-                        meta = {
-                            "audio_filepath": audio,
-                            "offset": start,
-                            "duration": dur,
-                            "label": label,
-                            "uniq_id": uniq_id,
-                        }
+                    write_subsegment2json(uniq_id=uniq_id, 
+                                          audio_filepath=audio_filepath, 
+                                          label=label, 
+                                          subsegment=subsegment, 
+                                          subsegments_manifest=subsegments_manifest)
 
-                        json.dump(meta, subsegments_manifest)
-                        subsegments_manifest.write("\n")
-
-    output = subsegment_dict if get_dict else subsegments_manifest_file
+    if get_dict:
+        output = subsegment_dict 
+    else:
+        output = subsegments_manifest_file
     return output
 
-def _get_subsegments(offset: float, window: float, shift: float, duration: float):
+def mp_segments_manifest_to_subsegments_manifest(
+    segments_manifest_file: str,
+    subsegments_manifest_file: str = None,
+    window: float = 1.5,
+    shift: float = 0.75,
+    min_subsegment_duration: float = 0.05,
+    include_uniq_id: bool = False,
+    get_dict: bool = False,
+    num_workers: int = 12,
+    global_rank: int = 0,
+):
     """
-    Return subsegments from a segment of audio file
+    Multiprocessing version of segments_manifest_to_subsegments_manifest function.
+
+    """
+    split_seg_manifest_files_list = split_segments_manifest_files(segments_manifest_file, subsegments_manifest_file, num_workers=num_workers, global_rank=global_rank)
+
+    futures = []
+    _subsegments_manifest_dict = {}
+    _subsegments_manifest_dict_list = []
+    with ProcessPoolExecutor() as tp:
+        for (seg_path, subseg_path) in split_seg_manifest_files_list:
+            futures.append(tp.submit(segments_manifest_to_subsegments_manifest, 
+                                     seg_path, 
+                                     subseg_path, 
+                                     window, 
+                                     shift, 
+                                     min_subsegment_duration, 
+                                     include_uniq_id, 
+                                     get_dict))
+
+        done, pending = concurrent.futures.wait(futures) # ALL_COMPLETED is the default value
+        for task in done:
+            _subsegments_manifest_dict_list.append(task.result())
+
+        # The results are divided into multiple dictionaries, we need to merge them into one dictionary
+        for part_dict in _subsegments_manifest_dict_list:
+            for key in part_dict:
+                if key in _subsegments_manifest_dict:
+                    _subsegments_manifest_dict[key].extend(part_dict[key])
+                else:
+                    _subsegments_manifest_dict[key] = part_dict[key]
+
+        # Sort the timestamps in each key (This must be done to ensure that the timestamps are in order)
+        for key, val_lists in _subsegments_manifest_dict.items():
+            ts_array = np.sort(np.array(val_lists), axis=0)
+            _subsegments_manifest_dict[key] = ts_array.tolist()
+        # Remove split subsegments manifest files
+        for (seg_path, subseg_path) in split_seg_manifest_files_list:
+            os.remove(seg_path)
+            os.remove(subseg_path)
+
+    return _subsegments_manifest_dict
+
+def get_subsegments(
+    offset: float, 
+    window: float, 
+    shift: float, 
+    duration: float, 
+    min_subsegment_duration: float = 0.05
+    ) -> List[List[float]]:
+    """
+    Return subsegments from a segment of audio file.
+    
+    Example:
+        (window, shift) = 1.5, 0.75
+        Segment:  [12.05, 14.45]    
+        Subsegments: [[12.05, 13.55], [12.8, 14.3], [13.55, 14.45], [14.3, 14.45]]
+
     Args:
         offset (float): start time of audio segment
         window (float): window length for segments to subsegments length
@@ -950,19 +1203,27 @@ def _get_subsegments(offset: float, window: float, shift: float, duration: float
     Returns:
         subsegments (List[tuple[float, float]]): subsegments generated for the segments as list of tuple of start and duration of each subsegment
     """
-    subsegments: torch.Tensor = torch.tensor([])
+    subsegments:  List[List[float]] = []
     start = offset
     slice_end = start + duration
     base = math.ceil((duration - window) / shift)
     slices = 1 if base < 0 else base + 1
-    start_col = torch.arange(offset, slice_end, shift)[:slices]
-    dur_col = window * torch.ones(slices)
-    dur_col[-1] = min(slice_end - start_col[-1], window)
-    subsegments = torch.stack([start_col, dur_col], dim=1)
+    if slices == 1:
+        if min(duration, window) >= min_subsegment_duration:
+            subsegments.append([start, min(duration, window)])
+    else:
+        start_col = torch.arange(offset, slice_end, shift)[:slices]
+        dur_col = window * torch.ones(slices)
+        dur_col[-1] = min(slice_end - start_col[-1], window)
+        ss_tensor = torch.stack([start_col, dur_col], dim=1)
+        for k in range(ss_tensor.shape[0]):
+            if dur_col[k] >= min_subsegment_duration:
+                subsegments.append([float(ss_tensor[k,0].item()), float(ss_tensor[k,1].item())])
     return subsegments
 
-def get_subsegments(offset: float, window: float, shift: float, duration: float) -> List[List[float]]:
+def _get_subsegments(offset: float, window: float, shift: float, duration: float) -> List[List[float]]:
     """
+    [Deprecated Function]
     Return subsegments from a segment of audio file
 
         offset (float): start time of audio segment
@@ -1211,7 +1472,7 @@ def get_online_segments_from_slices(
     return ind_offset, sigs_list, sig_rangel_list, sig_indexes
 
 
-@torch.jit.script
+# @torch.jit.script
 def get_online_subsegments_from_buffer(
     buffer_start: float,
     buffer_end: float,
@@ -1268,7 +1529,7 @@ def get_online_subsegments_from_buffer(
         subsegments = get_subsegments(
             offset=range_t[0], window=window, shift=shift, duration=(range_t[1] - range_t[0]),
         )
-        subsegments = [[float(x[0]), float(x[1])] for x in subsegments]
+        # subsegments = [[float(x[0]), float(x[1])] for x in subsegments]
         ind_offset, sigs, ranges, inds = get_online_segments_from_slices(
             sig=audio_buffer,
             buffer_start=buffer_start,
@@ -1473,8 +1734,9 @@ def get_id_tup_dict(uniq_id_list: List[str], test_data_collection, preds_list: L
     return session_dict
 
 
-def prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global_rank):
+def _prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global_rank):
     """
+    [Obsolete function]
     This function is needed for preparing diarization training data for multiscale diarization decoder (MSDD).
     Prepare multiscale timestamp data for training. Oracle VAD timestamps from RTTM files are used as VAD timestamps.
     In this function, timestamps for embedding extraction are extracted without extracting the embedding vectors.
@@ -1501,13 +1763,17 @@ def prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global
         if os.path.exists(speaker_dir):
             shutil.rmtree(speaker_dir)
         os.makedirs(speaker_dir)
-    split_audio_rttm_map = audio_rttm_map(manifest_filepath, attach_dur=True)
+    split_audio_rttm_map = get_audio_rttm_map(manifest_filepath, attach_dur=True)
 
     # Speech Activity Detection part
     _speaker_manifest_path = os.path.join(speaker_dir, f'oracle_vad_manifest.json')
     logging.info(f"Extracting oracle VAD timestamps and saving at {speaker_dir}")
     if not os.path.exists(_speaker_manifest_path):
-        write_rttm2manifest(split_audio_rttm_map, _speaker_manifest_path, include_uniq_id=True)
+        write_rttm2manifest(AUDIO_RTTM_MAP=split_audio_rttm_map, 
+                            manifest_file=_speaker_manifest_path, 
+                            min_segment_duration=min_subsegment_duration, 
+                            include_uniq_id=True, 
+                            tqdm_enabled=True)
 
     multiscale_timestamps_by_scale = {}
 
@@ -1533,14 +1799,147 @@ def prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global
     multiscale_timestamps_dict = get_timestamps(multiscale_timestamps_by_scale, multiscale_args_dict)
     return multiscale_timestamps_dict
 
+from nemo.collections.asr.parts.utils.manifest_utils import (
+    read_manifest,
+    write_manifest,
+)
+
+def split_segments_manifest_files(
+    segments_manifest_file: str, 
+    subsegments_manifest_file, 
+    num_workers: int =1, 
+    global_rank: int = 0
+    ) -> List[List[float]]:
+    """
+    Split the segments manifest file into multiple files. 
+    If number of workers is 1, split process is bypassed and the original segments manifest file is returned.
+
+    Args:
+        segments_manifest_file (str):
+            Path to the segments manifest file.
+        subsegments_manifest_file (str):
+            The destination path to the subsegments manifest file.
+        num_workers (int):
+            Number of workers to split the manifest file for multi-processing.
+
+    Returns:
+        path_list (list):
+            List containing the path to the split segments manifest file and the subsegments manifest file.
+    """
+    total_list = read_manifest(segments_manifest_file)    
+    split_list, path_list = [], []
+    if len(total_list) > num_workers:
+        chunk_size = len(total_list) // num_workers
+        for i in range(0, len(total_list), chunk_size):        
+            split_list.append(total_list[i:i+chunk_size])
+        path_split_seg = os.path.splitext(segments_manifest_file)
+        path_split_subseg = os.path.splitext(subsegments_manifest_file)
+        for idx, chunk_list in enumerate(split_list):
+            temp_path_seg = f"{path_split_seg[0]}.split{idx}.rank{global_rank}json"
+            temp_path_subseg = f"{path_split_subseg[0]}.split{idx}.rank{global_rank}.json"
+            write_manifest(output_path=temp_path_seg, target_manifest=chunk_list)
+            path_list.append([temp_path_seg, temp_path_subseg])
+    else:
+        path_list.append([segments_manifest_file, subsegments_manifest_file])
+    return path_list
+
+def prepare_split_data(
+    manifest_filepath: str, 
+    _out_dir: str, 
+    multiscale_args_dict: Dict,
+    global_rank: int, 
+    min_subsegment_duration: float =0.05, 
+    num_workers: int =1) -> Dict:
+    """
+    This function is needed for preparing diarization training data for multiscale diarization decoder (MSDD).
+    Prepare multiscale timestamp data for training. Oracle VAD timestamps from RTTM files are used as VAD timestamps.
+    In this function, timestamps for embedding extraction are extracted without extracting the embedding vectors.
+
+    Args:
+        manifest_filepath (str):
+            Input manifest file for creating audio-to-RTTM mapping.
+        _out_dir (str):
+            Output directory where timestamp json files are saved.
+        multiscale_args_dict (dict):
+            Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+        global_rank (int):
+            Global rank of the current process during distributed training.
+        min_subsegment_duration (float):
+            Minimum duration of subsegment in seconds to filter out extremely short subsegments.
+        num_workers (int):
+            Number of workers to split the manifest file for multi-processing.
+
+    Returns:
+        multiscale_args_dict (dict):
+            - Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+            - Each data sample has two keys: `multiscale_weights` and `scale_dict`.
+                - `multiscale_weights` key contains a list containing multiscale weights.
+                - `scale_dict` is indexed by integer keys which are scale index.
+            - Each data sample is indexed by using the following naming convention: `<uniq_id>_<start time in ms>_<end time in ms>`
+                Example: `fe_03_00106_mixed_626310_642300`
+    """
+    speaker_dir = os.path.join(_out_dir, 'speaker_outputs')
+
+    # Only if this is for the first run of modelPT instance, remove temp folders.
+    if global_rank == 0:
+        if os.path.exists(speaker_dir):
+            shutil.rmtree(speaker_dir)
+        os.makedirs(speaker_dir)
+    split_audio_rttm_map = get_audio_rttm_map(manifest_filepath, attach_dur=True)
+
+    # Speech Activity Detection part
+    _speaker_manifest_path = os.path.join(speaker_dir, f'oracle_vad_manifest.json')
+    logging.info(f"Extracting oracle VAD timestamps and saving at {speaker_dir}")
+    if not os.path.exists(_speaker_manifest_path):
+        write_rttm2manifest(split_audio_rttm_map, 
+                            _speaker_manifest_path, 
+                            min_segment_duration=min_subsegment_duration, 
+                            include_uniq_id=True, 
+                            tqdm_enabled=True)
+
+    use_mp = True if num_workers > 1 else False
+    multiscale_timestamps_by_scale = {}
+    
+    # Segmentation
+    for scale_idx, (window, shift) in tqdm(multiscale_args_dict['scale_dict'].items(), desc="Subsegmentation for each scale", unit="scale"):
+        subsegments_manifest_path = os.path.join(speaker_dir, f'subsegments_scale{scale_idx}.rank{global_rank}.json')
+        if not os.path.exists(subsegments_manifest_path):
+            # Sub-segmentation for the current scale (scale_idx)
+            if use_mp:
+                subsegments_manifest_dict = mp_segments_manifest_to_subsegments_manifest(
+                    segments_manifest_file=_speaker_manifest_path,
+                    subsegments_manifest_file=subsegments_manifest_path,
+                    window=window,
+                    shift=shift,
+                    min_subsegment_duration=min_subsegment_duration,
+                    include_uniq_id=True,
+                    get_dict=True,
+                    global_rank=global_rank,
+                ) 
+            else:
+                subsegments_manifest_dict = segments_manifest_to_subsegments_manifest(
+                    segments_manifest_file=_speaker_manifest_path,
+                    subsegments_manifest_file=subsegments_manifest_path,
+                    window=window,
+                    shift=shift,
+                    min_subsegment_duration=min_subsegment_duration,
+                    include_uniq_id=True,
+                    get_dict=True,
+                )
+        multiscale_timestamps_by_scale[scale_idx] = subsegments_manifest_dict
+
+    multiscale_timestamps_dict = get_timestamps(multiscale_timestamps_by_scale, multiscale_args_dict)
+    return multiscale_timestamps_dict
 
 def extract_timestamps(manifest_file: str):
     """
+    [Obsolete function]
     This method extracts timestamps from segments passed through manifest_file.
 
     Args:
         manifest_file (str):
             Manifest file containing segmentation information.
+    
     Returns:
         time_stamps (dict):
             Dictionary containing lists of timestamps.
@@ -1639,7 +2038,7 @@ def embedding_normalize(embs, use_std=False, eps=1e-10):
     return embs
 
 
-@torch.jit.script
+#@torch.jit.script
 class OnlineSegmentor:
     """
     Online Segmentor for online (streaming) diarizer.

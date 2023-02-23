@@ -200,8 +200,10 @@ class _AudioMSDDTrainDataset(Dataset):
         window_stride,
         emb_batch_size,
         pairwise_infer: bool,
+        min_subsegment_duration: float = 0.03,
         random_flip: bool = True,
         global_rank: int = 0,
+        num_workers: int = 30,
     ):
         super().__init__()
         self.collection = DiarizationSpeechLabel(
@@ -223,8 +225,16 @@ class _AudioMSDDTrainDataset(Dataset):
         self.random_flip = random_flip
         self.global_rank = global_rank
         self.manifest_filepath = manifest_filepath
+        self.min_subsegment_duration = min_subsegment_duration
+        # num_workers = 1
+        self.num_workers = num_workers
         self.multiscale_timestamp_dict = prepare_split_data(
-            self.manifest_filepath, self.emb_dir, self.multiscale_args_dict, self.global_rank,
+            self.manifest_filepath, 
+            self.emb_dir, 
+            self.multiscale_args_dict, 
+            self.global_rank, 
+            self.min_subsegment_duration, 
+            self.num_workers
         )
 
     def __len__(self):
@@ -299,6 +309,8 @@ class _AudioMSDDTrainDataset(Dataset):
             )
             label_int_sess = torch.argmax(soft_label_vec_sess)
             soft_label_vec = soft_label_vec_sess.unsqueeze(0)[:, sample.target_spks].squeeze()
+            if any(torch.isnan(soft_label_vec)):
+                raise ValueError(f"NaN value in soft_label_vec: {soft_label_vec} for uniq_id: {uniq_id}")
             if label_int_sess in sample.target_spks and torch.sum(soft_label_vec_sess) > 0:
                 label_int = sample.target_spks.index(label_int_sess)
             else:
@@ -307,6 +319,8 @@ class _AudioMSDDTrainDataset(Dataset):
             seg_target_list.append(label_vec.detach())
             base_clus_label.append(label_int)
         seg_target = torch.stack(seg_target_list)
+        if torch.min(seg_target) < 0 or torch.max(seg_target) > 1:
+            raise ValueError(f"seg_target of uniq_id {uniq_id} has invalid value. seg_target: {seg_target}")
         base_clus_label = torch.tensor(base_clus_label)
         return seg_target, base_clus_label
 
@@ -395,6 +409,8 @@ class _AudioMSDDTrainDataset(Dataset):
                     int((seg_stt - sample.offset) * self.frame_per_sec),
                     int((seg_end - sample.offset) * self.frame_per_sec),
                 )
+                if abs(stt - end) < 2:
+                    import ipdb; ipdb.set_trace()
                 scale_ts_list.append(torch.tensor([stt, end]).detach())
             ms_seg_counts[scale_idx] = len(
                 self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_idx]["time_stamps"]

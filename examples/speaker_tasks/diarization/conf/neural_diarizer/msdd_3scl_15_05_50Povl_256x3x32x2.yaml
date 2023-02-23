@@ -7,7 +7,7 @@
 # {"audio_filepath": "/path/to/audio01.wav", "offset": 390.83, "duration": 13.45, "text": "-", "num_speakers": 2, "rttm_filepath": "/path/to/audio01.rttm"}
 name: "MultiscaleDiarDecoder" 
 sample_rate: 16000
-num_workers: 20
+num_workers: 30
 batch_size: 7
 
 model: 
@@ -17,8 +17,6 @@ model:
     speaker_embeddings:
       model_path: ??? # .nemo local model path or pretrained model name (titanet_large is recommended)
       parameters:
-        # window_length_in_sec: [2.4,1.2,0.6] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
-        # shift_length_in_sec: [1.2,0.6,0.3] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
         window_length_in_sec: [2.0,1.0,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
         shift_length_in_sec: [1.0,0.5,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
         multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
@@ -94,9 +92,14 @@ model:
     weight: null # Weight for binary cross-entropy loss. Either `null` or list type input. (e.g. [0.5,0.5])
   
   optim_param_groups:
-      msdd:
-        _speaker_model:
-          lr: 0.0002
+    msdd:
+      _speaker_model:
+        lr: .00001
+        weight_decay: 0.05
+
+        sched:
+          name: CosineAnnealing
+          min_lr: 0.0
 
   optim:
     name: adam
@@ -105,7 +108,8 @@ model:
 
     sched:
       name: CosineAnnealing
-      min_lr: 0.00001
+      # min_lr: 0.00001
+      min_lr: 0.0
 
 trainer:
   devices: 1 # number of gpus (devices)
@@ -130,7 +134,7 @@ exp_manager:
   checkpoint_callback_params:
     monitor: "val_loss"
     mode: "min"
-    save_top_k: 30
+    save_top_k: 20
     every_n_epochs: 1
   wandb_logger_kwargs:
     name: null
