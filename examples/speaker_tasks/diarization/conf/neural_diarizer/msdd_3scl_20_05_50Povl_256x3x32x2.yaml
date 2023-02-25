@@ -17,8 +17,8 @@ model:
     speaker_embeddings:
       model_path: ??? # .nemo local model path or pretrained model name (titanet_large is recommended)
       parameters:
-        window_length_in_sec: [1.5,0.75,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
-        shift_length_in_sec: [0.75,0.375,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
+        window_length_in_sec: [2.0,1.0,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
+        shift_length_in_sec: [1.0,0.5,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
         multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
         save_embeddings: True # Save embeddings as pickle file for each audio input.
 
@@ -90,12 +90,11 @@ model:
   loss: 
     _target_: nemo.collections.asr.losses.bce_loss.BCELoss
     weight: null # Weight for binary cross-entropy loss. Either `null` or list type input. (e.g. [0.5,0.5])
-    alpha: 0.005 # Ratio between BCE loss and affinity loss
   
   optim_param_groups:
     msdd:
       _speaker_model:
-        lr: .000007
+        lr: .00001
         weight_decay: 0.05
 
         sched:
@@ -104,7 +103,7 @@ model:
 
   optim:
     name: adam
-    lr: .0005
+    lr: .0003
     weight_decay: 0.005
 
     sched:
@@ -115,7 +114,7 @@ model:
 trainer:
   devices: 1 # number of gpus (devices)
   accelerator: gpu 
-  max_epochs: 250
+  max_epochs: 200
   max_steps: -1 # computed at runtime if not set
   num_nodes: 1
   strategy: ddp

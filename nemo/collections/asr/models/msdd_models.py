@@ -46,6 +46,17 @@ from nemo.collections.asr.models.clustering_diarizer import (
 )
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
+from nemo.collections.asr.parts.utils.offline_clustering import (
+    getCosAffinityMatrix,
+    cos_similarity,
+    cos_similarity_batch,
+    ScalerMinMax,
+    ScalerMinMaxBatch,
+    estimate_num_of_speakers_batch,
+    get_binarized_batch_affinity_mat,
+    batch_speaker_count,
+)
+
 from nemo.collections.asr.parts.utils.speaker_utils import (
     audio_rttm_map,
     get_embs_and_timestamps,
@@ -74,6 +85,55 @@ except ImportError:
 
 
 __all__ = ['EncDecDiarLabelModel', 'ClusterEmbedding', 'NeuralDiarizer']
+
+from nemo.core.classes import Loss, Typing, typecheck
+class AffinityLoss(Loss, Typing):
+    """
+    Computes Binary Cross Entropy (BCE) loss. The BCELoss class expects output from Sigmoid function.
+    """
+
+    @property
+    def input_types(self):
+        """Input types definitions for AnguarLoss.
+        """
+        return {
+            "probs": NeuralType(('B', 'T', 'C'), ProbsType()),
+            'labels': NeuralType(('B', 'T', 'C'), LabelsType()),
+            "signal_lengths": NeuralType(tuple('B'), LengthsType()),
+        }
+
+    @property
+    def output_types(self):
+        """
+        Output types definitions for binary cross entropy loss. Weights for labels can be set using weight variables.
+        """
+        return {"loss": NeuralType(elements_type=LossType())}
+
+    def __init__(self, reduction='sum', alpha=1.0, weight=torch.tensor([0.5, 0.5])):
+        super().__init__()
+        self.reduction = reduction
+        self.loss_weight = weight
+
+    def forward(self, batch_affinity_mat, targets):
+        """
+        Calculate binary cross entropy loss based on probs, labels and signal_lengths variables.
+
+        Args:
+            probs (torch.tensor)
+                Predicted probability value which ranges from 0 to 1. Sigmoid output is expected.
+            labels (torch.tensor)
+                Groundtruth label for the predicted samples.
+            signal_lengths (torch.tensor):
+                The actual length of the sequence without zero-padding.
+
+        Returns:
+            loss (NeuralType)
+                Binary cross entropy loss value.
+        """
+        gt_affinity = cos_similarity_batch(targets, targets)
+        affinity_loss = torch.abs(gt_affinity - batch_affinity_mat).sum()
+        return affinity_loss
+
 
 def get_scale_dist_mat_t(source_scale_idx, ms_seg_timestamps, msdd_scale_n):
     """
@@ -135,7 +195,8 @@ def interpolate_embs_t(emb_t, ms_seg_timestamps, base_seq_len, msdd_multiscale_a
     dist_delta = (half_scale - session_scale_dist_mat.flatten()).reshape(base_seq_len, source_seq_len)
     interpolated_weights = ((dist_delta ** 2).t() / torch.sum(dist_delta ** 2, dim=1).t()).t()  
     interpolated_embs = interpolated_weights @ emb_t
-    rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0)
+    # rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0) # Wrong zero padding
+    rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, 0, max_length - base_seq_len), mode='constant', value=0)
     return rep_interpolated_embs
 
 def load_subsegment_to_dict(manifest_file: str):
@@ -235,10 +296,14 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self.save_hyperparameters("cfg")
 
         self.loss = instantiate(self.cfg_msdd_model.loss)
+        self.affinity_loss = AffinityLoss()
+        self.alpha = self.cfg_msdd_model.loss.alpha
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
 
+        self.time_flag = 0.0
+        self.time_flag_end = 0.0
 
     def setup_optimizer_param_groups(self):
         """
@@ -461,6 +526,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             {
                 "probs": NeuralType(('B', 'T', 'C'), ProbsType()),
                 "scale_weights": NeuralType(('B', 'T', 'C', 'D'), ProbsType()),
+                "batch_affinity_mat": NeuralType(('B', 'T', 'T'), ProbsType()),
             }
         )
    
@@ -509,7 +575,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         dist_delta = (half_scale - session_scale_dist_mat.flatten()).reshape(base_seq_len, source_seq_len)
         interpolated_weights = ((dist_delta ** 2).t() / torch.sum(dist_delta ** 2, dim=1).t()).t()  
         interpolated_embs = interpolated_weights @ emb_t
-        rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0)
+        # rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0) # Wrong zero padding
+        rep_interpolated_embs = F.pad(input=interpolated_embs, pad=(0, 0, 0, max_length - base_seq_len), mode='constant', value=0)
         return rep_interpolated_embs
 
     def get_ms_emb_seq(
@@ -550,7 +617,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 
         Returns:
             ms_emb_seq (Tensor):
-	        Multi-scale embedding sequence that is mapped, matched and repeated. The longer scales are less repeated,
+	            Multi-scale embedding sequence that is mapped, matched and repeated. The longer scales are less repeated,
                 while shorter scales are more frequently repeated following the scale mapping tensor.
         """
         batch_size = scale_mapping.shape[0]
@@ -565,7 +632,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 if scale_index < self.emb_scale_n:
                     repeat_mat = scale_mapping[batch_idx][scale_index][:base_seq_len]
                     rep_embs_fit = batch_emb_list[batch_idx][scale_index][repeat_mat, :]
-                    rep_embs = F.pad(input=rep_embs_fit, pad=(0, 0, max_length - base_seq_len, 0), mode='constant', value=0)
+                    rep_embs = F.pad(input=rep_embs_fit, pad=(0, 0, 0, max_length - base_seq_len), mode='constant', value=0)
                     rep_embs_list.append(rep_embs)
                 elif self.cfg_msdd_model.interpolated_scale is not None and scale_index == self.msdd_scale_n - 1:
                     emb_t = batch_emb_list[batch_idx][self.emb_scale_n-1]
@@ -573,6 +640,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                     rep_embs_list.append(itp_emb)
             repp = torch.stack(rep_embs_list).permute(1, 0, 2)
             ms_emb_seq_list.append(repp)
+
         ms_emb_seq = torch.stack(ms_emb_seq_list)
         return ms_emb_seq
 
@@ -582,6 +650,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self, embs: torch.Tensor, clus_label_index: torch.Tensor, ms_seg_counts: torch.Tensor, scale_mapping
     ) -> torch.Tensor:
         """
+        [Deprecated Function]
         Calculate the cluster-average speaker embedding based on the ground-truth speaker labels (i.e., cluster labels).
 
         Args:
@@ -613,7 +682,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 each speaker to predict the speaker label for the given multi-scale embedding sequences.
                 Shape: (batch_size, scale_n, emb_dim, self.num_spks_per_model)
         """
-        # scale_n, batch_size = scale_mapping[0].shape[0], scale_mapping.shape[0]
         batch_size = scale_mapping.shape[0]
         split_emb_tup = torch.split(embs, ms_seg_counts[:, :self.emb_scale_n].flatten().tolist(), dim=0)
         batch_emb_list = [split_emb_tup[i : i + self.emb_scale_n] for i in range(0, len(split_emb_tup), self.emb_scale_n)]
@@ -648,7 +716,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 
     @torch.no_grad()
     def get_cluster_avg_embs_model(
-        self,  ms_emb_seq:torch.Tensor, clus_label_index: torch.Tensor, ms_seg_counts: torch.Tensor, scale_mapping
+        self,  
+        ms_emb_seq:torch.Tensor, 
+        clus_label_index: torch.Tensor, 
+        ms_seg_counts: torch.Tensor, 
+        scale_mapping: torch.Tensor,
     ) -> torch.Tensor:
         """
         `max_base_seq_len` is the longest base scale sequence length can be used for batch processing.
@@ -656,38 +728,20 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         """
         self.max_num_speakers = 2
         batch_size = ms_emb_seq.shape[0]
-        end_inds = ms_seg_counts.sum(axis=1)
-        stt_inds = ms_seg_counts[:, :self.msdd_scale_n-1].sum(dim=1)    
-        total_clus_label_len = torch.tensor(clus_label_index.shape[1]).repeat(batch_size).to(ms_emb_seq.device)
-        # If MSDD is using more scales (interpolated scales) than extracted embeddings, use the finest scale's sequence length.
-        if self.msdd_scale_n > self.emb_scale_n:
-            max_base_seq_len = min(min(total_clus_label_len - ms_seg_counts[:, :self.emb_scale_n].sum(dim=1)), ms_emb_seq.shape[1])
-        else:
-            max_base_seq_len = min(min(end_inds - stt_inds), ms_emb_seq.shape[1])
-        # for batch processing, indices should be created for ground-truth cluster labels
-        one = torch.tensor(0.0).unsqueeze(0).type(torch.float).to(ms_emb_seq.device)
-        cumsum_inds = torch.cumsum(total_clus_label_len, dim=0)[:-1].type(torch.float)
-        inds_offset = torch.cat((one, cumsum_inds))
-        stt_inds_flat, end_inds_flat = inds_offset + stt_inds, inds_offset + stt_inds + max_base_seq_len
-        stt_end_t = torch.stack((stt_inds_flat, end_inds_flat), 1).flatten().type(torch.long)
-        clus_label_split = torch.tensor_split(clus_label_index.flatten(), stt_end_t.tolist())
-        split_inds = torch.arange(1, stt_end_t.shape[0], 2)
-        base_scale_clus_labels = torch.stack([ clus_label_split[k] for k in split_inds ])
+        max_base_seq_len = torch.max(ms_seg_counts[:, -1])
 
         # Create 0 and 1 to mask embedding vectors with speaker labels 
-        spk_label_mask = torch.stack([ (base_scale_clus_labels == spk).float() for spk  in range(self.max_num_speakers) ]).permute(1, 2, 0)
+        spk_label_mask = torch.stack([ (clus_label_index == spk).float() for spk  in range(self.max_num_speakers) ]).permute(1, 2, 0)
         spk_label_mask_sum = spk_label_mask.sum(dim=1)
         spk_label_mask_sum[(spk_label_mask_sum == 0)] = 1 # avoid divide by zero for empty clusters
-        spk_label_mask_inv = 1/spk_label_mask_sum 
         
         # ms_emb_seq should be matched with spk_label_mask's length so truncate it 
         ms_emb_seq_trunc = ms_emb_seq[:, :max_base_seq_len, :, :].view(batch_size, max_base_seq_len, -1)
         ms_weighted_sum_raw = torch.bmm(spk_label_mask.permute(0, 2, 1), ms_emb_seq_trunc)
         ms_weighted_sum = ms_weighted_sum_raw.permute(0, 2, 1).reshape(batch_size, self.msdd_scale_n, -1, self.max_num_speakers)
-        denom_label_count = torch.tile(spk_label_mask_inv.unsqueeze(1).unsqueeze(1), (1, self.msdd_scale_n, ms_emb_seq.shape[3], 1))
+        denom_label_count = torch.tile((1/spk_label_mask_sum).unsqueeze(1).unsqueeze(1), (1, self.msdd_scale_n, ms_emb_seq.shape[3], 1))
         ms_avg_embs = ms_weighted_sum * denom_label_count
         return ms_avg_embs
-
 
     @torch.no_grad()
     def get_ms_mel_feat(
@@ -762,9 +816,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             detached = torch.arange(total_seg_count)
         else:
             torch.manual_seed(self._trainer.current_epoch)
-            attached = torch.randperm(total_seg_count)[:_emb_batch_size]
-            detached = torch.randperm(total_seg_count)[_emb_batch_size:]
+            perm_inds = torch.randperm(total_seg_count)
+            attached = perm_inds[:_emb_batch_size]
+            detached = perm_inds[_emb_batch_size:]
         detach_ids = (attached, detached)
+        assert torch.unique(torch.cat(detach_ids)).shape[0] == total_seg_count.item()
         return ms_mel_feat, ms_mel_feat_len, seq_len, detach_ids
 
     def forward_infer(self, input_signal, input_signal_length, emb_vectors, targets):
@@ -778,7 +834,14 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 
     @typecheck()
     def forward(
-        self, features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets
+        self, 
+        features, 
+        feature_length, 
+        ms_seg_timestamps, 
+        ms_seg_counts, 
+        clus_label_index, 
+        scale_mapping, 
+        targets
     ):
         processed_signal, processed_signal_len = self.msdd._speaker_model.preprocessor(
             input_signal=features, length=feature_length
@@ -789,7 +852,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 
         # For detached embeddings
         with torch.no_grad():
-            # self.msdd._speaker_model.eval()
             logits, embs_d = self.msdd._speaker_model.forward_for_export(
                 processed_signal=audio_signal[detach_ids[1]], processed_signal_len=audio_signal_len[detach_ids[1]]
             )
@@ -797,25 +859,29 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             embs[detach_ids[1], :] = embs_d.detach()
 
         # For attached embeddings
-        # self.msdd._speaker_model.train()
         if len(detach_ids[0]) > 1:
             logits, embs_a = self.msdd._speaker_model.forward_for_export(
                 processed_signal=audio_signal[detach_ids[0]], processed_signal_len=audio_signal_len[detach_ids[0]]
             )
             embs[detach_ids[0], :] = embs_a
-        stt = time.time()
+
         ms_emb_seq = self.get_ms_emb_seq(embs, scale_mapping, ms_seg_counts, ms_seg_timestamps)
+        
+        batch_embs = ms_emb_seq.reshape(-1, ms_emb_seq.shape[-3], ms_emb_seq.shape[-1])
+        batch_cos_sim = cos_similarity_batch(batch_embs, batch_embs).reshape(ms_emb_seq.shape[0], ms_emb_seq.shape[2], ms_emb_seq.shape[1], ms_emb_seq.shape[1])
+        batch_cos_sim = torch.mean(batch_cos_sim, dim=1) # Average over scales: (batch_size, base scale timesteps, base scale timesteps)
+
         ms_avg_embs = self.get_cluster_avg_embs_model(ms_emb_seq, clus_label_index, ms_seg_counts, scale_mapping)
 
         preds, scale_weights = self.msdd(
             ms_emb_seq=ms_emb_seq, length=sequence_lengths, ms_avg_embs=ms_avg_embs, targets=targets
         )
-        return preds, scale_weights
+        return preds, scale_weights, batch_cos_sim
 
     def training_step(self, batch: list, batch_idx: int):
         features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets = batch
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts.detach()])
-        preds, _ = self.forward(
+        preds, _, batch_affinity_mat = self.forward(
             features=features,
             feature_length=feature_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -829,25 +895,32 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         # preds.requires_grad = True
         # preds = (preds + add_s)/2
 
-        loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+        loss_1 = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+        loss_2 = self.affinity_loss.forward(batch_affinity_mat=batch_affinity_mat, targets=targets)
+        # print(f"loss_1: {(1-self.alpha)*loss_1}, loss_2: {self.alpha*loss_2}")
+        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
+            # probs=preds, labels=targets, signal_lengths=sequence_lengths)
         self._accuracy_train(preds, targets, sequence_lengths)
         torch.cuda.empty_cache()
         f1_acc = self._accuracy_train.compute()
         self.log('loss', loss, sync_dist=True)
+        self.log('loss_bce', (1-self.alpha) * loss_1, sync_dist=True)
+        self.log('loss_aff', self.alpha * loss_2, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
         self.log('train_f1_acc', f1_acc, sync_dist=True)
-        # print("train_f1_acc", f1_acc)
         # print("_speaker_model weight change check:", self.state_dict()['msdd._speaker_model.encoder.encoder.0.mconv.0.conv.weight'][0][0][0].item())
         # print("_speaker_model weight change check:", self.state_dict()['msdd._speaker_model.encoder.encoder.0.mconv.0.conv.weight'][1][0][0].item())
         # print("_speaker_model weight change check:", self.state_dict()['msdd._speaker_model.encoder.encoder.0.mconv.0.conv.weight'][2][0][0].item())
         # print("msdd weight change check:", self.state_dict()['msdd.lstm.weight_ih_l0'])
         self._accuracy_train.reset()
+        # print("train_f1_acc", f1_acc)
         return {'loss': loss}
 
     def validation_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
         features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets = batch
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
-        preds, _ = self.forward(
+
+        preds, _, batch_affinity_mat = self.forward(
             features=features,
             feature_length=feature_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -861,11 +934,15 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         # preds.requires_grad = True
         # preds = (preds + add_s)/2
 
-        loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+        loss_1 = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+        loss_2 = self.affinity_loss.forward(batch_affinity_mat=batch_affinity_mat, targets=targets)
+        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
         self._accuracy_valid(preds, targets, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
         self.log('val_loss', loss, sync_dist=True)
         self.log('val_f1_acc', f1_acc, sync_dist=True)
+        self.log('val_loss_bce', (1-self.alpha) * loss_1, sync_dist=True)
+        self.log('val_loss_aff',  self.alpha * loss_2, sync_dist=True)
         # print("val_f1_acc", f1_acc)
         return {
             'val_loss': loss,

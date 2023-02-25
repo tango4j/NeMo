@@ -226,7 +226,6 @@ class _AudioMSDDTrainDataset(Dataset):
         self.global_rank = global_rank
         self.manifest_filepath = manifest_filepath
         self.min_subsegment_duration = min_subsegment_duration
-        # num_workers = 1
         self.num_workers = num_workers
         self.multiscale_timestamp_dict = prepare_split_data(
             self.manifest_filepath, 
@@ -239,44 +238,6 @@ class _AudioMSDDTrainDataset(Dataset):
 
     def __len__(self):
         return len(self.collection)
-
-    def assign_labels_to_longer_segs(self, uniq_id, base_scale_clus_label):
-        """
-        Assign the generated speaker labels from the base scale (the finest scale) to the longer scales.
-        This process is needed to get the cluster labels for each scale. The cluster labels are needed to
-        calculate the cluster-average speaker embedding for each scale.
-
-        Args:
-            uniq_id (str):
-                Unique sample ID for training.
-            base_scale_clus_label (torch.tensor):
-                Tensor variable containing the speaker labels for the base-scale segments.
-        
-        Returns:
-            per_scale_clus_label (torch.tensor):
-                Tensor variable containing the speaker labels for each segment in each scale.
-                Note that the total length of the speaker label sequence differs over scale since
-                each scale has a different number of segments for the same session.
-
-            scale_mapping (torch.tensor):
-                Matrix containing the segment indices of each scale. scale_mapping is necessary for reshaping the
-                multiscale embeddings to form an input matrix for the MSDD model.
-        """
-        per_scale_clus_label = []
-        self.scale_n = len(self.multiscale_timestamp_dict[uniq_id]['scale_dict'])
-        uniq_scale_mapping = get_scale_mapping_list(self.multiscale_timestamp_dict[uniq_id])
-        for scale_index in range(self.scale_n):
-            new_clus_label = []
-            scale_seq_len = len(self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_index]["time_stamps"])
-            for seg_idx in range(scale_seq_len):
-                if seg_idx in uniq_scale_mapping[scale_index]:
-                    seg_clus_label = mode(base_scale_clus_label[uniq_scale_mapping[scale_index] == seg_idx])
-                else:
-                    seg_clus_label = 0 if len(new_clus_label) == 0 else new_clus_label[-1]
-                new_clus_label.append(seg_clus_label)
-            per_scale_clus_label.extend(new_clus_label)
-        per_scale_clus_label = torch.tensor(per_scale_clus_label)
-        return per_scale_clus_label, uniq_scale_mapping
 
     def get_diar_target_labels(self, uniq_id, sample, fr_level_target):
         """
@@ -301,27 +262,23 @@ class _AudioMSDDTrainDataset(Dataset):
         """
         seg_target_list, base_clus_label = [], []
         self.scale_n = len(self.multiscale_timestamp_dict[uniq_id]['scale_dict'])
-        subseg_time_stamp_list = self.multiscale_timestamp_dict[uniq_id]["scale_dict"][self.scale_n - 1]["time_stamps"]
-        for (seg_stt, seg_end) in subseg_time_stamp_list:
-            seg_stt_fr, seg_end_fr = int(seg_stt * self.frame_per_sec), int(seg_end * self.frame_per_sec)
-            soft_label_vec_sess = torch.sum(fr_level_target[seg_stt_fr:seg_end_fr, :], axis=0) / (
-                seg_end_fr - seg_stt_fr
-            )
-            label_int_sess = torch.argmax(soft_label_vec_sess)
-            soft_label_vec = soft_label_vec_sess.unsqueeze(0)[:, sample.target_spks].squeeze()
-            if any(torch.isnan(soft_label_vec)):
-                raise ValueError(f"NaN value in soft_label_vec: {soft_label_vec} for uniq_id: {uniq_id}")
-            if label_int_sess in sample.target_spks and torch.sum(soft_label_vec_sess) > 0:
-                label_int = sample.target_spks.index(label_int_sess)
-            else:
-                label_int = -1
-            label_vec = (soft_label_vec > self.soft_label_thres).float()
-            seg_target_list.append(label_vec.detach())
-            base_clus_label.append(label_int)
-        seg_target = torch.stack(seg_target_list)
-        if torch.min(seg_target) < 0 or torch.max(seg_target) > 1:
-            raise ValueError(f"seg_target of uniq_id {uniq_id} has invalid value. seg_target: {seg_target}")
-        base_clus_label = torch.tensor(base_clus_label)
+        subseg_time_stamp_array = self.multiscale_timestamp_dict[uniq_id]["scale_dict"][self.scale_n - 1]["time_stamps"]
+        ts_mat_int = (torch.tensor(subseg_time_stamp_array) * self.frame_per_sec).long()
+        
+        soft_label_vec_list = [] 
+        # for index, (seg_stt, seg_end) in enumerate(subseg_time_stamp_array):
+        for index in range(subseg_time_stamp_array.shape[0]):
+            seg_stt_fr, seg_end_fr = ts_mat_int[index, 0], ts_mat_int[index, 1]
+            soft_label_vec_list.append(torch.sum(fr_level_target[seg_stt_fr:seg_end_fr, :], axis=0))
+
+        soft_label_sum= torch.stack(soft_label_vec_list)
+        label_total = soft_label_sum.sum(dim=1)
+        label_total[label_total == 0] = 1 # Avoid divide by zero by assigning 1
+        soft_label_vec = (soft_label_sum.t()/label_total).t()
+
+        base_clus_label = soft_label_vec.argmax(dim=1) 
+        base_clus_label[label_total == 0] = -1 # If there is no existing label, put -1 
+        seg_target = (soft_label_vec >= self.soft_label_thres).float()
         return seg_target, base_clus_label
 
     def parse_rttm_for_ms_targets(self, sample):
@@ -348,17 +305,17 @@ class _AudioMSDDTrainDataset(Dataset):
             scale_mapping (torch.tensor):
                 Matrix containing the segment indices of each scale. scale_mapping is necessary for reshaping the
                 multiscale embeddings to form an input matrix for the MSDD model.
-
         """
         rttm_lines = open(sample.rttm_file).readlines()
         uniq_id = self.get_uniq_id_with_range(sample)
         rttm_timestamps = extract_seg_info_from_rttm(uniq_id, rttm_lines)
-        fr_level_target = assign_frame_level_spk_vector(
-            rttm_timestamps, self.round_digits, self.frame_per_sec, target_spks=sample.target_spks
-        )
+        fr_level_target = assign_frame_level_spk_vector(rttm_timestamps, 
+                                                        self.round_digits, 
+                                                        self.frame_per_sec, 
+                                                        target_spks=sample.target_spks)
         seg_target, base_clus_label = self.get_diar_target_labels(uniq_id, sample, fr_level_target)
-        clus_label_index, scale_mapping = self.assign_labels_to_longer_segs(uniq_id, base_clus_label)
-        return clus_label_index, seg_target, scale_mapping
+        scale_mapping = get_scale_mapping_list(self.multiscale_timestamp_dict[uniq_id])
+        return base_clus_label, seg_target, scale_mapping
 
     def get_uniq_id_with_range(self, sample, deci=3):
         """
@@ -374,7 +331,6 @@ class _AudioMSDDTrainDataset(Dataset):
             uniq_id (str):
                 Unique sample ID which includes start and end time of the audio stream.
                 Example: abc1001_3122_6458
-
         """
         bare_uniq_id = os.path.splitext(os.path.basename(sample.rttm_file))[0]
         offset = str(int(round(sample.offset, deci) * pow(10, deci)))
@@ -401,22 +357,10 @@ class _AudioMSDDTrainDataset(Dataset):
         max_seq_len = len(self.multiscale_timestamp_dict[uniq_id]["scale_dict"][self.scale_n - 1]["time_stamps"])
         ms_seg_counts = [0 for _ in range(self.scale_n)]
         for scale_idx in range(self.scale_n):
-            scale_ts_list = []
-            for k, (seg_stt, seg_end) in enumerate(
-                self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_idx]["time_stamps"]
-            ):
-                stt, end = (
-                    int((seg_stt - sample.offset) * self.frame_per_sec),
-                    int((seg_end - sample.offset) * self.frame_per_sec),
-                )
-                if abs(stt - end) < 2:
-                    import ipdb; ipdb.set_trace()
-                scale_ts_list.append(torch.tensor([stt, end]).detach())
-            ms_seg_counts[scale_idx] = len(
-                self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_idx]["time_stamps"]
-            )
-            scale_ts = torch.stack(scale_ts_list)
-            scale_ts_padded = torch.cat([scale_ts, torch.zeros(max_seq_len - len(scale_ts_list), 2)], dim=0)
+            ts_tensor = torch.tensor(self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_idx]["time_stamps"])
+            scale_ts_tensor = ((ts_tensor - sample.offset) * self.frame_per_sec).long() 
+            ms_seg_counts[scale_idx] = scale_ts_tensor.shape[0]      
+            scale_ts_padded = torch.cat([scale_ts_tensor, torch.zeros(max_seq_len - scale_ts_tensor.shape[0], 2)], dim=0)
             ms_seg_timestamps_list.append(scale_ts_padded.detach())
         ms_seg_timestamps = torch.stack(ms_seg_timestamps_list)
         ms_seg_counts = torch.tensor(ms_seg_counts)
@@ -676,7 +620,7 @@ def _msdd_train_collate_fn(self, batch):
         padded_tgt = torch.nn.functional.pad(tgt, pad_tgt)
         padded_sm = torch.nn.functional.pad(scl_map, pad_sm)
         padded_ms_seg_ts = torch.nn.functional.pad(ms_seg_ts, pad_ts)
-        padded_scale_clus = torch.nn.functional.pad(scale_clus, pad_sc)
+        padded_scale_clus = torch.nn.functional.pad(scale_clus, pad_sc, value=-1)
 
         features_list.append(padded_feat)
         feature_length_list.append(feat_len.clone().detach())

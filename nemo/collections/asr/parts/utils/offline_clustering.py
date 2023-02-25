@@ -36,6 +36,71 @@ from typing import Dict, List, Tuple
 import torch
 from torch.linalg import eigh, eigvalsh
 
+def estimate_num_of_speakers_batch(affinity_mat_batch: torch.Tensor, max_num_speakers: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Estimate the number of speakers using eigendecomposition on the Laplacian Matrix of multiple
+    affinity matrices in a batch mode.
+
+    Args:
+        affinity_mat_batch(Tensor):
+            affinity matrix with dimension: (batch size, num of segments, num of segments)
+        max_num_speakers (int):
+            Maximum number of clusters to consider for each session
+
+    Returns:
+        num_of_spk (Tensor):
+            The estimated number of speakers
+        lambdas (Tensor):
+            The lambda values from eigendecomposition
+        lambda_gap (Tensor):
+            The gap between the lambda values from eigendecomposition
+    """
+    laplacian = get_laplacian_batch(affinity_mat_batch)
+    lambdas = eigvalsh(laplacian)
+    sorted_lambdas, _ = torch.sort(lambdas, dim=1)
+    lambda_gap = get_lambda_gap_list_batch(sorted_lambdas).to(affinity_mat_batch.device)
+    num_of_spk = torch.argmax(lambda_gap[:, :min(max_num_speakers, lambda_gap.shape[0])], dim=1) + 1
+    return num_of_spk, lambdas, lambda_gap
+
+def get_laplacian_batch(X: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate a laplacian matrix from an affinity matrix X.
+    Args:
+        X (torch.Tensor):
+            Affinity matrix
+    
+    Returns:
+        L (torch.Tensor):
+            Laplacian matrix
+    """
+    X = (1 - torch.eye(X.shape[-1]).to(X.device)) * X
+    D = torch.sum(torch.abs(X), dim=1)
+    D = torch.diag_embed(D)
+    try:
+        L = D - X
+    except:
+        import ipdb; ipdb.set_trace()
+    # X.fill_diagonal_(0)
+    # D = torch.sum(torch.abs(X), dim=1)
+    # D = torch.diag_embed(D)
+    # L = D - X
+    return L
+
+def get_lambda_gap_list_batch(lambdas: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate the gaps between lambda values.
+    
+    Args:
+        lambdas (Tensor):
+            Eigenvalues from eigendecomposition 
+
+    Returns:
+        (Tensor):
+            Gaps between eigenvalues
+    """
+    if torch.is_complex(lambdas):
+        lambdas = torch.real(lambdas)
+    return lambdas[:, 1:] - lambdas[:, :-1]
 
 def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
     """
@@ -61,7 +126,60 @@ def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.
     res.fill_diagonal_(1)
     return res
 
+def cos_similarity_batch(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
+    """
+    Calculate cosine similarities of the given two set of tensors. The output is an N by N
+    matrix where N is the number of feature vectors.
 
+    Args:
+        a (Tensor):
+            Matrix containing speaker representation vectors. (N x embedding_dim)
+        b (Tensor):
+            Matrix containing speaker representation vectors. (N x embedding_dim)
+
+    Returns:
+        res (Tensor):
+            N by N matrix containing the cosine similarities of the values.
+    """
+    # If number of embedding count is 1, it creates nan values
+    if emb_a.shape[1] == 1 or emb_b.shape[1] == 1:
+        raise ValueError(f"Number of feature vectors should be greater than 1 but got {emb_a.shape} and {emb_b.shape}")
+    # a_norm = emb_a / (torch.norm(emb_a, dim=2).unsqueeze(1) + eps)
+    # b_norm = emb_b / (torch.norm(emb_b, dim=2).unsqueeze(1) + eps)
+    a_norm = emb_a / torch.tile((torch.norm(emb_a, dim=2).unsqueeze(2) + eps), (1,1,emb_a.shape[-1]))
+    b_norm = emb_b / torch.tile((torch.norm(emb_b, dim=2).unsqueeze(2) + eps), (1,1,emb_a.shape[-1]))
+    res = torch.bmm(a_norm, b_norm.transpose(1, 2))
+    # res.fill_diagonal_(2)
+    # res.reshape(res.shape[1], res.shape[0]* res.shape[1]).fill_diagonal_(1, wrap=True)
+    return res
+
+def get_binarized_batch_affinity_mat(batch_affinity_mat, p_value):
+    affinity_mat = batch_affinity_mat.reshape(batch_affinity_mat.shape[1] * batch_affinity_mat.shape[0], batch_affinity_mat.shape[1])
+    dim = affinity_mat.shape
+    binarized_batch_affinity_mat = torch.zeros_like(affinity_mat)
+    batch_sorted_idx = torch.argsort(affinity_mat, dim=1, descending=True)
+    indices_row = batch_sorted_idx[:, :p_value.item()].flatten()
+    indices_col = torch.arange(dim[0]).t().repeat(p_value, 1).flatten()
+    # binarized_batch_affinity_mat[indices_row, indices_col] = torch.ones(indices_row.shape[0]).to(affinity_mat.device).int()
+    binarized_batch_affinity_mat[indices_col, indices_row] = torch.ones(indices_row.shape[0]).to(affinity_mat.device)
+    binarized_batch_affinity_mat = binarized_batch_affinity_mat.reshape(batch_affinity_mat.shape[0], batch_affinity_mat.shape[1], batch_affinity_mat.shape[2])
+    return binarized_batch_affinity_mat
+
+
+def batch_speaker_count(ms_emb_seq, p_value):
+    try:
+        batch_embs = ms_emb_seq.reshape(-1, ms_emb_seq.shape[-3], ms_emb_seq.shape[-1])
+    except:
+        import ipdb; ipdb.set_trace()
+    batch_cos_sim = cos_similarity_batch(batch_embs, batch_embs).reshape(ms_emb_seq.shape[0], ms_emb_seq.shape[2], ms_emb_seq.shape[1], ms_emb_seq.shape[1])
+    batch_sum_cos_sim = torch.sum(batch_cos_sim, dim=1) 
+    soft_label_thres = 0.9
+    p_value = int(p_value *  ms_emb_seq.shape[1])
+    # batch_sum_cos_sim[batch_sum_cos_sim > soft_label_thres ] = 1
+    X = get_binarized_batch_affinity_mat(batch_affinity_mat=batch_sum_cos_sim, p_value=torch.tensor(p_value))
+    symm_affinity_mat = 0.5 * (X + X.transpose(1,2))
+    est_n, _, _ = estimate_num_of_speakers_batch(symm_affinity_mat, max_num_speakers=8)
+    return est_n
 def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
     """
     Min-max scale the input affinity matrix X, which will lead to a dynamic range of [0, 1].
@@ -78,6 +196,37 @@ def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
     v_norm = (X - v_min) / (v_max - v_min)
     return v_norm
 
+def ScalerMinMaxBatch(X: torch.Tensor) -> torch.Tensor:
+    """
+    Min-max scale the input affinity matrix X, which will lead to a dynamic range of [0, 1].
+
+    Args:
+        X (Tensor):
+            Matrix containing cosine similarity values among embedding vectors (N x N)
+
+    Returns:
+        v_norm (Tensor):
+            Min-max normalized value of X.
+    """
+    v_min, v_max = X.min(), X.max()
+    v_norm = (X - v_min) / (v_max - v_min)
+    return v_norm
+
+def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
+    """
+    Min-max scale the input affinity matrix X, which will lead to a dynamic range of [0, 1].
+
+    Args:
+        X (Tensor):
+            Matrix containing cosine similarity values among embedding vectors (N x N)
+
+    Returns:
+        v_norm (Tensor):
+            Min-max normalized value of X.
+    """
+    v_min, v_max = X.min(), X.max()
+    v_norm = (X - v_min) / (v_max - v_min)
+    return v_norm
 
 def getEuclideanDistance(
     specEmbA: torch.Tensor, specEmbB: torch.Tensor, device: torch.device = torch.device('cpu')

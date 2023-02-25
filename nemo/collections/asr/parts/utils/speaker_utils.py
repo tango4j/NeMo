@@ -31,7 +31,8 @@ from nemo.collections.asr.parts.utils.offline_clustering import SpeakerClusterin
 from nemo.utils import logging
 import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor, wait
-
+import hashlib
+import pickle
 
 """
 This file contains all the utility functions required for speaker embeddings part in diarization scripts
@@ -608,7 +609,6 @@ def write_overlap_segments(
         # Skip the segment if its duration is less than min_segment_duration
         if round(end - stt, decimals) < min_segment_duration:
             continue
-
         # Write the json dictionary into the specified manifest file.
         meta = {
             "audio_filepath": AUDIO_RTTM_MAP[uniq_id]['audio_filepath'],
@@ -617,7 +617,6 @@ def write_overlap_segments(
             "label": 'UNK',
             "uniq_id": uniq_id,
         }
-
         # Write the json dictionary into the specified manifest file.
         json.dump(meta, outfile)
         outfile.write("\n")
@@ -878,6 +877,54 @@ def get_sub_range_list(target_range: List[float], source_range_list: List[List[f
                 out_range.append(ovl_range)
         return out_range
 
+def mp_write_rttm2manifest(
+    AUDIO_RTTM_MAP: str, 
+    manifest_file_path: str, 
+    min_segment_duration: float,
+    include_uniq_id: bool = False,
+    decimals: int = 5, 
+    tqdm_enabled: bool = True,
+    num_workers: int = 1,
+) -> str:
+    """
+    Write manifest file based on rttm files (or vad table out files). This manifest file would be used by
+    speaker diarizer to compute embeddings and cluster them. This function takes care of overlapping VAD timestamps
+    and trimmed with the given offset and duration value.
+    """
+    use_mp = True if num_workers > 1 else False
+    tqdm_enabled_each_split = False
+    if use_mp:
+        audio_rttm_list_split = get_split_audio_rttm_map(AUDIO_RTTM_MAP, num_workers)
+        tp = ProcessPoolExecutor()
+        futures = []
+        vad_json_path_list = []
+        for split_index, split_audio_rttm_map_dict in enumerate(audio_rttm_list_split):
+            _speaker_manifest_path = manifest_file_path.replace('.json', f'.{split_index}.json')
+            futures.append(tp.submit(write_rttm2manifest, 
+                                    split_audio_rttm_map_dict,
+                                    _speaker_manifest_path, 
+                                    min_segment_duration,
+                                    include_uniq_id,
+                                    decimals,
+                                    tqdm_enabled_each_split)
+            )
+            vad_json_path_list.append(_speaker_manifest_path)
+        
+        pbar = tqdm(total=len(audio_rttm_list_split), desc="Writing VAD manifest files", unit=" splits")
+        for f in concurrent.futures.as_completed(futures):
+            pbar.update()
+        pbar.close()
+        tp.shutdown()
+            
+            # done, pending = concurrent.futures.wait(futures) # ALL_COMPLETED is the default value
+        merge_and_write_text_files(vad_json_path_list, manifest_file_path, delete_orgs=False)
+    else:
+        write_rttm2manifest(AUDIO_RTTM_MAP,
+                            manifest_file_path, 
+                            min_segment_duration,
+                            include_uniq_id,
+                            decimals,
+                            tqdm_enabled)
 
 def write_rttm2manifest(
     AUDIO_RTTM_MAP: str, 
@@ -971,39 +1018,6 @@ def get_vad_segments_from_rttm(
             target_range=[offset, offset + duration]
         )
     return overlap_range_list
-
-
-# def mp_write_rttm2manifest(
-#     AUDIO_RTTM_MAP: str, manifest_file: str, include_uniq_id: bool = False, decimals: int = 5, tqdm_enabled: bool = False
-# ) -> str:
-#     """
-#     Write manifest file based on rttm files (or vad table out files). This manifest file would be used by
-#     speaker diarizer to compute embeddings and cluster them. This function takes care of overlapping VAD timestamps
-#     and trimmed with the given offset and duration value.
-
-#     Args:
-#         AUDIO_RTTM_MAP (dict):
-#             Dictionary containing keys to unique names, that contains audio filepath and rttm_filepath as its contents,
-#             these are used to extract oracle vad timestamps.
-#         manifest (str):
-#             The path to the output manifest file.
-
-#     Returns:
-#         manifest (str):
-#             The path to the output manifest file.
-#     """
-#     with open(manifest_file, 'w') as outfile:
-#         for uniq_id in tqdm(AUDIO_RTTM_MAP, desc="Writing VAD manifest file", unit="files", disable=not tqdm_enabled):
-#             rttm_file_path = AUDIO_RTTM_MAP[uniq_id]['rttm_filepath']
-#             rttm_lines = read_rttm_lines(rttm_file_path)
-#             offset, duration = get_offset_and_duration(AUDIO_RTTM_MAP, uniq_id, decimals)
-#             overlap_range_list = get_vad_segments_from_rttm(rttm_lines, offset, duration, decimals)
-#         # write_total_overlap_segments(outfile=outfile,
-#         #                             AUDIO_RTTM_MAP=AUDIO_RTTM_MAP,
-#         #                             uniq_id=uniq_id,
-#         #                             overlap_range_dict=overlap_range_dict, 
-#         #                             decimals=decimals)
-#     return manifest_file
 
 def start_dur_to_start_end(subsegments: List[List[float]]) -> List[List[float]]:
     """
@@ -1103,9 +1117,7 @@ def segments_manifest_to_subsegments_manifest(
                 uniq_id = dic['uniq_id']
             else:
                 uniq_id = None
-            # if uniq_id == 'libri_to5_diar_sim_4spks_240s_2384.1715_4993_170521_191329':
-            if duration < 0.01:
-                import ipdb; ipdb.set_trace()
+            
             if get_dict:
                 ts_list = start_dur_to_start_end(subsegments)
                 if uniq_id in subsegment_dict:
@@ -1126,57 +1138,75 @@ def segments_manifest_to_subsegments_manifest(
         output = subsegments_manifest_file
     return output
 
+def get_split_audio_rttm_map(AUDIO_RTTM_MAP: dict, num_workers: int) -> List[dict]:
+    """
+    Split audio rttm map into num_workers chunks.
+
+    Args:
+        AUDIO_RTTM_MAP (dict):
+            Dictionary containing the mapping between audio file and rttm file.
+        num_workers (int):
+            Number of workers to split the audio rttm map into.
+
+    Returns:
+        audio_rttm_map_list_split (list):
+            List containing the split audio rttm map.
+    """
+    audio_rttm_map_list = list(AUDIO_RTTM_MAP.items())
+    audio_rttm_map_list_split = np.array_split(audio_rttm_map_list, num_workers)
+    audio_rttm_map_list_split = [dict(audio_rttm_map_list_split[i]) for i in range(num_workers)]
+    return audio_rttm_map_list_split
+
 def mp_segments_manifest_to_subsegments_manifest(
-    segments_manifest_file: str,
-    subsegments_manifest_file: str = None,
+    split_seg_manifest_files_list: List[Tuple[str, str]],
     window: float = 1.5,
     shift: float = 0.75,
     min_subsegment_duration: float = 0.05,
     include_uniq_id: bool = False,
     get_dict: bool = False,
     num_workers: int = 12,
-    global_rank: int = 0,
+    task_index: int = 0,
 ):
     """
     Multiprocessing version of segments_manifest_to_subsegments_manifest function.
 
     """
-    split_seg_manifest_files_list = split_segments_manifest_files(segments_manifest_file, subsegments_manifest_file, num_workers=num_workers, global_rank=global_rank)
-
     futures = []
     _subsegments_manifest_dict = {}
     _subsegments_manifest_dict_list = []
-    with ProcessPoolExecutor() as tp:
-        for (seg_path, subseg_path) in split_seg_manifest_files_list:
-            futures.append(tp.submit(segments_manifest_to_subsegments_manifest, 
-                                     seg_path, 
-                                     subseg_path, 
-                                     window, 
-                                     shift, 
-                                     min_subsegment_duration, 
-                                     include_uniq_id, 
-                                     get_dict))
+    
+    tp = ProcessPoolExecutor()
+    for (seg_path, subseg_path) in split_seg_manifest_files_list:
+        futures.append(tp.submit(segments_manifest_to_subsegments_manifest, 
+                                    seg_path, 
+                                    subseg_path, 
+                                    window, 
+                                    shift, 
+                                    min_subsegment_duration, 
+                                    include_uniq_id, 
+                                    get_dict))
+    
+    # done, pending = concurrent.futures.wait(futures) # ALL_COMPLETED is the default value
+    pbar = tqdm(total=len(split_seg_manifest_files_list), desc='Generating subsegment files', unit=' splits')
+    for task in concurrent.futures.as_completed(futures):
+        _subsegments_manifest_dict_list.append(task.result())
+        pbar.update()
+    tp.shutdown()
+    pbar.close()
 
-        done, pending = concurrent.futures.wait(futures) # ALL_COMPLETED is the default value
-        for task in done:
-            _subsegments_manifest_dict_list.append(task.result())
+    # The results are divided into multiple dictionaries, we need to merge them into one dictionary
+    for part_dict in _subsegments_manifest_dict_list:
+        for key in part_dict:
+            if key in _subsegments_manifest_dict:
+                _subsegments_manifest_dict[key].extend(part_dict[key])
+            else:
+                _subsegments_manifest_dict[key] = part_dict[key]
 
-        # The results are divided into multiple dictionaries, we need to merge them into one dictionary
-        for part_dict in _subsegments_manifest_dict_list:
-            for key in part_dict:
-                if key in _subsegments_manifest_dict:
-                    _subsegments_manifest_dict[key].extend(part_dict[key])
-                else:
-                    _subsegments_manifest_dict[key] = part_dict[key]
-
-        # Sort the timestamps in each key (This must be done to ensure that the timestamps are in order)
-        for key, val_lists in _subsegments_manifest_dict.items():
-            ts_array = np.sort(np.array(val_lists), axis=0)
-            _subsegments_manifest_dict[key] = ts_array.tolist()
-        # Remove split subsegments manifest files
-        for (seg_path, subseg_path) in split_seg_manifest_files_list:
-            os.remove(seg_path)
-            os.remove(subseg_path)
+    # Sort the timestamps in each key (This must be done to ensure that the timestamps are in order)
+    for key, val_lists in _subsegments_manifest_dict.items():
+        ts_array = np.sort(np.array(val_lists), axis=0)
+        _subsegments_manifest_dict[key] = ts_array
+        # _subsegments_manifest_dict[key] = _subsegments_manifest_dict[key].tolist()
 
     return _subsegments_manifest_dict
 
@@ -1804,14 +1834,34 @@ from nemo.collections.asr.parts.utils.manifest_utils import (
     write_manifest,
 )
 
+def get_split_list(total_list: List, num_workers: int = 0) -> List[List]:
+    """
+    Split the list into multiple lists.
+    
+    Args:
+        total_list (list):
+            List to be split into multiple lists of equal size.
+        num_workers (int):
+            Number of splits to be made from the `total_list`.
+    
+    Returns:
+        split_list (list):
+            List containing the split lists.
+    """
+    split_list = []
+    chunk_size = len(total_list) // num_workers
+    for i in range(0, len(total_list), chunk_size):        
+        split_list.append(total_list[i:i+chunk_size])
+    return split_list
+
 def split_segments_manifest_files(
     segments_manifest_file: str, 
-    subsegments_manifest_file, 
-    num_workers: int =1, 
+    subsegments_manifest_file: str, 
+    num_workers: int = 0, 
     global_rank: int = 0
     ) -> List[List[float]]:
     """
-    Split the segments manifest file into multiple files. 
+    Split the segments manifest file into multiple files for multiprocessing.
     If number of workers is 1, split process is bypassed and the original segments manifest file is returned.
 
     Args:
@@ -1819,31 +1869,194 @@ def split_segments_manifest_files(
             Path to the segments manifest file.
         subsegments_manifest_file (str):
             The destination path to the subsegments manifest file.
-        num_workers (int):
-            Number of workers to split the manifest file for multi-processing.
 
     Returns:
         path_list (list):
             List containing the path to the split segments manifest file and the subsegments manifest file.
     """
     total_list = read_manifest(segments_manifest_file)    
-    split_list, path_list = [], []
-    if len(total_list) > num_workers:
-        chunk_size = len(total_list) // num_workers
-        for i in range(0, len(total_list), chunk_size):        
-            split_list.append(total_list[i:i+chunk_size])
+    num_workers = min(max(1, num_workers), len(total_list))
+    path_list = []
+    if len(total_list) > 0:
+        # Chunk dictionary into size num_split 
+        split_list = get_split_list(total_list=total_list, num_workers=num_workers)
         path_split_seg = os.path.splitext(segments_manifest_file)
         path_split_subseg = os.path.splitext(subsegments_manifest_file)
-        for idx, chunk_list in enumerate(split_list):
-            temp_path_seg = f"{path_split_seg[0]}.split{idx}.rank{global_rank}json"
+        for idx, chunk_list in enumerate(tqdm(split_list, desc="Splitting segments manifest file", unit=" jobs")):
+            temp_path_seg = f"{path_split_seg[0]}.split{idx}.rank{global_rank}.json"
             temp_path_subseg = f"{path_split_subseg[0]}.split{idx}.rank{global_rank}.json"
             write_manifest(output_path=temp_path_seg, target_manifest=chunk_list)
             path_list.append([temp_path_seg, temp_path_subseg])
-    else:
-        path_list.append([segments_manifest_file, subsegments_manifest_file])
     return path_list
 
+def merge_and_write_text_files(
+    json_files: List[str], 
+    output_file: str, 
+    delete_orgs: bool = False,
+    ) -> str:
+    """
+    Merge multiple json files into one json file.
+
+    Args:
+        json_files (list):
+            List containing the path to the json files.
+        output_file (str):
+            The destination path to the merged json file.
+        num_workers (int):
+            Number of workers to merge the json files for multi-processing.
+    """
+    merged_json = []
+    with open(output_file, 'w') as outfile:
+        for fname in json_files:
+            with open(fname) as infile:
+                for line in infile:
+                    outfile.write(line)
+    if delete_orgs:
+        remove_files_in_list(json_files)
+
 def prepare_split_data(
+    manifest_filepath: str, 
+    _out_dir: str, 
+    multiscale_args_dict: Dict,
+    global_rank: int, 
+    min_subsegment_duration: float =0.05, 
+    num_workers: int =1, 
+    meta_file_name="msdd_ts_dict_") -> Dict:
+    """
+    This function is needed for preparing diarization training data for multiscale diarization decoder (MSDD).
+    Prepare multiscale timestamp data for training. Oracle VAD timestamps from RTTM files are used as VAD timestamps.
+    In this function, timestamps for embedding extraction are extracted without extracting the embedding vectors.
+
+    Args:
+        manifest_filepath (str):
+            Input manifest file for creating audio-to-RTTM mapping.
+        _out_dir (str):
+            Output directory where timestamp json files are saved.
+        multiscale_args_dict (dict):
+            Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+        global_rank (int):
+            Global rank of the current process during distributed training.
+        min_subsegment_duration (float):
+            Minimum duration of subsegment in seconds to filter out extremely short subsegments.
+        num_workers (int):
+            Number of workers to split the manifest file for multi-processing.
+
+    Returns:
+        multiscale_args_dict (dict):
+            - Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+            - Each data sample has two keys: `multiscale_weights` and `scale_dict`.
+                - `multiscale_weights` key contains a list containing multiscale weights.
+                - `scale_dict` is indexed by integer keys which are scale index.
+            - Each data sample is indexed by using the following naming convention: `<uniq_id>_<start time in ms>_<end time in ms>`
+                Example: `fe_03_00106_mixed_626310_642300`
+    """
+    audio_rttm_map_dict = get_audio_rttm_map(manifest_filepath, attach_dur=True)
+    file_hash = get_hash_from_setups(multiscale_args_dict, audio_rttm_map_dict, min_subsegment_duration, last_n_digits=8)
+    speaker_dir = os.path.join(_out_dir, 'speaker_outputs')
+
+    # Check if there is a pickle file that is identical to file_hash.
+    if os.path.exists(os.path.join(speaker_dir, f'{meta_file_name}{file_hash}.pkl')):
+        logging.info(f"Loading pre-calculated multiscale timestamps from {os.path.join(speaker_dir, f'{meta_file_name}{file_hash}.pkl')}")
+        with open(os.path.join(speaker_dir, f'{meta_file_name}{file_hash}.pkl'), 'rb') as f:
+            multiscale_timestamps_by_scale = pickle.load(f)
+        return multiscale_timestamps_by_scale
+    # Only if this is for the first run of modelPT instance, remove temp folders.
+    if global_rank == 0:
+        if os.path.exists(speaker_dir):
+            shutil.rmtree(speaker_dir)
+        os.makedirs(speaker_dir)
+
+    _speaker_manifest_path = os.path.join(speaker_dir, f'oracle_vad_manifest.json')
+    mp_write_rttm2manifest(AUDIO_RTTM_MAP=audio_rttm_map_dict,
+                           manifest_file_path=_speaker_manifest_path, 
+                           min_segment_duration=min_subsegment_duration, 
+                           include_uniq_id=True, 
+                           decimals = 5,
+                           tqdm_enabled=True,
+                           num_workers=num_workers,
+                           )
+    
+    # Segmentation
+    use_mp = True if num_workers > 1 else False
+    multiscale_timestamps_by_scale = {}
+    
+    subsegments_manifest_path = os.path.join(speaker_dir, f'subsegments_scale.json')
+    logging.info(f"Splitting the manifest file {_speaker_manifest_path} for multi-processing.")
+    split_seg_manifest_files_list = split_segments_manifest_files(_speaker_manifest_path, 
+                                                                  subsegments_manifest_path, 
+                                                                  num_workers=num_workers, 
+                                                                  global_rank=global_rank)
+
+    for scale_idx, (window, shift) in multiscale_args_dict['scale_dict'].items():
+        if not os.path.exists(subsegments_manifest_path):
+            # Sub-segmentation for the current scale (scale_idx)
+            logging.info(f"Generating the subsegment timestamp data for scale {scale_idx}.")
+            if use_mp:
+                subsegments_manifest_dict = mp_segments_manifest_to_subsegments_manifest(
+                    split_seg_manifest_files_list=split_seg_manifest_files_list,
+                    window=window,
+                    shift=shift,
+                    min_subsegment_duration=min_subsegment_duration,
+                    include_uniq_id=True,
+                    get_dict=True,
+                    num_workers=num_workers,
+                    task_index=scale_idx,
+                ) 
+            else:
+                # Speech Activity Detection part
+                subsegments_manifest_dict = segments_manifest_to_subsegments_manifest(
+                    segments_manifest_file=_speaker_manifest_path,
+                    subsegments_manifest_file=subsegments_manifest_path,
+                    window=window,
+                    shift=shift,
+                    min_subsegment_duration=min_subsegment_duration,
+                    include_uniq_id=True,
+                    get_dict=True,
+                )
+        multiscale_timestamps_by_scale[scale_idx] = subsegments_manifest_dict
+
+    multiscale_timestamps_dict = get_timestamps(multiscale_timestamps_by_scale, multiscale_args_dict)
+    # Remove split subsegments manifest files
+    remove_files_in_list(split_seg_manifest_files_list)
+    
+    # Save a pickle file of multiscale_timestamps_dict
+    with open(os.path.join(speaker_dir, f'msdd_ts_dict_{file_hash}.pkl'), 'wb') as f:
+        pickle.dump(multiscale_timestamps_dict, f)
+
+    return multiscale_timestamps_dict
+
+def remove_files_in_list(file_list):
+    """
+    Remove files in the given list.
+
+    Args:
+        file_list (list): List of files to be removed.
+    """
+    for line in file_list:
+        if type(line) is list:
+            for file in line:
+                os.remove(file)
+        else:
+            os.remove(file)
+
+def get_hash_from_setups(*args, last_n_digits=8):
+    """
+    Generate a hash from the given arguments.
+
+    Args:
+        *args: Arguments to be hashed. It can be a list of numbers, strings, dictionaries, or a combination of both.
+
+    Returns:
+        hash_id (str): Last n digits of the generated hash.
+    """
+    str_enc = ""
+    for arg in args:
+        str_enc += str(arg)
+    str_enc = str_enc.encode('utf-8')
+    hash_id = hashlib.md5(str_enc).hexdigest()
+    return hash_id[-last_n_digits:]
+
+def __prepare_split_data(
     manifest_filepath: str, 
     _out_dir: str, 
     multiscale_args_dict: Dict,
