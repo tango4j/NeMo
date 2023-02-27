@@ -34,12 +34,6 @@ from concurrent.futures import ProcessPoolExecutor, wait
 import hashlib
 import pickle
 
-# from nemo.collections.asr.parts.utils.manifest_utils import (
-#     get_audio_rttm_map,
-#     # read_manifest,
-#     # write_manifest,
-# )
-
 """
 This file contains all the utility functions required for speaker embeddings part in diarization scripts
 """
@@ -1010,38 +1004,6 @@ def start_dur_to_start_end(subsegments: List[List[float]]) -> List[List[float]]:
     ts_list = np.stack((subsegments_mat[:, 0], subsegments_ends), axis=1)
     return ts_list
 
-def get_subsegment_dict(subsegments_manifest_file: str, window: float, shift: float, deci: int) -> Dict[str, dict]:
-    """
-    Get subsegment dictionary from manifest file.
-
-    Args:
-        subsegments_manifest_file (str): Path to subsegment manifest file
-        window (float): Window length for segmentation
-        shift (float): Shift length for segmentation
-        deci (int): Rounding number of decimal places
-    Returns:
-        _subsegment_dict (dict): Subsegment dictionary
-    """
-    _subsegment_dict = {}
-    with open(subsegments_manifest_file, 'r') as subsegments_manifest:
-        segments = subsegments_manifest.readlines()
-        for segment in segments:
-            segment = segment.strip()
-            dic = json.loads(segment)
-            audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
-            subsegments = get_subsegments(offset=offset, window=window, shift=shift, duration=duration)
-            if dic['uniq_id'] is not None:
-                uniq_id = dic['uniq_id']
-            else:
-                uniq_id = get_uniq_id_with_period(audio)
-            if uniq_id not in _subsegment_dict:
-                _subsegment_dict[uniq_id] = {'ts': [], 'json_dic': []}
-            for subsegment in subsegments:
-                start, dur = subsegment
-            _subsegment_dict[uniq_id]['ts'].append([round(start, deci), round(start + dur, deci)])
-            _subsegment_dict[uniq_id]['json_dic'].append(dic)
-    return _subsegment_dict
-
 def write_subsegment2json(
     uniq_id: str, 
     audio_filepath: str, 
@@ -1765,6 +1727,77 @@ def get_id_tup_dict(uniq_id_list: List[str], test_data_collection, preds_list: L
         session_dict[uniq_id].append([line.target_spks, preds_list[idx]])
     return session_dict
 
+
+# def _prepare_split_data(manifest_filepath, _out_dir, multiscale_args_dict, global_rank):
+#     """
+#     [Obsolete function]
+#     This function is needed for preparing diarization training data for multiscale diarization decoder (MSDD).
+#     Prepare multiscale timestamp data for training. Oracle VAD timestamps from RTTM files are used as VAD timestamps.
+#     In this function, timestamps for embedding extraction are extracted without extracting the embedding vectors.
+
+#     Args:
+#         manifest_filepath (str):
+#             Input manifest file for creating audio-to-RTTM mapping.
+#         _out_dir (str):
+#             Output directory where timestamp json files are saved.
+
+#     Returns:
+#         multiscale_args_dict (dict):
+#             - Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+#             - Each data sample has two keys: `multiscale_weights` and `scale_dict`.
+#                 - `multiscale_weights` key contains a list containing multiscale weights.
+#                 - `scale_dict` is indexed by integer keys which are scale index.
+#             - Each data sample is indexed by using the following naming convention: `<uniq_id>_<start time in ms>_<end time in ms>`
+#                 Example: `fe_03_00106_mixed_626310_642300`
+#     """
+#     speaker_dir = os.path.join(_out_dir, 'speaker_outputs')
+
+#     # Only if this is for the first run of modelPT instance, remove temp folders.
+#     if global_rank == 0:
+#         if os.path.exists(speaker_dir):
+#             shutil.rmtree(speaker_dir)
+#         os.makedirs(speaker_dir)
+#     split_audio_rttm_map = get_audio_rttm_map(manifest_filepath, attach_dur=True)
+
+#     # Speech Activity Detection part
+#     _speaker_manifest_path = os.path.join(speaker_dir, f'oracle_vad_manifest.json')
+#     logging.info(f"Extracting oracle VAD timestamps and saving at {speaker_dir}")
+#     if not os.path.exists(_speaker_manifest_path):
+#         write_rttm2manifest(AUDIO_RTTM_MAP=split_audio_rttm_map, 
+#                             manifest_file=_speaker_manifest_path, 
+#                             min_segment_duration=min_subsegment_duration, 
+#                             include_uniq_id=True, 
+#                             tqdm_enabled=True)
+
+#     multiscale_timestamps_by_scale = {}
+
+#     # Segmentation
+#     for scale_idx, (window, shift) in multiscale_args_dict['scale_dict'].items():
+#         subsegments_manifest_path = os.path.join(speaker_dir, f'subsegments_scale{scale_idx}.json')
+#         if not os.path.exists(subsegments_manifest_path):
+#             # Sub-segmentation for the current scale (scale_idx)
+#             subsegments_manifest_info = segments_manifest_to_subsegments_manifest(
+#                 segments_manifest_file=_speaker_manifest_path,
+#                 subsegments_manifest_file=subsegments_manifest_path,
+#                 window=window,
+#                 shift=shift,
+#                 include_uniq_id=True,
+#             )
+#             logging.info(
+#                 f"Subsegmentation for timestamp extracted for: scale-{scale_idx} at {subsegments_manifest_path}"
+#             )
+#         multiscale_timestamps = extract_timestamps(subsegments_manifest_path)
+#         multiscale_timestamps_by_scale[scale_idx] = multiscale_timestamps
+#         # multiscale_timestamps_by_scale[scale_idx] = subsegment_uniqid_dict
+
+#     multiscale_timestamps_dict = get_timestamps(multiscale_timestamps_by_scale, multiscale_args_dict)
+#     return multiscale_timestamps_dict
+
+from nemo.collections.asr.parts.utils.manifest_utils import (
+    read_manifest,
+    write_manifest,
+)
+
 def get_split_list(total_list: List, num_workers: int = 0) -> List[List]:
     """
     Split the list into multiple lists.
@@ -1883,8 +1916,16 @@ def prepare_split_data(
     """
     multiscale_timestamp_dict = {}
     audio_rttm_map_dict = get_audio_rttm_map(manifest_filepath, attach_dur=True)
+    # file_hash = get_hash_from_setups(multiscale_args_dict, audio_rttm_map_dict, min_subsegment_duration, last_n_digits=8)
     speaker_dir = os.path.join(_out_dir, 'speaker_outputs')
-    
+
+    # Check if there is a pickle file that is identical to file_hash.
+    # if os.path.exists(os.path.join(speaker_dir, f'{meta_file_name}{file_hash}.pkl')):
+    #     logging.info(f"Loading pre-calculated multiscale timestamps from {os.path.join(speaker_dir, f'{meta_file_name}{file_hash}.pkl')}")
+    #     with open(os.path.join(speaker_dir, f'{meta_file_name}{file_hash}.pkl'), 'rb') as f:
+    #         multiscale_timestamps_by_scale = pickle.load(f)
+    #     return multiscale_timestamps_by_scale
+
     # Only if this is for the first run of modelPT instance, remove temp folders.
     if global_rank == 0:
         if os.path.exists(speaker_dir):
@@ -1948,11 +1989,16 @@ def prepare_split_data(
     # Remove split subsegments manifest files
     remove_files_in_list(split_seg_manifest_files_list)
 
+    # Save a pickle file of multiscale_timestamps_dict
+    # with open(os.path.join(speaker_dir, f'msdd_ts_dict_{file_hash}.pkl'), 'wb') as f:
+    #     pickle.dump(multiscale_timestamps_dict, f)
+
     return multiscale_timestamps_dict
 
 def save_subsegment_files(multiscale_timestamps_dict, speaker_dir):
     """
     Save subsegment files in the given directory for the given file name.
+
 
     Args:
         multiscale_timestamps_dict (dict): Dictionary containing subsegment timestamps for each data sample.
@@ -1989,6 +2035,111 @@ def remove_files_in_list(file_list):
                 os.remove(file)
         else:
             os.remove(file)
+
+def get_hash_from_setups(*args, last_n_digits=8):
+    """
+    Generate a hash from the given arguments.
+
+    Args:
+        *args: Arguments to be hashed. It can be a list of numbers, strings, dictionaries, or a combination of both.
+
+    Returns:
+        hash_id (str): Last n digits of the generated hash.
+    """
+    str_enc = ""
+    for arg in args:
+        str_enc += str(arg)
+    str_enc = str_enc.encode('utf-8')
+    hash_id = hashlib.md5(str_enc).hexdigest()
+    return hash_id[-last_n_digits:]
+
+# def __prepare_split_data(
+#     manifest_filepath: str, 
+#     _out_dir: str, 
+#     multiscale_args_dict: Dict,
+#     global_rank: int, 
+#     min_subsegment_duration: float =0.05, 
+#     num_workers: int =1) -> Dict:
+#     """
+#     This function is needed for preparing diarization training data for multiscale diarization decoder (MSDD).
+#     Prepare multiscale timestamp data for training. Oracle VAD timestamps from RTTM files are used as VAD timestamps.
+#     In this function, timestamps for embedding extraction are extracted without extracting the embedding vectors.
+
+#     Args:
+#         manifest_filepath (str):
+#             Input manifest file for creating audio-to-RTTM mapping.
+#         _out_dir (str):
+#             Output directory where timestamp json files are saved.
+#         multiscale_args_dict (dict):
+#             Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+#         global_rank (int):
+#             Global rank of the current process during distributed training.
+#         min_subsegment_duration (float):
+#             Minimum duration of subsegment in seconds to filter out extremely short subsegments.
+#         num_workers (int):
+#             Number of workers to split the manifest file for multi-processing.
+
+#     Returns:
+#         multiscale_args_dict (dict):
+#             - Dictionary containing two types of arguments: multi-scale weights and subsegment timestamps for each data sample.
+#             - Each data sample has two keys: `multiscale_weights` and `scale_dict`.
+#                 - `multiscale_weights` key contains a list containing multiscale weights.
+#                 - `scale_dict` is indexed by integer keys which are scale index.
+#             - Each data sample is indexed by using the following naming convention: `<uniq_id>_<start time in ms>_<end time in ms>`
+#                 Example: `fe_03_00106_mixed_626310_642300`
+#     """
+#     speaker_dir = os.path.join(_out_dir, 'speaker_outputs')
+
+#     # Only if this is for the first run of modelPT instance, remove temp folders.
+#     if global_rank == 0:
+#         if os.path.exists(speaker_dir):
+#             shutil.rmtree(speaker_dir)
+#         os.makedirs(speaker_dir)
+#     split_audio_rttm_map = get_audio_rttm_map(manifest_filepath, attach_dur=True)
+
+#     # Speech Activity Detection part
+#     _speaker_manifest_path = os.path.join(speaker_dir, f'oracle_vad_manifest.json')
+#     logging.info(f"Extracting oracle VAD timestamps and saving at {speaker_dir}")
+#     if not os.path.exists(_speaker_manifest_path):
+#         write_rttm2manifest(split_audio_rttm_map, 
+#                             _speaker_manifest_path, 
+#                             min_segment_duration=min_subsegment_duration, 
+#                             include_uniq_id=True, 
+#                             tqdm_enabled=True)
+
+#     use_mp = True if num_workers > 1 else False
+#     multiscale_timestamps_by_scale = {}
+    
+#     # Segmentation
+#     for scale_idx, (window, shift) in tqdm(multiscale_args_dict['scale_dict'].items(), desc="Subsegmentation for each scale", unit="scale"):
+#         subsegments_manifest_path = os.path.join(speaker_dir, f'subsegments_scale{scale_idx}.rank{global_rank}.json')
+#         if not os.path.exists(subsegments_manifest_path):
+#             # Sub-segmentation for the current scale (scale_idx)
+#             if use_mp:
+#                 subsegments_manifest_dict = mp_segments_manifest_to_subsegments_manifest(
+#                     segments_manifest_file=_speaker_manifest_path,
+#                     subsegments_manifest_file=subsegments_manifest_path,
+#                     window=window,
+#                     shift=shift,
+#                     min_subsegment_duration=min_subsegment_duration,
+#                     include_uniq_id=True,
+#                     get_dict=True,
+#                     global_rank=global_rank,
+#                 ) 
+#             else:
+#                 subsegments_manifest_dict = segments_manifest_to_subsegments_manifest(
+#                     segments_manifest_file=_speaker_manifest_path,
+#                     subsegments_manifest_file=subsegments_manifest_path,
+#                     window=window,
+#                     shift=shift,
+#                     min_subsegment_duration=min_subsegment_duration,
+#                     include_uniq_id=True,
+#                     get_dict=True,
+#                 )
+#         multiscale_timestamps_by_scale[scale_idx] = subsegments_manifest_dict
+
+#     multiscale_timestamps_dict = get_timestamps(multiscale_timestamps_by_scale, multiscale_args_dict)
+#     return multiscale_timestamps_dict
 
 def extract_timestamps(manifest_file: str):
     """
@@ -2048,7 +2199,7 @@ def make_rttm_with_overlap(
         all_reference
             List containing Pyannote's `Annotation` objects that are created from ground-truth RTTM outputs
     """
-    AUDIO_RTTM_MAP = get_audio_rttm_map(manifest_file_path)
+    AUDIO_RTTM_MAP = audio_rttm_map(manifest_file_path)
     manifest_file_lengths_list = []
     all_hypothesis, all_reference = [], []
     no_references = False
@@ -2221,40 +2372,189 @@ class OnlineSegmentor:
         return segment_raw_audio, segment_range_ts, segment_indexes
 
 
-from nemo.utils.data_utils import DataStoreObject
+# def parse_rttm_for_ms_targets(rttm_file, uniq_id):
+#     """
+#     Generate target tensor variable by extracting groundtruth diarization labels from an RTTM file.
+#     This function converts (start, end, speaker_id) format into base-scale (the finest scale) segment level
+#     diarization label in a matrix form.
 
-def read_manifest(manifest: str) -> List[dict]:
-    """
-    Read manifest file
+#     Example of seg_target:
+#         [[0., 1.], [0., 1.], [1., 1.], [1., 0.], [1., 0.], ..., [0., 1.]]
 
-    Args:
-        manifest (str): Path to manifest file
-    Returns:
-        data (list): List of JSON items
-    """
-    manifest = DataStoreObject(manifest)
+#     Args:
+#         sample:
+#             `DiarizationSpeechLabel` instance containing sample information such as audio filepath and RTTM filepath.
+#         target_spks (tuple):
+#             Speaker indices that are generated from combinations. If there are only one or two speakers,
+#             only a single target_spks tuple is generated.
 
-    data = []
-    try:
-        f = open(manifest.get(), 'r', encoding='utf-8')
-    except:
-        raise Exception(f"Manifest file could not be opened: {manifest}")
-    for line in f:
-        item = json.loads(line)
-        data.append(item)
-    f.close()
-    return data
+#     Returns:
+#         clus_label_index (torch.tensor):
+#             Groundtruth clustering label (cluster index for each segment) from RTTM files for training purpose.
+#         seg_target  (torch.tensor):
+#             Tensor variable containing hard-labels of speaker activity in each base-scale segment.
+#         scale_mapping (torch.tensor):
+#             Matrix containing the segment indices of each scale. scale_mapping is necessary for reshaping the
+#             multiscale embeddings to form an input matrix for the MSDD model.
+#     """
+#     rttm_lines = open(rttm_file).readlines()
+#     # uniq_id = self.get_uniq_id_with_range(sample)
+#     rttm_timestamps = extract_seg_info_from_rttm(uniq_id, rttm_lines)
+#     fr_level_target = assign_frame_level_spk_vector(rttm_timestamps)
+#                                                     # target_spks=sample.target_spks)
+#     seg_target, base_clus_label = get_diar_target_labels(uniq_id, fr_level_target)
+#     scale_mapping = get_scale_mapping_list(self.multiscale_timestamp_dict[uniq_id])
+#     return base_clus_label, seg_target, scale_mapping
 
+# def extract_seg_info_from_rttm(uniq_id, rttm_lines, mapping_dict=None, target_spks=None):
+#     """
+#     Get RTTM lines containing speaker labels, start time and end time. target_spks contains two targeted
+#     speaker indices for creating groundtruth label files. Only speakers in target_spks variable will be
+#     included in the output lists.
 
-def write_manifest(output_path: str, target_manifest: List[dict]):
-    """
-    Write to manifest file
+#     Args:
+#         uniq_id (str):
+#             Unique file ID that refers to an input audio file and corresponding RTTM (Annotation) file.
+#         rttm_lines (list):
+#             List containing RTTM lines in str format.
+#         mapping_dict (dict):
+#             Mapping between the estimated speakers and the speakers in the ground-truth annotation.
+#             `mapping_dict` variable is only provided when the inference mode is running in sequence-eval mode.
+#             Sequence eval mode uses the mapping between the estimated speakers and the speakers in ground-truth annotation.
+#     Returns:
+#         rttm_tup (tuple):
+#             Tuple containing lists of start time, end time and speaker labels.
 
-    Args:
-        output_path (str): Path to output manifest file
-        target_manifest (list): List of manifest file entries
-    """
-    with open(output_path, "w") as outfile:
-        for tgt in target_manifest:
-            json.dump(tgt, outfile)
-            outfile.write('\n')
+#     """
+#     stt_list, end_list, speaker_list, pairwise_infer_spks = [], [], [], []
+#     if target_spks:
+#         inv_map = {v: k for k, v in mapping_dict.items()}
+#         for spk_idx in target_spks:
+#             spk_str = f'speaker_{spk_idx}'
+#             if spk_str in inv_map:
+#                 pairwise_infer_spks.append(inv_map[spk_str])
+    
+#     for rttm_line in rttm_lines:
+#         start, end, speaker = convert_rttm_line(rttm_line)
+#         if target_spks is None or speaker in pairwise_infer_spks:
+#             end_list.append(end)
+#             stt_list.append(start)
+#             speaker_list.append(speaker)
+#     rttm_tup = (stt_list, end_list, speaker_list)
+#     return rttm_tup
+
+# def assign_frame_level_spk_vector(rttm_timestamps, min_spks=2, round_digits=2, frame_per_sec=100):
+#     """
+#     Create a multi-dimensional vector sequence containing speaker timestamp information in RTTM.
+#     The unit-length is the frame shift length of the acoustic feature. The feature-level annotations
+#     `fr_level_target` will later be converted to base-segment level diarization label.
+
+#     Args:
+#         rttm_timestamps (list):
+#             List containing start and end time for each speaker segment label.
+#             stt_list, end_list and speaker_list are contained.
+#         frame_per_sec (int):
+#             Number of feature frames per second. This quantity is determined by window_stride variable in preprocessing module.
+#         target_spks (tuple):
+#             Speaker indices that are generated from combinations. If there are only one or two speakers,
+#             only a single target_spks variable is generated.
+
+#     Returns:
+#         fr_level_target (torch.tensor):
+#             Tensor containing label for each feature level frame.
+#     """
+#     stt_list, end_list, speaker_list = rttm_timestamps
+#     if len(speaker_list) == 0:
+#         return None
+#     else:
+#         sorted_speakers = sorted(list(set(speaker_list)))
+#         total_fr_len = int(max(end_list) * (10 ** round_digits))
+#         spk_num = max(len(sorted_speakers), min_spks)
+#         speaker_mapping_dict = {rttm_key: x_int for x_int, rttm_key in enumerate(sorted_speakers)}
+#         fr_level_target = torch.zeros(total_fr_len, spk_num)
+
+#         # If RTTM is not provided, then there is no speaker mapping dict in target_spks.
+#         # Thus, return a zero-filled tensor as a placeholder.
+#         for count, (stt, end, spk_rttm_key) in enumerate(zip(stt_list, end_list, speaker_list)):
+#             stt, end = round(stt, round_digits), round(end, round_digits)
+#             spk = speaker_mapping_dict[spk_rttm_key]
+#             stt_fr, end_fr = int(round(stt, 2) * frame_per_sec), int(round(end, round_digits) * frame_per_sec)
+#             fr_level_target[stt_fr:end_fr, spk] = 1
+#         return fr_level_target
+
+# def get_scale_mapping_list(uniq_timestamps):
+#     """
+#     Call get_argmin_mat function to find the index of the non-base-scale segment that is closest to the
+#     given base-scale segment. For each scale and each segment, a base-scale segment is assigned.
+
+#     Args:
+#         uniq_timestamps: (dict)
+#             The dictionary containing embeddings, timestamps and multiscale weights.
+#             If uniq_timestamps contains only one scale, single scale diarization is performed.
+
+#     Returns:
+#         scale_mapping_argmat (torch.tensor):
+
+#             The element at the m-th row and the n-th column of the scale mapping matrix indicates the (m+1)-th scale
+#             segment index which has the closest center distance with (n+1)-th segment in the base scale.
+
+#             - Example:
+#                 `scale_mapping_argmat[2][101] = 85`
+
+#             In the above example, the code snippet means that 86-th segment in the 3rd scale (python index is 2) is
+#             mapped to the 102-th segment in the base scale. Thus, the longer segments bound to have more repeating
+#             numbers since multiple base scale segments (since the base scale has the shortest length) fall into the
+#             range of the longer segments. At the same time, each row contains N numbers of indices where N is number
+#             of segments in the base-scale (i.e., the finest scale).
+#     """
+#     timestamps_in_scales = []
+#     for key, val in uniq_timestamps['scale_dict'].items():
+#         timestamps_in_scales.append(torch.tensor(val['time_stamps']))
+#     session_scale_mapping_list = get_argmin_mat(timestamps_in_scales)
+#     scale_mapping_argmat = [[] for _ in range(len(uniq_timestamps['scale_dict'].keys()))]
+#     for scale_idx in range(len(session_scale_mapping_list)):
+#         scale_mapping_argmat[scale_idx] = session_scale_mapping_list[scale_idx]
+#     scale_mapping_argmat = torch.stack(scale_mapping_argmat)
+#     return scale_mapping_argmat
+
+# def get_diar_target_labels(uniq_id, fr_level_target, frame_per_sec=100, soft_label_thres=0.5):
+#     """
+#     Convert frame-level diarization target variable into segment-level target variable. Since the granularity is reduced
+#     from frame level (10ms) to segment level (100ms~500ms), we need a threshold value, `soft_label_thres`, which determines
+#     the label of each segment based on the overlap between a segment range (start and end time) and the frame-level target variable.
+
+#     Args:
+#         uniq_id (str):
+#             Unique file ID that refers to an input audio file and corresponding RTTM (Annotation) file.
+#         sample:
+#             `DiarizationSpeechLabel` instance containing sample information such as audio filepath and RTTM filepath.
+#         fr_level_target (torch.tensor):
+#             Tensor containing label for each feature-level frame.
+
+#     Returns:
+#         seg_target (torch.tensor):
+#             Tensor containing binary speaker labels for base-scale segments.
+#         base_clus_label (torch.tensor):
+#             Representative speaker label for each segment. This variable only has one speaker label for each base-scale segment.
+#             -1 means that there is no corresponding speaker in the target_spks tuple.
+#     """
+#     seg_target_list, base_clus_label = [], []
+#     scale_n = len(self.multiscale_timestamp_dict[uniq_id]['scale_dict'])
+#     subseg_time_stamp_array = self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_n - 1]["time_stamps"]
+#     ts_mat_int = (torch.tensor(subseg_time_stamp_array) * frame_per_sec).long()
+    
+#     soft_label_vec_list = [] 
+#     # for index, (seg_stt, seg_end) in enumerate(subseg_time_stamp_array):
+#     for index in range(subseg_time_stamp_array.shape[0]):
+#         seg_stt_fr, seg_end_fr = ts_mat_int[index, 0], ts_mat_int[index, 1]
+#         soft_label_vec_list.append(torch.sum(fr_level_target[seg_stt_fr:seg_end_fr, :], axis=0))
+
+#     soft_label_sum= torch.stack(soft_label_vec_list)
+#     label_total = soft_label_sum.sum(dim=1)
+#     label_total[label_total == 0] = 1 # Avoid divide by zero by assigning 1
+#     soft_label_vec = (soft_label_sum.t()/label_total).t()
+
+#     base_clus_label = soft_label_vec.argmax(dim=1) 
+#     base_clus_label[label_total == 0] = -1 # If there is no existing label, put -1 
+#     seg_target = (soft_label_vec >= soft_label_thres).float()
+#     return seg_target, base_clus_label

@@ -22,14 +22,16 @@ import librosa
 import numpy as np
 
 from nemo.collections.asr.parts.utils.speaker_utils import (
+    get_audio_rttm_map,
     audio_rttm_map,
-    get_subsegments,
     get_uniqname_from_filepath,
     rttm_to_labels,
     segments_manifest_to_subsegments_manifest,
     write_rttm2manifest,
 )
 from nemo.utils.data_utils import DataStoreObject
+
+
 
 
 def rreplace(s: str, old: str, new: str) -> str:
@@ -61,37 +63,37 @@ def get_uniq_id_with_period(path: str) -> str:
     return uniq_id
 
 
-def get_subsegment_dict(subsegments_manifest_file: str, window: float, shift: float, deci: int) -> Dict[str, dict]:
-    """
-    Get subsegment dictionary from manifest file.
+# def get_subsegment_dict(subsegments_manifest_file: str, window: float, shift: float, deci: int) -> Dict[str, dict]:
+#     """
+#     Get subsegment dictionary from manifest file.
 
-    Args:
-        subsegments_manifest_file (str): Path to subsegment manifest file
-        window (float): Window length for segmentation
-        shift (float): Shift length for segmentation
-        deci (int): Rounding number of decimal places
-    Returns:
-        _subsegment_dict (dict): Subsegment dictionary
-    """
-    _subsegment_dict = {}
-    with open(subsegments_manifest_file, 'r') as subsegments_manifest:
-        segments = subsegments_manifest.readlines()
-        for segment in segments:
-            segment = segment.strip()
-            dic = json.loads(segment)
-            audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
-            subsegments = get_subsegments(offset=offset, window=window, shift=shift, duration=duration)
-            if dic['uniq_id'] is not None:
-                uniq_id = dic['uniq_id']
-            else:
-                uniq_id = get_uniq_id_with_period(audio)
-            if uniq_id not in _subsegment_dict:
-                _subsegment_dict[uniq_id] = {'ts': [], 'json_dic': []}
-            for subsegment in subsegments:
-                start, dur = subsegment
-            _subsegment_dict[uniq_id]['ts'].append([round(start, deci), round(start + dur, deci)])
-            _subsegment_dict[uniq_id]['json_dic'].append(dic)
-    return _subsegment_dict
+#     Args:
+#         subsegments_manifest_file (str): Path to subsegment manifest file
+#         window (float): Window length for segmentation
+#         shift (float): Shift length for segmentation
+#         deci (int): Rounding number of decimal places
+#     Returns:
+#         _subsegment_dict (dict): Subsegment dictionary
+#     """
+#     _subsegment_dict = {}
+#     with open(subsegments_manifest_file, 'r') as subsegments_manifest:
+#         segments = subsegments_manifest.readlines()
+#         for segment in segments:
+#             segment = segment.strip()
+#             dic = json.loads(segment)
+#             audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
+#             subsegments = get_subsegments(offset=offset, window=window, shift=shift, duration=duration)
+#             if dic['uniq_id'] is not None:
+#                 uniq_id = dic['uniq_id']
+#             else:
+#                 uniq_id = get_uniq_id_with_period(audio)
+#             if uniq_id not in _subsegment_dict:
+#                 _subsegment_dict[uniq_id] = {'ts': [], 'json_dic': []}
+#             for subsegment in subsegments:
+#                 start, dur = subsegment
+#             _subsegment_dict[uniq_id]['ts'].append([round(start, deci), round(start + dur, deci)])
+#             _subsegment_dict[uniq_id]['json_dic'].append(dic)
+#     return _subsegment_dict
 
 
 def get_input_manifest_dict(input_manifest_path: str) -> Dict[str, dict]:
@@ -265,7 +267,7 @@ def create_segment_manifest(
     min_subsegment_duration = 0.05
     step_count = int(step_count)
 
-    AUDIO_RTTM_MAP = audio_rttm_map(input_manifest_path)
+    AUDIO_RTTM_MAP = get_audio_rttm_map(input_manifest_path)
     segments_manifest_file = write_rttm2manifest(AUDIO_RTTM_MAP, segment_manifest_path, deci)
     subsegments_manifest_file = subsegment_manifest_path
     segments_manifest_to_subsegments_manifest(

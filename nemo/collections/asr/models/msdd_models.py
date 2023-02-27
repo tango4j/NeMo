@@ -288,6 +288,9 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         if trainer is not None:
             self._init_speaker_model()
             self.add_speaker_model_config(cfg)
+            self.loss = instantiate(self.cfg_msdd_model.loss)
+            self.affinity_loss = AffinityLoss()
+            self.alpha = self.cfg_msdd_model.loss.alpha
         else:
             self.msdd._speaker_model = EncDecSpeakerLabelModel.from_config_dict(cfg.speaker_model_cfg)
 
@@ -295,9 +298,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         # Call `self.save_hyperparameters` in modelPT.py again since cfg should contain speaker model's config.
         self.save_hyperparameters("cfg")
 
-        self.loss = instantiate(self.cfg_msdd_model.loss)
-        self.affinity_loss = AffinityLoss()
-        self.alpha = self.cfg_msdd_model.loss.alpha
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
@@ -418,6 +418,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             return None
 
         logging.info(f"Loading dataset from {config.manifest_filepath}")
+
         dataset = AudioToSpeechMSDDTrainDataset(
             manifest_filepath=config.manifest_filepath,
             emb_dir=config.emb_dir,
@@ -943,7 +944,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self.log('val_f1_acc', f1_acc, sync_dist=True)
         self.log('val_loss_bce', (1-self.alpha) * loss_1, sync_dist=True)
         self.log('val_loss_aff',  self.alpha * loss_2, sync_dist=True)
-        # print("val_f1_acc", f1_acc)
+        print("val_f1_acc", f1_acc)
         return {
             'val_loss': loss,
             'val_f1_acc': f1_acc,

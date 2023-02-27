@@ -187,7 +187,6 @@ def main(
 
     # Print average DER, WER and cpWER
     OfflineDiarWithASR.print_errors(der_results=der_results, wer_results=wer_results)
-
     # Save detailed session-level evaluation results in `root_path`.
     OfflineDiarWithASR.write_session_level_result_in_csv(
         der_results=der_results,

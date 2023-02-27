@@ -95,7 +95,7 @@ model:
   optim_param_groups:
     msdd:
       _speaker_model:
-        lr: .000007
+        lr: .00001
         weight_decay: 0.05
 
         sched:

@@ -16,6 +16,7 @@ import os
 from collections import OrderedDict
 from statistics import mode
 from typing import Dict, Optional
+import pickle
 
 import torch
 
@@ -99,7 +100,7 @@ def extract_seg_info_from_rttm(uniq_id, rttm_lines, mapping_dict=None, target_sp
     return rttm_tup
 
 
-def assign_frame_level_spk_vector(rttm_timestamps, round_digits, frame_per_sec, target_spks, min_spks=2):
+def assign_frame_level_spk_vector(rttm_timestamps, round_digits, frame_per_sec, min_spks=2):
     """
     Create a multi-dimensional vector sequence containing speaker timestamp information in RTTM.
     The unit-length is the frame shift length of the acoustic feature. The feature-level annotations
@@ -214,6 +215,7 @@ class _AudioMSDDTrainDataset(Dataset):
         )
         self.featurizer = featurizer
         self.multiscale_args_dict = multiscale_args_dict
+        self.scale_n = len(self.multiscale_args_dict['scale_dict'])
         self.emb_dir = emb_dir
         self.round_digits = 2
         self.decim = 10 ** self.round_digits
@@ -235,11 +237,12 @@ class _AudioMSDDTrainDataset(Dataset):
             self.min_subsegment_duration, 
             self.num_workers
         )
+        self.multiscale_timestamp_dict = {}
 
     def __len__(self):
         return len(self.collection)
 
-    def get_diar_target_labels(self, uniq_id, sample, fr_level_target):
+    def get_diar_target_labels(self, uniq_id, fr_level_target):
         """
         Convert frame-level diarization target variable into segment-level target variable. Since the granularity is reduced
         from frame level (10ms) to segment level (100ms~500ms), we need a threshold value, `soft_label_thres`, which determines
@@ -248,8 +251,6 @@ class _AudioMSDDTrainDataset(Dataset):
         Args:
             uniq_id (str):
                 Unique file ID that refers to an input audio file and corresponding RTTM (Annotation) file.
-            sample:
-                `DiarizationSpeechLabel` instance containing sample information such as audio filepath and RTTM filepath.
             fr_level_target (torch.tensor):
                 Tensor containing label for each feature-level frame.
 
@@ -261,7 +262,6 @@ class _AudioMSDDTrainDataset(Dataset):
                 -1 means that there is no corresponding speaker in the target_spks tuple.
         """
         seg_target_list, base_clus_label = [], []
-        self.scale_n = len(self.multiscale_timestamp_dict[uniq_id]['scale_dict'])
         subseg_time_stamp_array = self.multiscale_timestamp_dict[uniq_id]["scale_dict"][self.scale_n - 1]["time_stamps"]
         ts_mat_int = (torch.tensor(subseg_time_stamp_array) * self.frame_per_sec).long()
         
@@ -281,7 +281,7 @@ class _AudioMSDDTrainDataset(Dataset):
         seg_target = (soft_label_vec >= self.soft_label_thres).float()
         return seg_target, base_clus_label
 
-    def parse_rttm_for_ms_targets(self, sample):
+    def parse_rttm_for_ms_targets(self, uniq_id, rttm_file):
         """
         Generate target tensor variable by extracting groundtruth diarization labels from an RTTM file.
         This function converts (start, end, speaker_id) format into base-scale (the finest scale) segment level
@@ -306,14 +306,13 @@ class _AudioMSDDTrainDataset(Dataset):
                 Matrix containing the segment indices of each scale. scale_mapping is necessary for reshaping the
                 multiscale embeddings to form an input matrix for the MSDD model.
         """
-        rttm_lines = open(sample.rttm_file).readlines()
-        uniq_id = self.get_uniq_id_with_range(sample)
+        rttm_lines = open(rttm_file).readlines()
+        # uniq_id = self.get_uniq_id_with_range(sample)
         rttm_timestamps = extract_seg_info_from_rttm(uniq_id, rttm_lines)
         fr_level_target = assign_frame_level_spk_vector(rttm_timestamps, 
                                                         self.round_digits, 
-                                                        self.frame_per_sec, 
-                                                        target_spks=sample.target_spks)
-        seg_target, base_clus_label = self.get_diar_target_labels(uniq_id, sample, fr_level_target)
+                                                        self.frame_per_sec)
+        seg_target, base_clus_label = self.get_diar_target_labels(uniq_id, fr_level_target)
         scale_mapping = get_scale_mapping_list(self.multiscale_timestamp_dict[uniq_id])
         return base_clus_label, seg_target, scale_mapping
 
@@ -338,7 +337,7 @@ class _AudioMSDDTrainDataset(Dataset):
         uniq_id = f"{bare_uniq_id}_{offset}_{endtime}"
         return uniq_id
 
-    def get_ms_seg_timestamps(self, sample):
+    def get_ms_seg_timestamps(self, uniq_id, offset, frame_per_sec):
         """
         Get start and end time of segments in each scale.
 
@@ -352,28 +351,41 @@ class _AudioMSDDTrainDataset(Dataset):
                 Number of segments for each scale. This information is used for reshaping embedding batch
                 during forward propagation.
         """
-        uniq_id = self.get_uniq_id_with_range(sample)
         ms_seg_timestamps_list = []
         max_seq_len = len(self.multiscale_timestamp_dict[uniq_id]["scale_dict"][self.scale_n - 1]["time_stamps"])
         ms_seg_counts = [0 for _ in range(self.scale_n)]
         for scale_idx in range(self.scale_n):
             ts_tensor = torch.tensor(self.multiscale_timestamp_dict[uniq_id]["scale_dict"][scale_idx]["time_stamps"])
-            scale_ts_tensor = ((ts_tensor - sample.offset) * self.frame_per_sec).long() 
+            scale_ts_tensor = ((ts_tensor - offset) * frame_per_sec).long() 
             ms_seg_counts[scale_idx] = scale_ts_tensor.shape[0]      
             scale_ts_padded = torch.cat([scale_ts_tensor, torch.zeros(max_seq_len - scale_ts_tensor.shape[0], 2)], dim=0)
             ms_seg_timestamps_list.append(scale_ts_padded.detach())
         ms_seg_timestamps = torch.stack(ms_seg_timestamps_list)
         ms_seg_counts = torch.tensor(ms_seg_counts)
         return ms_seg_timestamps, ms_seg_counts
+    
+    def load_segment_pickle_to_dict(self, uniq_id):
+        """
+        Load segment pickle file and convert it into a dictionary format.
+        """
+        if uniq_id not in self.multiscale_timestamp_dict:
+            source_file_uniq_id = uniq_id.rsplit('.', 1)[0]
+            with open(os.path.join(self.emb_dir, 'speaker_outputs', f'{source_file_uniq_id}.pkl'), 'rb') as f:
+                ms_dict_for_source_uniq_id = pickle.load(f)
+            self.multiscale_timestamp_dict.update(ms_dict_for_source_uniq_id)
 
     def __getitem__(self, index):
         sample = self.collection[index]
         if sample.offset is None:
             sample.offset = 0
-        clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(sample)
+        uniq_id = self.get_uniq_id_with_range(sample)
+        self.load_segment_pickle_to_dict(uniq_id)
+        clus_label_index, targets, scale_mapping = self.parse_rttm_for_ms_targets(uniq_id=uniq_id, rttm_file=sample.rttm_file)
         features = self.featurizer.process(sample.audio_file, offset=sample.offset, duration=sample.duration)
         feature_length = torch.tensor(features.shape[0]).long()
-        ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(sample)
+        ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(uniq_id=uniq_id, 
+                                                                      offset=sample.offset, 
+                                                                      frame_per_sec=self.frame_per_sec)
         if self.random_flip:
             torch.manual_seed(index)
             flip = torch.cat([torch.randperm(self.max_spks), torch.tensor(-1).unsqueeze(0)])
