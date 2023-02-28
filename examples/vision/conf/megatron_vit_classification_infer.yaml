@@ -1,6 +1,5 @@
 inference:
   data_path: ??? # Path to a image folder for inference
-  image_size: 384
 
 trainer:
   devices: 1

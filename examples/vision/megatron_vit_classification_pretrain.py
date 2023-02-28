@@ -19,13 +19,13 @@ from pytorch_lightning.callbacks.timer import Timer
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 from pytorch_lightning.trainer.connectors.checkpoint_connector import CheckpointConnector
 
-from nemo.collections.vision.models.megatron_vit_classification_models import MegatronVitClassificationModel
 from nemo.collections.nlp.parts.nlp_overrides import (
     GradScaler,
     MegatronHalfPrecisionPlugin,
     NLPDDPStrategy,
     PipelineMixedPrecisionPlugin,
 )
+from nemo.collections.vision.models.megatron_vit_classification_models import MegatronVitClassificationModel
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager

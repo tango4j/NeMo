@@ -12,21 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import glob
+import os
 import torch
-from torch.utils.data import DataLoader, Dataset
-
 from PIL import Image
 from omegaconf.omegaconf import OmegaConf, open_dict
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks.timer import Timer
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 from pytorch_lightning.trainer.connectors.checkpoint_connector import CheckpointConnector
+from torch.utils.data import DataLoader, Dataset
 
 from nemo.collections.multimodal.data.clip.imagenet_zeroshot_data import imagenet_classnames
-from nemo.collections.vision.data.megatron.vit_dataset import ClassificationTransform
-from nemo.collections.vision.models.megatron_vit_classification_models import MegatronVitClassificationModel
 from nemo.collections.nlp.parts.nlp_overrides import (
     GradScaler,
     MegatronHalfPrecisionPlugin,
@@ -34,11 +31,14 @@ from nemo.collections.nlp.parts.nlp_overrides import (
     PipelineMixedPrecisionPlugin,
     NLPSaveRestoreConnector,
 )
+from nemo.collections.vision.data.megatron.vit_dataset import ClassificationTransform
+from nemo.collections.vision.models.megatron_vit_classification_models import MegatronVitClassificationModel
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 
 _IMG_EXTENSIONS = "jpg jpeg png ppm pgm pbm pnm".split()
+
 
 class ImageFolderDataset(Dataset):
     def __init__(self, folder_path, transform=None):
@@ -61,6 +61,7 @@ class ImageFolderDataset(Dataset):
             image = self.transform(image)
         return image
 
+
 @hydra_runner(config_path="conf", config_name="megatron_vit_classification_infer")
 def main(cfg) -> None:
     logging.info("\n\n************** Experiment configuration ***********")
@@ -77,8 +78,8 @@ def main(cfg) -> None:
     # trainer required for restoring model parallel models
     trainer = Trainer(plugins=plugins, strategy=strategy, **cfg.trainer)
     assert (
-        cfg.trainer.devices * cfg.trainer.num_nodes
-        == cfg.model.tensor_model_parallel_size * cfg.model.pipeline_model_parallel_size
+            cfg.trainer.devices * cfg.trainer.num_nodes
+            == cfg.model.tensor_model_parallel_size * cfg.model.pipeline_model_parallel_size
     ), "devices * num_nodes should equal tensor_model_parallel_size * pipeline_model_parallel_size"
 
     save_restore_connector = NLPSaveRestoreConnector()
@@ -108,16 +109,21 @@ def main(cfg) -> None:
 
     model.eval()
 
-    test_transform = ClassificationTransform(cfg.model, cfg.inference.image_size, train=False)
+    test_transform = ClassificationTransform(
+        cfg.model,
+        (model_cfg.img_h, model_cfg.img_w),
+        train=False
+    )
     test_data = ImageFolderDataset(
         folder_path=cfg.inference.data_path,
         transform=test_transform,
     )
     test_loader = DataLoader(test_data, batch_size=8)
 
-    # initialize strategy
+    # initialize apex DDP strategy
     def dummy():
         return
+
     if trainer.strategy.launcher is not None:
         trainer.strategy.launcher.launch(dummy, trainer=self.trainer)
     trainer.strategy.setup_environment()
