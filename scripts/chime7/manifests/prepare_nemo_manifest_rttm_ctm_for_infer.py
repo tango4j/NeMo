@@ -60,7 +60,6 @@ def create_multichannel_manifest(
         add_duration (bool): Whether to add durations to the manifest file
     """
     uniq_id_list = [ x.strip() for x in read_file(uniq_id_path) ]
-    # uniqids = sorted(wav_pathdict.keys())
     uniqids = sorted(uniq_id_list)
     len_wavs = len(uniq_id_list)
 
@@ -202,6 +201,7 @@ def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str
     elif dataset in ['mixer6']:
         # drop json extension
         audio_filename, _ = os.path.splitext(os.path.basename(file_path))
+        # Mixer6 has a different naming convention for "'".
         data['words'] = data['words'].replace("\u2019", "'")
 
     # path is relative to dataset_output_dir
@@ -301,6 +301,7 @@ def main(data_dir: str, subset: str, output_dir: str, overwrite: bool, output_pr
                 speaker_line_list.append(speaker_line)
                 new_word_dict_lines = create_word_dict_lines(data)
                 word_dict_list.extend(new_word_dict_lines)
+                
                 # path is relative to dataset_output_dir
                 audio_filepath = os.path.join('audio', subset, audio_filename)
                 offset = float(data['start_time'])
