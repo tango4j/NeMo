@@ -220,8 +220,9 @@ class VitBackbone(MegatronModule):
         self.img_h = model_cfg.img_h
         self.img_w = model_cfg.img_w
         self.single_token_output = single_token_output
-        self.drop_patch_rate = model_cfg.drop_patch_rate
-        self.drop_path_rate = model_cfg.drop_path_rate
+        self.drop_patch_rate = model_cfg.get("drop_patch_rate", 0.)
+        self.drop_path_rate = model_cfg.get("drop_path_rate", 0.)
+        preprocess_layernorm = model_cfg.get("preprocess_layernorm", False)
 
         assert self.img_h % self.patch_dim == 0
         assert self.img_w % self.patch_dim == 0
@@ -233,6 +234,7 @@ class VitBackbone(MegatronModule):
         self.flatten_dim = self.patch_dim * self.patch_dim * model_cfg.num_channels
         self.input_tensor = None
         self.position_ids = None
+        self.preprocess_layernorm = None
 
         if self.pre_process:
             # cls_token
@@ -283,10 +285,12 @@ class VitBackbone(MegatronModule):
                 class_token_length=class_token_length,
                 exclude_cls_tokens=self.class_token
             )
-            self.preprocess_layernorm = get_layer_norm(
-                model_cfg.hidden_size, model_cfg.layernorm_epsilon, model_cfg.persist_layer_norm,
-                sequence_parallel=model_cfg.sequence_parallel
-            )
+
+            if preprocess_layernorm:
+                self.preprocess_layernorm = get_layer_norm(
+                    model_cfg.hidden_size, model_cfg.layernorm_epsilon, model_cfg.persist_layer_norm,
+                    sequence_parallel=model_cfg.sequence_parallel
+                )
 
         self.transformer = ParallelVisionTransformer(
             init_method=init_method,
@@ -310,7 +314,7 @@ class VitBackbone(MegatronModule):
             attention_dropout=model_cfg.attention_dropout,
             drop_path_rate=model_cfg.drop_path_rate,
             use_cpu_initialization=model_cfg.use_cpu_initialization,
-            bias_activation_fusion=model_cfg.bias_activation_fusion,
+            bias_activation_fusion=model_cfg.get("bias_activation_fusion", False),
             persist_layer_norm=model_cfg.persist_layer_norm,
             openai_gelu=model_cfg.openai_gelu,
             onnx_safe=model_cfg.onnx_safe,
@@ -351,8 +355,9 @@ class VitBackbone(MegatronModule):
 
             # a patch_dropout of 0. would mean it is disabled and this function would do nothing but return what was passed in
             token_embeddings = self.drop_patch(token_embeddings)
-            # TODO (yuya): check this pre_ln for CLIP
-            token_embeddings = self.preprocess_layernorm(token_embeddings)
+
+            if self.preprocess_layernorm is not None:
+                token_embeddings = self.preprocess_layernorm(token_embeddings)
 
             # [b s h] => [s b h]
             token_embeddings = token_embeddings.transpose(0, 1).contiguous()

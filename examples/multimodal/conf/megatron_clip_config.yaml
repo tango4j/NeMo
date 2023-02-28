@@ -82,6 +82,7 @@ model:
     global_average_pool: False
     output_dim: ${model.output_dim}
     class_token_length: 8
+    preprocess_layernorm: True # apply layer norm to embedded tokens
 
     # model architecture
     encoder_seq_length: 196
