@@ -1,5 +1,4 @@
-inference:
-  data_path: ??? # Path to a image folder for inference
+data_path: ??? # Path to a image folder for inference
 
 trainer:
   devices: 1
@@ -9,10 +8,5 @@ trainer:
   precision: 16 # 16, 32, or bf16
 
 model:
-  precision: ${trainer.precision}
-  tensor_model_parallel_size: 1
-  pipeline_model_parallel_size: 1
   restore_from_path: null  # Path to a trained ViT .nemo file
-#  checkpoint_dir: null # checkpoint file dir. This is used to load the PTL checkpoint generated during the GPT training
-#  checkpoint_name: null # PTL checkpoint file name, only used for PTL checkpoint loading
-#  hparams_file: null # model configuration file, only used for PTL checkpoint loading
+  precision: ${trainer.precision}

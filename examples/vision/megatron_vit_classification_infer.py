@@ -36,6 +36,7 @@ from nemo.collections.vision.models.megatron_vit_classification_models import Me
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
+from nemo.utils.get_rank import is_global_rank_zero
 
 _IMG_EXTENSIONS = "jpg jpeg png ppm pgm pbm pnm".split()
 
@@ -77,10 +78,6 @@ def main(cfg) -> None:
 
     # trainer required for restoring model parallel models
     trainer = Trainer(plugins=plugins, strategy=strategy, **cfg.trainer)
-    assert (
-            cfg.trainer.devices * cfg.trainer.num_nodes
-            == cfg.model.tensor_model_parallel_size * cfg.model.pipeline_model_parallel_size
-    ), "devices * num_nodes should equal tensor_model_parallel_size * pipeline_model_parallel_size"
 
     save_restore_connector = NLPSaveRestoreConnector()
     if os.path.isdir(cfg.model.restore_from_path):
@@ -92,6 +89,11 @@ def main(cfg) -> None:
         save_restore_connector=save_restore_connector,
         return_config=True,
     )
+
+    assert (
+            cfg.trainer.devices * cfg.trainer.num_nodes
+            == model_cfg.tensor_model_parallel_size * model_cfg.pipeline_model_parallel_size
+    ), "devices * num_nodes should equal tensor_model_parallel_size * pipeline_model_parallel_size"
 
     # These configs are required to be off during inference.
     with open_dict(model_cfg):
@@ -115,7 +117,7 @@ def main(cfg) -> None:
         train=False
     )
     test_data = ImageFolderDataset(
-        folder_path=cfg.inference.data_path,
+        folder_path=cfg.data_path,
         transform=test_transform,
     )
     test_loader = DataLoader(test_data, batch_size=8)
@@ -134,7 +136,9 @@ def main(cfg) -> None:
             logits = model(tokens.cuda())
             class_indices = torch.argmax(logits, -1)
             class_names += [imagenet_classnames[x] for x in class_indices]
-    print(f"Predicted classes: ", list(enumerate(class_names)))
+
+    if is_global_rank_zero:
+        print(f"Predicted classes: ", list(enumerate(class_names)))
 
 
 if __name__ == '__main__':
