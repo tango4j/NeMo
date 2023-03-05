@@ -260,7 +260,6 @@ class CLIPModel(MegatronModule):
             post_process=self.post_process,
         )
 
-        #TODO (yuya): this may not work as expected in (1) saving and loading (2) sync in TP
         self.logit_scale = torch.nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def set_input_tensor(self, input_tensor):
