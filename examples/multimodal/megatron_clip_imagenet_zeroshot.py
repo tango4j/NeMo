@@ -15,12 +15,14 @@
 import os
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from omegaconf.omegaconf import OmegaConf, open_dict
 from pytorch_lightning import Trainer
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 
-from nemo.collections.multimodal.data.clip.clip_dataset import get_preprocess_fns
+from nemo.collections.multimodal.data.clip.clip_dataset import get_preprocess_fns, ImagenetClassnameDataset
+from nemo.collections.multimodal.data.clip.imagenet_zeroshot_data import openai_imagenet_template, imagenet_classnames
 from nemo.collections.multimodal.models.clip.megatron_clip_models import MegatronCLIPModel
 from nemo.collections.nlp.parts.nlp_overrides import (
     NLPDDPStrategy,
@@ -108,19 +110,39 @@ def main(cfg) -> None:
         raise ValueError('precision must be in [32, 16, "bf16"]')
 
     image = Image.open(cfg.image_path).convert('RGB')
+    text_dataset = ImagenetClassnameDataset(imagenet_classnames, openai_imagenet_template, text_transform)
+    text_dataloader = torch.utils.data.DataLoader(
+        text_dataset,
+        batch_size=text_dataset.num_templates,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=False,
+        drop_last=False,
+    )
     with torch.no_grad(), torch.cuda.amp.autocast(enabled=autocast_dtype in (torch.half, torch.bfloat16),
                                                   dtype=autocast_dtype, ):
-        image = val_image_transform(image).unsqueeze(0).cuda()
-        texts = text_transform(cfg.texts).cuda()
+        # build imagenet classification classifier
+        classifier = []
+        for texts in text_dataloader:
+            texts = texts.cuda(non_blocking=True)
+            class_embeddings = text_encoder(texts)
+            class_embedding = F.normalize(class_embeddings, dim=-1).mean(dim=0)
+            class_embedding /= class_embedding.norm()
+            classifier.append(class_embedding)
+        classifier = torch.stack(classifier, dim=1)
+
+        image = val_image_transform(image).unsqueeze(0).cuda(non_blocking=True)
         image_features = vision_encoder(image)
-        text_features = text_encoder(texts)
-        image_features /= image_features.norm(dim=-1, keepdim=True)
-        text_features /= text_features.norm(dim=-1, keepdim=True)
+        image_features = F.normalize(image_features, dim=-1)
 
-        text_probs = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+        logits = 100. * image_features @ classifier
+        logits = logits[0]
+        pred_top5 = logits.topk(5, 0, True, True)[1]
+        prob_top5 = logits[pred_top5].softmax(dim=-1)
 
+    class_names = [imagenet_classnames[x] for x in pred_top5]
     if is_global_rank_zero:
-        print(f"Given image's CLIP text probability: ", list(zip(cfg.texts, text_probs[0].cpu().numpy())))
+        print(f"Zero-shot CLIP predicted classes (top5): ", list(zip(class_names, prob_top5.cpu().numpy())))
 
 
 if __name__ == '__main__':

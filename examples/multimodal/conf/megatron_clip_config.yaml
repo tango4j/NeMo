@@ -213,34 +213,34 @@ model:
     sentencepiece_legacy: False # Legacy=True allows you to add special tokens to sentencepiece tokenizers.
   make_vocab_size_divisible_by: 128 # Pad the vocab size to be divisible by this value for computation efficiency.
 
-#  data:
-#    num_workers: 0
-#    use_webdataset: True
-#    train:
-#      data_path:
-#          - wdinfo.pkl
-#      drop_last: False
-#    validation:
-#      data_path:
-#        - wdinfo.pkl
-#      drop_last: False
-#    webdataset:
-#      object_store: True
-#      bucket: datasets
-#      pbss_credentials_file: pbss_credential
+  #  data:
+  #    num_workers: 0
+  #    use_webdataset: True
+  #    train:
+  #      data_path:
+  #          - wdinfo.pkl
+  #      drop_last: False
+  #    validation:
+  #      data_path:
+  #        - wdinfo.pkl
+  #      drop_last: False
+  #    webdataset:
+  #      object_store: True
+  #      bucket: datasets
+  #      pbss_credentials_file: pbss_credential
 
   data:
     num_workers: 1
     dataset_type: webdataset
 
     train:
-        data_path: # List of paths to pkl files or tar files
-            - wdinfo-train.pkl
-        drop_last: True # drop_last = False is not implemented yet
+      data_path: # List of paths to pkl files or tar files
+        - wdinfo-train.pkl
+      drop_last: True # drop_last = False is not implemented yet
     validation: # List of paths to pkl files or tar files
-        data_path:
-            - wdinfo-val.pkl
-        drop_last: True # drop_last = False is not implemented yet
+      data_path:
+        - wdinfo-val.pkl
+      drop_last: True # drop_last = False is not implemented yet
     webdataset:
       object_store: False
       bucket: datasets
@@ -255,7 +255,7 @@ model:
     enabled: False
     start_step: 10  # Global batch to start profiling
     end_step: 10 # Global batch to end profiling
-    ranks: [0] # Global rank IDs to profile
+    ranks: [ 0 ] # Global rank IDs to profile
     gen_shape: False # Generate model and kernel details including input shapes
 
   optim:
@@ -263,8 +263,8 @@ model:
     lr: 1e-3
     weight_decay: 0.2
     betas:
-    - 0.9
-    - 0.98
+      - 0.9
+      - 0.98
     sched:
       name: CosineAnnealing
       warmup_steps: 2000

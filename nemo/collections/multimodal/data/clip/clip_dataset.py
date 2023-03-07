@@ -117,7 +117,7 @@ def build_train_valid_datasets(
         drop_last=data_cfg.train.get("drop_last", True),
         data_sharding=data_cfg.train.get("data_sharding", True),
     )
-    shared_epoch = train_url_sampler.epoch # shared epoch object is used to set_seed in rngs
+    shared_epoch = train_url_sampler.epoch  # shared epoch object is used to set_seed in rngs
 
     if val_url_dataset is not None:
         val_url_sampler = WDSUrlsRandomSampler(

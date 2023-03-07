@@ -32,8 +32,8 @@ from apex.transformer import parallel_state
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 from pytorch_lightning.trainer.trainer import Trainer
 
-from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.collections.multimodal.models.clip.megatron_clip_models import MegatronCLIPModel
+from nemo.collections.nlp.parts.nlp_overrides import NLPSaveRestoreConnector
 from nemo.utils import AppState, logging
 from nemo.utils.distributed import initialize_distributed
 from nemo.utils.model_utils import inject_model_parallel_rank
@@ -75,7 +75,7 @@ def get_args():
         help="If pipeline parallel size > 1, this is the rank at which the encoder ends and the decoder begins.",
     )
     parser.add_argument(
-        "--model_type", type=str, required=True, default="clip"
+        "--model_type", type=str, required=False, default="megatron_clip"
     )
     parser.add_argument("--local_rank", type=int, required=False, default=os.getenv('LOCAL_RANK', -1))
     parser.add_argument("--bcp", action="store_true", help="Whether on BCP platform")
@@ -131,7 +131,7 @@ def convert(local_rank, rank, world_size, args):
         f'rank: {rank}, local_rank: {local_rank}, is loading checkpoint: {checkpoint_path} for tp_rank: {app_state.tensor_model_parallel_rank} and pp_rank: {app_state.pipeline_model_parallel_rank}'
     )
 
-    if args.model_type == 'MegatronCLIPModel':
+    if args.model_type == 'megatron_clip':
         model = MegatronCLIPModel.load_from_checkpoint(checkpoint_path, hparams_file=args.hparams_file,
                                                        trainer=trainer)
     else:
