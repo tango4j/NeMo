@@ -176,10 +176,12 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             'shift_length_in_sec': self._vad_shift_length_in_sec,
             'trim_silence': False,
             'num_workers': self._cfg.num_workers,
+            'channel_selector': self._cfg.get('channel_selector', None),
         }
         self._vad_model.setup_test_data(test_data_config=vad_dl_config)
 
     def _setup_spkr_test_data(self, manifest_file):
+
         spk_dl_config = {
             'manifest_filepath': manifest_file,
             'sample_rate': self._cfg.sample_rate,
@@ -187,6 +189,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             'trim_silence': False,
             'labels': None,
             'num_workers': self._cfg.num_workers,
+            'channel_selector': self._cfg.get('channel_selector', None),
         }
         self._speaker_model.setup_test_data(spk_dl_config)
 
@@ -211,8 +214,14 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         all_len = 0
         data = []
         for line in open(manifest_file, 'r', encoding='utf-8'):
-            file = json.loads(line)['audio_filepath']
-            data.append(get_uniqname_from_filepath(file))
+            # file = json.loads(line)['audio_filepath']
+            # data.append(get_uniqname_from_filepath(file))
+            json_dict = json.loads(line)
+            if 'uniq_id' in json_dict and json_dict['uniq_id'] is not None:
+                uniq_id = json_dict['uniq_id']
+            else:
+                uniq_id = get_uniqname_from_filepath(json_dict['audio_filepath'])
+            data.append(uniq_id)
 
         status = get_vad_stream_status(data)
         for i, test_batch in enumerate(
@@ -292,6 +301,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             subsegments_manifest_file=self.subsegments_manifest_path,
             window=window,
             shift=shift,
+            include_uniq_id=True,
         )
         return None
 
@@ -355,6 +365,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         ):
             test_batch = [x.to(self._speaker_model.device) for x in test_batch]
             audio_signal, audio_signal_len, labels, slices = test_batch
+            
             with autocast():
                 _, embs = self._speaker_model.forward(input_signal=audio_signal, input_signal_length=audio_signal_len)
                 emb_shape = embs.shape[-1]
@@ -366,7 +377,10 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             for i, line in enumerate(manifest.readlines()):
                 line = line.strip()
                 dic = json.loads(line)
-                uniq_name = get_uniqname_from_filepath(dic['audio_filepath'])
+                if 'uniq_id' in dic and dic['uniq_id'] is not None:
+                    uniq_name = dic['uniq_id']
+                else:
+                    uniq_name = get_uniqname_from_filepath(dic['audio_filepath'])
                 if uniq_name in self.embeddings:
                     self.embeddings[uniq_name] = torch.cat((self.embeddings[uniq_name], all_embs[i].view(1, -1)))
                 else:

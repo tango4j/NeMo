@@ -53,7 +53,10 @@ def get_uniq_id_from_manifest_line(line: str) -> str:
     Retrieve `uniq_id` from the `audio_filepath` in a manifest line.
     """
     dic = json.loads(line.strip())
-    uniq_id = get_uniqname_from_filepath(dic['audio_filepath'])
+    if 'uniq_id' in dic and dic['uniq_id'] is not None:
+        uniq_id = dic['uniq_id']
+    else:
+        uniq_id = get_uniqname_from_filepath(dic['audio_filepath'])
     return uniq_id
 
 
@@ -108,7 +111,10 @@ def audio_rttm_map(manifest, attach_dur=False):
             if attach_dur:
                 uniqname = get_uniq_id_with_dur(meta)
             else:
-                uniqname = get_uniqname_from_filepath(filepath=meta['audio_filepath'])
+                if "uniq_id" in dic.keys():
+                    uniqname = dic['uniq_id']
+                else:
+                    uniqname = get_uniqname_from_filepath(filepath=meta['audio_filepath'])
 
             if uniqname not in AUDIO_RTTM_MAP:
                 AUDIO_RTTM_MAP[uniqname] = meta
@@ -915,7 +921,7 @@ def segments_manifest_to_subsegments_manifest(
             dic = json.loads(segment)
             audio, offset, duration, label = dic['audio_filepath'], dic['offset'], dic['duration'], dic['label']
             subsegments = get_subsegments(offset=offset, window=window, shift=shift, duration=duration)
-            if include_uniq_id and 'uniq_id' in dic:
+            if include_uniq_id and 'uniq_id' in dic and dic['uniq_id'] is not None:
                 uniq_id = dic['uniq_id']
             else:
                 uniq_id = None
@@ -1419,7 +1425,10 @@ def get_uniq_id_list_from_manifest(manifest_file: str):
         for i, line in enumerate(manifest.readlines()):
             line = line.strip()
             dic = json.loads(line)
-            uniq_id = get_uniqname_from_filepath(dic['audio_filepath'])
+            if 'uniq_id' in dic and dic['uniq_id'] is not None:
+                uniq_id = dic['uniq_id']
+            else:
+                uniq_id = get_uniqname_from_filepath(dic['audio_filepath'])
             uniq_id_list.append(uniq_id)
     return uniq_id_list
 
@@ -1442,7 +1451,11 @@ def get_id_tup_dict(uniq_id_list: List[str], test_data_collection, preds_list: L
     """
     session_dict = {x: [] for x in uniq_id_list}
     for idx, line in enumerate(test_data_collection):
-        uniq_id = get_uniqname_from_filepath(line.audio_file)
+        # If the manifest file contains multi-channel files for a session, get `uniq_id` value from the `test_data_collection`.
+        if isinstance(line.audio_file, list):
+            uniq_id = line.uniq_id
+        else:
+            uniq_id = get_uniqname_from_filepath(line.audio_file)
         session_dict[uniq_id].append([line.target_spks, preds_list[idx]])
     return session_dict
 
@@ -1569,7 +1582,9 @@ def make_rttm_with_overlap(
     no_references = False
     with open(manifest_file_path, 'r', encoding='utf-8') as manifest:
         for i, line in enumerate(manifest.readlines()):
+
             uniq_id = get_uniq_id_from_manifest_line(line)
+            
             manifest_dic = AUDIO_RTTM_MAP[uniq_id]
             clus_labels = clus_label_dict[uniq_id]
             manifest_file_lengths_list.append(len(clus_labels))

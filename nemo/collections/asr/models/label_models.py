@@ -222,7 +222,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
             if 'manifest_filepath' in config and config['manifest_filepath'] is None:
                 logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
                 return None
-
+            
             dataset = AudioToSpeechLabelDataset(
                 manifest_filepath=config['manifest_filepath'],
                 labels=config['labels'],
@@ -232,6 +232,7 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
                 trim=config.get('trim_silence', False),
                 normalize_audio=config.get('normalize_audio', False),
                 cal_labels_occurrence=config.get('cal_labels_occurrence', False),
+                channel_selector=config.get('channel_selector', None)
             )
             if dataset.labels_occurrence:
                 self.labels_occurrence = dataset.labels_occurrence

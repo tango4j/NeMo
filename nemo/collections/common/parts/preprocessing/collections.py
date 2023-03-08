@@ -516,12 +516,13 @@ class DiarizationLabel(_Collection):
 
     OUTPUT_TYPE = collections.namedtuple(
         typename='DiarizationLabelEntity',
-        field_names='audio_file duration rttm_file offset target_spks sess_spk_dict clus_spk_digits rttm_spk_digits',
+        field_names='audio_file uniq_id duration rttm_file offset target_spks sess_spk_dict clus_spk_digits rttm_spk_digits',
     )
 
     def __init__(
         self,
         audio_files: List[str],
+        uniq_ids: List[str],
         durations: List[float],
         rttm_files: List[str],
         offsets: List[float],
@@ -566,10 +567,11 @@ class DiarizationLabel(_Collection):
         data, duration_filtered = [], 0.0
 
         zipped_items = zip(
-            audio_files, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list
+            audio_files, uniq_ids, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list
         )
         for (
             audio_file,
+            uniq_id,
             duration,
             rttm_file,
             offset,
@@ -585,6 +587,7 @@ class DiarizationLabel(_Collection):
             data.append(
                 output_type(
                     audio_file,
+                    uniq_id,
                     duration,
                     rttm_file,
                     offset,
@@ -596,6 +599,12 @@ class DiarizationLabel(_Collection):
             )
 
             if index_by_file_id:
+                if isinstance(audio_file, list):
+                    if len(audio_file) == 0:
+                        raise ValueError(f"Empty audio file list: {audio_file}")
+                    audio_file_name = sorted(audio_file)[0]
+                else:
+                    audio_file_name = audio_file
                 file_id, _ = os.path.splitext(os.path.basename(audio_file))
                 self.mapping[file_id] = len(data) - 1
 
@@ -658,7 +667,8 @@ class DiarizationSpeechLabel(DiarizationLabel):
         self.clus_label_dict = clus_label_dict
         self.seq_eval_mode = seq_eval_mode
         self.pairwise_infer = pairwise_infer
-        audio_files, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list = (
+        audio_files, uniq_ids, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list = (
+            [],
             [],
             [],
             [],
@@ -708,6 +718,7 @@ class DiarizationSpeechLabel(DiarizationLabel):
 
             for target_spks in spk_comb_list:
                 audio_files.append(item['audio_file'])
+                uniq_ids.append(item['uniq_id'])
                 durations.append(item['duration'])
                 rttm_files.append(item['rttm_file'])
                 offsets.append(item['offset'])
@@ -718,6 +729,7 @@ class DiarizationSpeechLabel(DiarizationLabel):
 
         super().__init__(
             audio_files,
+            uniq_ids,
             durations,
             rttm_files,
             offsets,
@@ -773,8 +785,16 @@ class DiarizationSpeechLabel(DiarizationLabel):
             raise ValueError(
                 f"Manifest file has invalid json line " f"structure: {line} without proper audio file key."
             )
-        item['audio_file'] = os.path.expanduser(item['audio_file'])
-        item['uniq_id'] = os.path.splitext(os.path.basename(item['audio_file']))[0]
+        if isinstance(item['audio_file'], list): 
+            item['audio_file'] = [os.path.expanduser(audio_file_path) for audio_file_path in item['audio_file']]
+        else:
+            item['audio_file'] = os.path.expanduser(item['audio_file'])
+
+        if not isinstance(item['audio_file'], list): 
+            item['uniq_id'] = os.path.splitext(os.path.basename(item['audio_file']))[0]
+        elif 'uniq_id' not in item:
+            raise ValueError(f"Manifest file has invalid json line " f"structure: {line} without proper uniq_id key.")
+
         if 'duration' not in item:
             raise ValueError(f"Manifest file has invalid json line " f"structure: {line} without proper duration key.")
         item = dict(

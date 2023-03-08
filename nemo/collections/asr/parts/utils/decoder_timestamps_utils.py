@@ -52,7 +52,6 @@ class WERBPE_TS(WERBPE):
     This class is designed to support ASR models based on CTC and BPE.
     Please refer to the definition of WERBPE class for more information.
     """
-
     def __init__(
         self,
         tokenizer: TokenizerSpec,

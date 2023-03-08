@@ -174,13 +174,17 @@ def write_vad_infer_manifest(file: dict, args_func: dict) -> list:
     split_duration = args_func['split_duration']
     window_length_in_sec = args_func['window_length_in_sec']
     filepath = file['audio_filepath']
+    uniq_id = file.get('uniq_id', None)
     in_duration = file.get('duration', None)
     in_offset = file.get('offset', 0)
 
     try:
         sr = 16000
-        x, _sr = librosa.load(filepath, sr=sr, offset=in_offset, duration=in_duration)
-        duration = librosa.get_duration(y=x, sr=sr)
+        if isinstance(filepath, list):
+            duration = file['duration']
+        else:
+            x, _sr = librosa.load(filepath, sr=sr, offset=in_offset, duration=in_duration)
+            duration = librosa.get_duration(y=x, sr=sr)
         left = duration
         current_offset = in_offset
 
@@ -214,6 +218,7 @@ def write_vad_infer_manifest(file: dict, args_func: dict) -> list:
 
             metadata = {
                 'audio_filepath': filepath,
+                'uniq_id': uniq_id,
                 'duration': write_duration,
                 'label': label,
                 'text': '_',

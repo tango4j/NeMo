@@ -274,6 +274,7 @@ target_label_n, "offset": offset_in_sec_n}
         trim: bool = False,
         is_regression_task: bool = False,
         cal_labels_occurrence: Optional[bool] = False,
+        channel_selector: Optional[bool] = None,
     ):
         super().__init__()
         if isinstance(manifest_filepath, str):
@@ -290,6 +291,7 @@ target_label_n, "offset": offset_in_sec_n}
         self.featurizer = featurizer
         self.trim = trim
         self.is_regression_task = is_regression_task
+        self.channel_selector = channel_selector
 
         if not is_regression_task:
             self.labels = labels if labels else self.collection.uniq_labels
@@ -324,7 +326,7 @@ target_label_n, "offset": offset_in_sec_n}
         if offset is None:
             offset = 0
 
-        features = self.featurizer.process(sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim)
+        features = self.featurizer.process(sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim, channel_selector=self.channel_selector)
         f, fl = features, torch.tensor(features.shape[0]).long()
 
         if not self.is_regression_task:
@@ -417,6 +419,7 @@ class AudioToSpeechLabelDataset(_AudioLabelDataset):
         normalize_audio: bool = False,
         is_regression_task: bool = False,
         cal_labels_occurrence: Optional[bool] = False,
+        channel_selector: Optional[bool] = None,
     ):
         self.window_length_in_sec = window_length_in_sec
         self.shift_length_in_sec = shift_length_in_sec
@@ -434,6 +437,7 @@ class AudioToSpeechLabelDataset(_AudioLabelDataset):
             trim=trim,
             is_regression_task=is_regression_task,
             cal_labels_occurrence=cal_labels_occurrence,
+            channel_selector=channel_selector,
         )
 
     def fixed_seq_collate_fn(self, batch):
