@@ -115,8 +115,8 @@ class WebDatasetUrls(Dataset):
                             "Chunk size needs to be consistent across different shards."
         else:
             self.urls = map(wds.shardlists.expand_urls, data_path)
-            self.urls = list(itertools.chain.from_iterable(a))
-            self.chunk_size = data_cfg.webdataset.get("chunk_size", 1000)
+            self.urls = list(itertools.chain.from_iterable(self.urls))
+            self.chunk_size = data_cfg.webdataset.get("chunk_size")
 
         self.total_key_count += self.chunk_size * len(self.urls)
         assert self.total_key_count > 0, "No WebDataset data is found."
