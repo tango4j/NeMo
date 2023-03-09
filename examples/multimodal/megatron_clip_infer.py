@@ -67,7 +67,7 @@ def main(cfg) -> None:
     with open_dict(model_cfg):
         model_cfg.precision = cfg.trainer.precision
         if trainer.precision != "bf16":
-            model_cfg.megatron_amp_o2 = False
+            model_cfg.megatron_amp_O2 = False
         model_cfg.sequence_parallel = False
         model_cfg.activations_checkpoint_granularity = None
         model_cfg.activations_checkpoint_method = None
