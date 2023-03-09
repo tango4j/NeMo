@@ -326,31 +326,6 @@ class AudioSegment(object):
                 orig_sr=orig_sr,
                 channel_selector=None,
             )
-        # for a_file in audio_file_list:
-
-    # # for sph_path in tqdm(sph_list, desc="Submitting sph futures", unit="file"):
-    #         # audio_id, _ = os.path.splitext(os.path.basename(sph_path))
-    #         # out_path = os.path.join(dst_root, "{}.wav".format(audio_id))
-    #         futures.append(tp.submit(cls.from_file, 
-    #                                 a_file,
-    #                                 target_sr=target_sr,
-    #                                 int_values=int_values,
-    #                                 offset=offset,
-    #                                 duration=duration,
-    #                                 trim=trim,
-    #                                 trim_ref=trim_ref,
-    #                                 trim_top_db=trim_top_db,
-    #                                 trim_frame_length=trim_frame_length,
-    #                                 trim_hop_length=trim_hop_length,
-    #                                 orig_sr=orig_sr,
-    #                                 channel_selector=None,
-    #                             ))
-    #     count = 0 
-    #     for future in concurrent.futures.as_completed(futures):
-    #         count += 1
-    #         # pbar.update()
-    #         a_segment = future.result()
-
             # Only single-channel individual files are supported for now
             if a_segment.num_channels != 1:
                 raise RuntimeError(
