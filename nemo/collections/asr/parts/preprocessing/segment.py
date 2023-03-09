@@ -38,6 +38,7 @@ import os
 import random
 
 import librosa
+import concurrent.futures
 import numpy as np
 import soundfile as sf
 
@@ -218,10 +219,8 @@ class AudioSegment(object):
                 channel_selector = None
 
             # Load all files
-            for a_file in audio_file:
-                # Load audio from the current file
-                a_segment = cls.from_file(
-                    a_file,
+            samples = cls.from_file_list(
+                    audio_file_list=audio_file,
                     target_sr=target_sr,
                     int_values=int_values,
                     offset=offset,
@@ -234,33 +233,6 @@ class AudioSegment(object):
                     orig_sr=orig_sr,
                     channel_selector=None,
                 )
-
-                # Only single-channel individual files are supported for now
-                if a_segment.num_channels != 1:
-                    raise RuntimeError(
-                        f'Expecting a single-channel audio signal, but loaded {a_segment.num_channels} channels from file {a_file}'
-                    )
-
-                if target_sr is None:
-                    # All files need to be loaded with the same sample rate
-                    target_sr = a_segment.sample_rate
-
-                # Concatenate samples
-                a_samples = a_segment.samples[:, None]
-
-                if samples is None:
-                    samples = a_samples
-                else:
-                    # Check the dimensions match
-                    if len(a_samples) != len(samples):
-                        raise RuntimeError(
-                            f'Loaded samples need to have identical length: {a_samples.shape} != {sample.shape}'
-                        )
-
-                    # Concatenate along channel dimension
-                    samples = np.concatenate([samples, a_samples], axis=1)
-            # Finalized samples for class initialization
-            samples = np.squeeze(samples)
             sample_rate = target_sr
 
         else:
@@ -319,6 +291,93 @@ class AudioSegment(object):
             orig_sr=orig_sr,
             channel_selector=channel_selector,
         )
+    @classmethod
+    def from_file_list(
+        cls,
+        audio_file_list,
+        target_sr=None,
+        int_values=False,
+        offset=0,
+        duration=0,
+        trim=False,
+        trim_ref=np.max,
+        trim_top_db=60,
+        trim_frame_length=2048,
+        trim_hop_length=512,
+        orig_sr=None,
+        channel_selector=None,
+    ):
+        samples = None
+        tp = concurrent.futures.ProcessPoolExecutor(max_workers=64)
+        futures = []
+        for a_file in audio_file_list:
+            # Load audio from the current file
+            a_segment = cls.from_file(
+                a_file,
+                target_sr=target_sr,
+                int_values=int_values,
+                offset=offset,
+                duration=duration,
+                trim=trim,
+                trim_ref=trim_ref,
+                trim_top_db=trim_top_db,
+                trim_frame_length=trim_frame_length,
+                trim_hop_length=trim_hop_length,
+                orig_sr=orig_sr,
+                channel_selector=None,
+            )
+        # for a_file in audio_file_list:
+
+    # # for sph_path in tqdm(sph_list, desc="Submitting sph futures", unit="file"):
+    #         # audio_id, _ = os.path.splitext(os.path.basename(sph_path))
+    #         # out_path = os.path.join(dst_root, "{}.wav".format(audio_id))
+    #         futures.append(tp.submit(cls.from_file, 
+    #                                 a_file,
+    #                                 target_sr=target_sr,
+    #                                 int_values=int_values,
+    #                                 offset=offset,
+    #                                 duration=duration,
+    #                                 trim=trim,
+    #                                 trim_ref=trim_ref,
+    #                                 trim_top_db=trim_top_db,
+    #                                 trim_frame_length=trim_frame_length,
+    #                                 trim_hop_length=trim_hop_length,
+    #                                 orig_sr=orig_sr,
+    #                                 channel_selector=None,
+    #                             ))
+    #     count = 0 
+    #     for future in concurrent.futures.as_completed(futures):
+    #         count += 1
+    #         # pbar.update()
+    #         a_segment = future.result()
+
+            # Only single-channel individual files are supported for now
+            if a_segment.num_channels != 1:
+                raise RuntimeError(
+                    f'Expecting a single-channel audio signal, but loaded {a_segment.num_channels} channels from file {a_file}'
+                )
+
+            if target_sr is None:
+                # All files need to be loaded with the same sample rate
+                target_sr = a_segment.sample_rate
+
+            # Concatenate samples
+            a_samples = a_segment.samples[:, None]
+
+            if samples is None:
+                samples = a_samples
+            else:
+                # Check the dimensions match
+                if len(a_samples) != len(samples):
+                    # import ipdb; ipdb.set_trace()
+                    raise RuntimeError(
+                        f'Loaded samples need to have identical length: {a_samples.shape} != {sample.shape}'
+                    )
+
+                # Concatenate along channel dimension
+                samples = np.concatenate([samples, a_samples], axis=1)
+        samples = np.squeeze(samples)
+        return samples
 
     @classmethod
     def segment_from_file(

@@ -19,6 +19,7 @@ diarizer:
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
   collar: 0.25 # Collar value for scoring
   ignore_overlap: True # Consider or ignore overlap segments while scoring
+  channel_selector: ${channel_selector}
 
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
@@ -29,12 +30,12 @@ diarizer:
       shift_length_in_sec: 0.01 # Shift length in sec for generate frame level VAD prediction
       smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
-      onset: 0.1 # Onset threshold for detecting the beginning and end of a speech 
-      offset: 0.1 # Offset threshold for detecting the end of a speech
-      pad_onset: 0.1 # Adding durations before each speech segment 
+      onset: 0.9 # Onset threshold for detecting the beginning and end of a speech 
+      offset: 0.5 # Offset threshold for detecting the end of a speech
+      pad_onset: 0 # Adding durations before each speech segment 
       pad_offset: 0 # Adding durations after each speech segment 
       min_duration_on: 0 # Threshold for small non_speech deletion
-      min_duration_off: 0.2 # Threshold for short speech segment deletion
+      min_duration_off: 0.6 # Threshold for short speech segment deletion
       filter_speech_first: True 
 
   speaker_embeddings:
@@ -70,10 +71,11 @@ diarizer:
     parameters:
       asr_based_vad: False # if True, speech segmentation for diarization is based on word-timestamps from ASR inference.
       asr_based_vad_threshold: 1.0 # Threshold (in sec) that caps the gap between two words when generating VAD timestamps using ASR based VAD.
-      asr_batch_size: null # Batch size can be dependent on each ASR model. Default batch sizes are applied if set to null.
+      asr_batch_size: 32 # Batch size can be dependent on each ASR model. Default batch sizes are applied if set to null.
       decoder_delay_in_sec: null # Native decoder delay. null is recommended to use the default values for each ASR model.
       word_ts_anchor_offset: null # Offset to set a reference point from the start of the word. Recommended range of values is [-0.05  0.2]. 
       word_ts_anchor_pos: "start" # Select which part of the word timestamp we want to use. The options are: 'start', 'end', 'mid'.
+      channel_selector: ${channel_selector}
       fix_word_ts_with_VAD: False # Fix the word timestamp using VAD output. You must provide a VAD model to use this feature.
       colored_text: False # If True, use colored text to distinguish speakers in the output transcript.
       print_time: True # If True, the start and end time of each speaker turn is printed in the output transcript.

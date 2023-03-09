@@ -40,7 +40,6 @@ Currently, the following NGC models are supported:
     stt_en_quartznet15x5
     stt_en_citrinet*
     stt_en_conformer_ctc*
-
 """
 
 
@@ -50,21 +49,28 @@ def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
 
     # ASR inference for words and word timestamps
+    asr_decoder_ts = ASRDecoderTimeStamps(cfg.diarizer)
+    asr_model = asr_decoder_ts.set_asr_model()
+    word_hyp, word_ts_hyp = asr_decoder_ts.run_ASR(asr_model)
+ 
+    # MSDD diarizer
+    # diarizer_model = NeuralDiarizer(cfg=cfg)
+    # diarizer_model.diarize()
+    
+    # Clustering diarizer
+    asr_diar_offline = OfflineDiarWithASR(cfg.diarizer)
+    asr_diar_offline.word_ts_anchor_offset = asr_decoder_ts.word_ts_anchor_offset
+
+    """
+    # ASR inference for words and word timestamps 2
     # asr_decoder_ts = ASRDecoderTimeStamps(cfg.diarizer)
     # asr_model = asr_decoder_ts.set_asr_model()
     # word_hyp, word_ts_hyp = asr_decoder_ts.run_ASR(asr_model)
-
-    # MSDD diarizer
-    diarizer_model = NeuralDiarizer(cfg=cfg)
-    diarizer_model.diarize()
-    
-    # Clustering diarizer
-    # asr_diar_offline = OfflineDiarWithASR(cfg.diarizer)
-    # asr_diar_offline.word_ts_anchor_offset = asr_decoder_ts.word_ts_anchor_offset
+    """
 
     # Diarization inference for speaker labels
     diar_hyp, diar_score = asr_diar_offline.run_diarization(cfg, word_ts_hyp)
-    # trans_info_dict = asr_diar_offline.get_transcript_with_speaker_labels(diar_hyp, word_hyp, word_ts_hyp)
+    trans_info_dict = asr_diar_offline.get_transcript_with_speaker_labels(diar_hyp, word_hyp, word_ts_hyp)
 
     # If RTTM is provided and DER evaluation
     if diar_score is not None:
@@ -81,7 +87,7 @@ def main(cfg):
         # Calculate WER and cpWER if reference CTM files exist
         wer_results = OfflineDiarWithASR.evaluate(
             hyp_trans_info_dict=trans_info_dict,
-            audio_file_list=asr_diar_offline.audio_file_list,
+            audio_file_list=asr_diar_offline.mc_symbolic_audio_file_list,
             ref_ctm_file_list=asr_diar_offline.ctm_file_list,
         )
 
