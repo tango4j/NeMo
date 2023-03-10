@@ -14,7 +14,7 @@
 
 import itertools
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Optional, List, Dict
 
 import numpy as np
 import torch
@@ -42,6 +42,7 @@ from nemo.collections.vision.data.megatron.vit_dataset import build_train_valid_
 from nemo.collections.vision.models.vision_base_model import MegatronVisionModel
 from nemo.collections.vision.modules.vit.vit_backbone import VitBackbone, VitMlpHead
 from nemo.core.classes.common import PretrainedModelInfo
+from nemo.core.neural_types import ChannelType, NeuralType
 from nemo.utils import logging
 
 try:
@@ -795,3 +796,33 @@ class MegatronVitClassificationModel(MegatronVisionModel):
             return itertools.chain.from_iterable(module.parameters() for module in self.model)
         else:
             return self.model.parameters()
+
+    # For onnx export
+    def input_example(self, max_batch=8, max_dim=256):
+        """
+        Generates input examples for tracing etc.
+        Returns:
+            A tuple of input examples.
+        """
+        sample = next(self.parameters())
+        tokens = torch.randn(max_batch, 3, max_dim, max_dim, device=sample.device)
+        return tokens
+
+
+    @property
+    def input_types(self) -> Optional[Dict[str, NeuralType]]:
+        return {
+            "tokens": NeuralType(('B', 'C', 'H', 'W'), ChannelType()),
+        }
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        return {"logits": NeuralType(('B', 'D'), ChannelType())}
+
+    @property
+    def input_names(self) -> List[str]:
+        return ['tokens']
+
+    @property
+    def output_names(self) -> List[str]:
+        return ['logits']
