@@ -146,6 +146,7 @@ class FastPitchModule(NeuralModule):
         speaker_emb_condition_prosody: bool = False,
         speaker_emb_condition_decoder: bool = False,
         speaker_emb_condition_aligner: bool = False,
+        use_log_energy: bool = True
     ):
         super().__init__()
 
@@ -158,6 +159,7 @@ class FastPitchModule(NeuralModule):
         self.learn_alignment = aligner is not None
         self.use_duration_predictor = True
         self.binarize = False
+        self.use_log_energy = use_log_energy
         self.speaker_emb_condition_prosody = speaker_emb_condition_prosody
         self.speaker_emb_condition_decoder = speaker_emb_condition_decoder
         self.speaker_emb_condition_aligner = speaker_emb_condition_aligner
@@ -295,7 +297,8 @@ class FastPitchModule(NeuralModule):
                     energy_tgt = average_features(energy.unsqueeze(1), attn_hard_dur)
                 else:
                     energy_tgt = average_features(energy.unsqueeze(1), durs_predicted)
-                energy_tgt = torch.log(1.0 + energy_tgt)
+                if self.use_log_energy:
+                    energy_tgt = torch.log(1.0 + energy_tgt)
                 energy_emb = self.energy_emb(energy_tgt)
                 energy_tgt = energy_tgt.squeeze(1)
             else:

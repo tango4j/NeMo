@@ -15,7 +15,7 @@
 import functools
 import os
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -104,6 +104,31 @@ def general_padding(item, item_len, max_len, pad_value=0):
     return item
 
 
+def stack_tensors(tensors: List[torch.Tensor], max_lens: List[int], pad_value: float = 0.0) -> torch.Tensor:
+    """
+    Create batch by stacking input tensor list along the last/time axis.
+
+    Args:
+        tensors: List of tensors to pad and stack
+        pad_value: Value for padding
+        max_lens: List of lengths to pad each axis to, starting with the last axis
+
+    Returns:
+        Padded and stacked tensor.
+    """
+    padded_tensors = []
+    for tensor in tensors:
+        padding = []
+        for i, max_len in enumerate(max_lens, 1):
+            padding += [0, max_len - tensor.shape[-i]]
+
+        padded_tensor = torch.nn.functional.pad(tensor, pad=padding, value=pad_value)
+        padded_tensors.append(padded_tensor)
+
+    stacked_tensor = torch.stack(padded_tensors)
+    return stacked_tensor
+
+
 def logbeta(x, y):
     return gammaln(x) + gammaln(y) - gammaln(x + y)
 
@@ -150,3 +175,34 @@ def get_base_dir(paths):
         base_dir = common_path(base_dir, audio_dir)
 
     return base_dir
+
+
+def filter_dataset_by_duration(entries: List[dict], min_duration: float, max_duration: float):
+    filtered_entries = []
+    total_duration = 0.0
+    filtered_duration = 0.0
+    for entry in entries:
+        duration = entry["duration"]
+        total_duration += duration
+        if (min_duration and duration < min_duration) or (max_duration and duration > max_duration):
+            continue
+
+        filtered_duration += duration
+        filtered_entries.append(entry)
+
+    total_hours = total_duration / 3600.0
+    filtered_hours = filtered_duration / 3600.0
+
+    return filtered_entries, filtered_hours, total_hours
+
+
+def get_weighted_sampler(
+    sample_weights: List[float], batch_size: int, num_steps: int
+) -> torch.utils.data.WeightedRandomSampler:
+    weights = torch.tensor(sample_weights, dtype=torch.float64)
+    num_samples = batch_size * num_steps
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=weights,
+        num_samples=num_samples,
+    )
+    return sampler
