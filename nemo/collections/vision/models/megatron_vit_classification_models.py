@@ -806,7 +806,7 @@ class MegatronVitClassificationModel(MegatronVisionModel):
         """
         sample = next(self.parameters())
         tokens = torch.randn(max_batch, 3, max_dim, max_dim, device=sample.device)
-        return tokens
+        return tuple(tokens,)
 
 
     @property
