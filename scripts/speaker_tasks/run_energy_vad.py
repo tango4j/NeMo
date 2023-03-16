@@ -1,3 +1,31 @@
+"""
+# Script Usage:
+python run_energy_vad.py \
+    --manifest_file PATH_TO_MANIFEST \
+    --out_dir PATH_TO_OUT_DIR \
+    --threshold 10 \  # threshold for energy vad (dB above mean)
+    --use_ctm # set this flag to save CTM files
+
+# Function Usage:
+## init vars
+fname = "/media/data/datasets/vad_sd/multilingual_vad/mandarin/aishell2/audio/dev/wav/D0012/ID0012W0162.wav"
+fs, sig = scipy.io.wavfile.read(fname)
+sig = sig + 1e-10
+# run naive vad
+energy, vad, voiced = naive_frame_energy_vad(sig, fs, threshold=-35,
+                                                win_len=0.025, win_hop=0.025)
+
+## plot results
+multi_plots(data=[sig, energy, vad, voiced],
+            titles=["Input signal (voiced + silence)", "Short time energy",
+                    "Voice activity detection", "Output signal (voiced only)"],
+            fs=fs, plot_rows=4, step=1)
+
+## save voiced signal
+scipy.io.wavfile.write("naive_frame_energy_vad_no_silence_"+ fname,
+                        fs,  np.array(voiced, dtype=sig.dtype))
+"""
+
 import argparse
 import json
 import multiprocessing as mp
@@ -12,26 +40,6 @@ import scipy
 import scipy.io.wavfile
 import scipy.signal
 from tqdm import tqdm
-
-"""
-# init vars
-fname = "/media/data/datasets/vad_sd/multilingual_vad/mandarin/aishell2/audio/dev/wav/D0012/ID0012W0162.wav"
-fs, sig = scipy.io.wavfile.read(fname)
-sig = sig + 1e-10
-# run naive vad
-energy, vad, voiced = naive_frame_energy_vad(sig, fs, threshold=-35,
-                                                win_len=0.025, win_hop=0.025)
-
-# plot results
-multi_plots(data=[sig, energy, vad, voiced],
-            titles=["Input signal (voiced + silence)", "Short time energy",
-                    "Voice activity detection", "Output signal (voiced only)"],
-            fs=fs, plot_rows=4, step=1)
-
-# save voiced signal
-scipy.io.wavfile.write("naive_frame_energy_vad_no_silence_"+ fname,
-                        fs,  np.array(voiced, dtype=sig.dtype))
-"""
 
 
 def stride_trick(a, stride_length, stride_step):
