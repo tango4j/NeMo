@@ -66,6 +66,8 @@ def main(cfg) -> None:
     # These configs are required to be off during inference.
     with open_dict(model_cfg):
         model_cfg.precision = cfg.trainer.precision
+        model_cfg.vision.precision = cfg.trainer.precision
+        model_cfg.text.precision = cfg.trainer.precision
         if trainer.precision != "bf16":
             model_cfg.megatron_amp_O2 = False
         model_cfg.sequence_parallel = False
