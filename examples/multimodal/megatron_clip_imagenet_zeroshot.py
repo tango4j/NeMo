@@ -79,6 +79,8 @@ def main(cfg) -> None:
         save_restore_connector=save_restore_connector,
         strict=True,
     )
+    model.eval().requires_grad_(False)
+
     if model_cfg.get("megatron_amp_O2", False):
         vision_encoder = model.model.module.vision_encoder
         text_encoder = model.model.module.text_encoder
