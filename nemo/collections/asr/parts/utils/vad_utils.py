@@ -709,20 +709,20 @@ def generate_vad_segment_table_per_file(pred_filepath: str, per_args: dict) -> s
     out_dir, per_args_float = prepare_gen_segment_table(sequence, per_args)
 
     preds = generate_vad_segment_table_per_tensor(sequence, per_args_float)
-    ext = ".rttm" if per_args.get("use_rttm", False) else ".txt"
+    ext = ".rttm" if per_args.get("save_rttm", False) else ".txt"
     save_name = name + ext
     save_path = os.path.join(out_dir, save_name)
 
     if preds.shape[0] == 0:
         with open(save_path, "w", encoding='utf-8') as fp:
-            if per_args.get("use_rttm", False):
+            if per_args.get("save_rttm", False):
                 fp.write(f"SPEAKER <NA> 1 0 0 <NA> <NA> speech <NA> <NA>\n")
             else:
                 fp.write(f"0 0 speech\n")
     else:
         with open(save_path, "w", encoding='utf-8') as fp:
             for i in preds:
-                if per_args.get("use_rttm", False):
+                if per_args.get("save_rttm", False):
                     fp.write(f"SPEAKER {name} 1 {i[0]:.4f} {i[2]:.4f} <NA> <NA> speech <NA> <NA>\n")
                 else:
                     fp.write(f"{i[0]:.4f} {i[2]:.4f} speech\n")

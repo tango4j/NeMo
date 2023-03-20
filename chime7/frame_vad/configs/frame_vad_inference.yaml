@@ -29,6 +29,7 @@ vad:
       min_duration_on: 0.1 # threshold for small non_speech deletion
       min_duration_off: 0.1 # threshold for short speech segment deletion
       filter_speech_first: True
+      save_rttm: True
 
 prepared_manifest_vad_input: null # if not specify, it will automatically generated be "manifest_vad_input.json"
 frame_out_dir: "vad_frame"
