@@ -847,7 +847,7 @@ class ClusterEmbedding(torch.nn.Module):
 
         # Run ClusteringDiarizer which includes system VAD or oracle VAD.
         self._out_dir = self.clus_diar_model._diarizer_params.out_dir
-        self.out_rttm_dir = os.path.join(self._out_dir, 'pred_ovl_rttms')
+        self.out_rttm_dir = os.path.join(self._out_dir, 'pred_rttms')
         os.makedirs(self.out_rttm_dir, exist_ok=True)
 
         self.clus_diar_model._cluster_params = self.cfg_diar_infer.diarizer.clustering.parameters

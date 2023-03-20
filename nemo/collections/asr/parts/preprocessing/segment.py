@@ -219,6 +219,7 @@ class AudioSegment(object):
                 channel_selector = None
 
             # Load all files
+            sample_rate = target_sr
             samples = cls.from_file_list(
                     audio_file_list=audio_file,
                     target_sr=target_sr,
@@ -233,7 +234,6 @@ class AudioSegment(object):
                     orig_sr=orig_sr,
                     channel_selector=None,
                 )
-            sample_rate = target_sr
 
         else:
             if not isinstance(audio_file, str) or os.path.splitext(audio_file)[-1] in sf_supported_formats:
