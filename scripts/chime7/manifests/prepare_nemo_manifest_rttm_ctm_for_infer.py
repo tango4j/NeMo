@@ -1,4 +1,3 @@
-import subprocess
 import argparse
 import os
 import json
@@ -6,7 +5,6 @@ import glob
 import tqdm
 import numpy as np
 import soundfile as sf
-import librosa
 from nemo.utils import logging
 from collections import Counter
 from nemo.collections.asr.parts.utils.manifest_utils import (
@@ -23,6 +21,18 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
     labels_to_rttmfile,
 )
 from typing import Dict, List, Tuple
+
+"""
+This script is used to prepare the manifest files for VAD or diarization inference.
+
+Example:
+
+python <NeMo-Root>/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_infer.py \
+    --data-dir /disk_d/datasets/chime7_official_cleaned/ \
+    --subset dev \
+    --output-dir /disk_d/datasets/nemo_chime7_manifests \
+
+"""
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
