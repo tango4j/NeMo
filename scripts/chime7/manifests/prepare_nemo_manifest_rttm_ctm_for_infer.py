@@ -10,32 +10,38 @@ import librosa
 from nemo.utils import logging
 from collections import Counter
 from nemo.collections.asr.parts.utils.manifest_utils import (
-    read_manifest, 
-    write_manifest, 
     get_path_dict,
-    get_dict_from_wavlist,
     read_file,
     write_file,
 )
-from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
 from nemo.collections.asr.parts.utils.diarization_utils import (
     convert_word_dict_seq_to_ctm,
     write_txt
 )
-
 from nemo.collections.asr.parts.utils.speaker_utils import (
-    get_overlap_range,
-    is_overlap,
     rttm_to_labels,
     labels_to_rttmfile,
 )
-from typing import Dict, List
-from pprint import pprint 
-import yaml
+from typing import Dict, List, Tuple
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
 datasets = ['chime6', 'dipco', 'mixer6']
+
+def get_rttm_info(rttm_filepath: str) -> Tuple[int, float, float]:
+    """
+    Get the number of speakers, the minimum and maximum time from an RTTM file
+    """
+    labels = rttm_to_labels(rttm_filepath)
+    label_list, spk_list = [], []
+    for l in labels:
+        label_list.append((float(l.split()[0]), float(l.split()[1])))
+        spk_list.append(l.split()[-1])
+    label_array = np.array(label_list)
+    num_speakers = Counter(spk_list).keys().__len__()
+    rttm_min = np.min(label_array[:, 0])
+    rttm_max = np.max(label_array[:, 1])
+    return num_speakers, rttm_min, rttm_max
 
 def create_multichannel_manifest(
     uniq_id_path: str,
@@ -92,8 +98,8 @@ def create_multichannel_manifest(
 
         if rttm is not None:
             rttm = rttm.strip()
-            labels = rttm_to_labels(rttm)
-            num_speakers = Counter([l.split()[-1] for l in labels]).keys().__len__()
+            num_speakers, rttm_min, rttm_max = get_rttm_info(rttm_filepath=rttm)
+            rttm_dur = rttm_max - rttm_min
         else:
             num_speakers = None
 
@@ -120,10 +126,11 @@ def create_multichannel_manifest(
         meta = [
             {
                 "audio_filepath": audio_line_list,
-                "offset": 0,
-                "duration": min_duration,
+                "offset": rttm_min,
+                "duration": rttm_dur,
                 "min_duration": min_duration,
                 "max_duration": max_duration,
+                "uniq_id": uid,
                 "label": "infer",
                 "text": text,
                 "num_speakers": num_speakers,
@@ -148,7 +155,6 @@ def create_speaker_line(start: int, end: int, speaker_id: int, output_precision:
     Returns:
         rttm_list (list): List of rttm entries
     """
-    rttm_list = []
     new_start = start
     t_stt = float(round(new_start, output_precision))
     t_end = float(round(end, output_precision))
@@ -205,7 +211,6 @@ def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str
         data['words'] = data['words'].replace("\u2019", "'")
 
     # path is relative to dataset_output_dir
-    audio_filepath = os.path.join('audio', subset, audio_filename)
     offset = float(data['start_time'])
     duration = float(data['end_time']) - offset
     end_time = float(offset + duration)
@@ -260,7 +265,7 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
     return mc_audio_file_list
 
 
-def main(data_dir: str, subset: str, output_dir: str, overwrite: bool, output_precision: int=2):
+def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     """
     Take original CHiME-7 data and prepare
     multichannel audio files and the corresponding manifests for inference and evaluation.
@@ -273,8 +278,6 @@ def main(data_dir: str, subset: str, output_dir: str, overwrite: bool, output_pr
         if not os.path.isdir(dataset_output_dir):
             logging.info('Creating dir: %s', dataset_output_dir)
             os.makedirs(dataset_output_dir)
-        elif not overwrite:
-            raise RuntimeError(f'Directory {dataset_output_dir} already exists. Consider using --overwrite.')
 
         transcriptions_scoring_dir = os.path.join(dataset_dir, 'transcriptions_scoring', subset)
         transcriptions_scoring_files = glob.glob(transcriptions_scoring_dir + '/*.json')
@@ -303,14 +306,13 @@ def main(data_dir: str, subset: str, output_dir: str, overwrite: bool, output_pr
                 word_dict_list.extend(new_word_dict_lines)
                 
                 # path is relative to dataset_output_dir
-                audio_filepath = os.path.join('audio', subset, audio_filename)
-                offset = float(data['start_time'])
-                duration = float(data['end_time']) - offset
-                text = data['words']
                 for key in ['audio_filepath', 'offset', 'duration', 'text']:
                     assert key not in data
                 data.update(
-                    {'audio_filepath': audio_filepath, 'offset': offset, 'duration': duration, 'text': text,}
+                    {'audio_filepath': os.path.join('audio', subset, audio_filename),
+                     'offset': float(data['start_time']),
+                     'duration': float(data['end_time']) - offset,
+                     'text': data['words'],}
                 )
                 manifest_data.append(data)
 
@@ -404,7 +406,6 @@ def get_data_stats(session_duration_list: list, output_precision: int) -> Dict[s
     data_stats['num_files'] = len(session_duration_list)
     return data_stats
 
-
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
@@ -419,4 +420,4 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    main(data_dir=args.data_dir, subset=args.subset, output_dir=args.output_dir, overwrite=args.overwrite)
+    main(data_dir=args.data_dir, subset=args.subset, output_dir=args.output_dir)
