@@ -165,7 +165,7 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
                     segments=segments,
                     frame_length=cfg.vad.parameters.shift_length_in_sec,
                     duration=data['duration'],
-                    offset=0.0,
+                    offset=data['offset'],
                 )
                 all_labels_map[uniq_audio_name] = [int(x) for x in label_str.split()]
             else:
