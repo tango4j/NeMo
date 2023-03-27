@@ -202,6 +202,8 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
             'labels': ['infer'],
             'num_workers': cfg.num_workers,
             'shuffle': False,
+            'normalize_audio': cfg.vad.parameters.normalize_audio,
+            'normalize_audio_target': cfg.vad.parameters.normalize_audio_target,
         }
     )
 
