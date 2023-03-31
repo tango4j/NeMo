@@ -27,7 +27,7 @@ class PreemptionCallback(Callback):
     PreemptionCallback is always enabled.
     """
 
-    def __init__(self, device, checkpoint_callback, sig=signal.SIGKILL):
+    def __init__(self, device, checkpoint_callback, sig=signal.SIGCHLD):
         self.sig = sig
         self.device = device
         self.checkpoint_callback = checkpoint_callback
