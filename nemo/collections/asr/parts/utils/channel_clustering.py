@@ -31,8 +31,11 @@
 # https://arxiv.org/pdf/2003.02405.pdf and the implementation from
 # https://github.com/tango4j/Auto-Tuning-Spectral-Clustering.
 
+import torch
+import numpy as np
+
 # from tests.collections.asr.test_diar_utils import generate_toy_data
-from speaker_utils import (
+from nemo.collections.asr.parts.utils.speaker_utils import (
     check_ranges,
     get_new_cursor_for_update,
     get_online_subsegments_from_buffer,
@@ -42,7 +45,7 @@ from speaker_utils import (
     merge_float_intervals,
     merge_int_intervals,
 )
-from offline_clustering import (
+from nemo.collections.asr.parts.utils.offline_clustering import (
     NMESC,
     SpectralClustering,
     SpeakerClustering,
@@ -52,7 +55,8 @@ from offline_clustering import (
     split_input_data,
     cos_similarity,
 )
-import torch
+from nemo.collections.asr.parts.utils.audio_utils import estimated_coherence
+from nemo.collections.asr.modules.audio_preprocessing import AudioToSpectrogram
 
 
 def generate_orthogonal_embs(total_spks, perturb_sigma, emb_dim):
@@ -106,10 +110,12 @@ def channel_cluster(
     mat: torch.Tensor,
     oracle_num_channels: int = -1,
     max_rp_threshold: float = 0.5,
-    max_num_channels: int = 5,
+    max_num_channels: int = 7,
     min_num_channels: int = 1,
+    sparse_search: bool = True,
     sparse_search_volume: int = 30,
     fixed_thres: float = -1.0,
+    force_fully_connected: bool = False,
     kmeans_random_trials: int = 10,
     cuda: bool = True,
 ) -> torch.LongTensor:
@@ -118,11 +124,12 @@ def channel_cluster(
         mat,
         max_num_speakers=max_num_channels,
         max_rp_threshold=max_rp_threshold,
-        sparse_search=True,
+        sparse_search=sparse_search,
         sparse_search_volume=sparse_search_volume,
         fixed_thres=fixed_thres,
         nme_mat_size=100,
         maj_vote_spk_count=False,
+        force_fully_connected=force_fully_connected,
         cuda=True,
     )
     device = mat.device
@@ -150,6 +157,65 @@ def channel_cluster(
     )
     Y = spectral_model.forward(affinity_mat)
     return Y
+
+def channel_cluster_from_coherence(
+        audio_signal: torch.Tensor,
+        sample_rate: int = 16000,
+        fft_length: int = 1024,
+        hop_length: int = 256,
+        freq_min: float = 300,
+        freq_max: float = 3500,
+        mag_power: float = 2,
+        output_coherence: bool = False,
+        ) -> torch.LongTensor:
+    """
+    Args:
+        audio_signal: Multichannel time domain signal, shape (channel, time)
+        sample_rate: sample rate of the audio signal
+        fft_length: length of the window and FFT for the STFT
+        hop_length: hop length for the STFT
+        freq_min: min frequency to consider, in Hz
+        freq_max: max frequency to consider, in Hz
+    Returns:
+        Cluster assignments
+    """
+    def freq_to_subband(freq, fft_length, sample_rate):
+        """Convert freq to subband
+
+        Args:
+            freq: frequency in Hz
+
+        Returns:
+            Subband index
+        """
+        num_subbands = fft_length//2 + 1
+        return int(np.round(freq * fft_length / sample_rate))
+
+    k_min = freq_to_subband(freq_min, fft_length, sample_rate)
+    k_max = freq_to_subband(freq_max, fft_length, sample_rate)
+
+    stft = AudioToSpectrogram(fft_length=fft_length, hop_length=hop_length)
+
+    # analysis transform
+    A_spec, _ = stft(input=audio_signal[None, ...])
+
+    # reshape to (freq, time, channel)
+    A_spec = A_spec[0].permute(1,2,0).cpu().numpy()
+
+    # estimate coherence
+    coherence = estimated_coherence(A_spec[k_min:k_max, ...])
+    # use (magnitude coherence)^power
+    mag_coherence = np.abs(coherence) ** mag_power
+    # average across subbands
+    mag_coherence = np.mean(mag_coherence, axis=0)
+
+    # run clustering
+    clusters = channel_cluster(mat=torch.tensor(mag_coherence))
+
+    if output_coherence:
+        return clusters, mag_coherence
+    else:
+        return clusters
 
 if __name__ == "__main__":
     for n_spks in [2,3,4,5]:
