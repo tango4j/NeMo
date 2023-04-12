@@ -71,7 +71,7 @@ def generate_orthogonal_embs(total_spks, perturb_sigma, emb_dim):
     return orth_embs
 
 def generate_toy_data(
-    n_spks=2,
+    n_clusters=2,
     spk_dur=10,
     emb_dim=192,
     perturb_sigma=0.0,
@@ -80,11 +80,11 @@ def generate_toy_data(
     torch_seed=0,
 ):
     torch.manual_seed(torch_seed)
-    spk_timestamps = [(spk_dur * k, spk_dur) for k in range(n_spks)]
+    spk_timestamps = [(spk_dur * k, spk_dur) for k in range(n_clusters)]
     emb_list, seg_list = [], []
     multiscale_segment_counts = [0 for _ in range(len(ms_window))]
     ground_truth = []
-    random_orthogonal_embs = generate_orthogonal_embs(n_spks, perturb_sigma, emb_dim)
+    random_orthogonal_embs = generate_orthogonal_embs(n_clusters, perturb_sigma, emb_dim)
     for scale_idx, (window, shift) in enumerate(zip(ms_window, ms_shift)):
         for spk_idx, (offset, dur) in enumerate(spk_timestamps):
             segments_stt_dur = get_subsegments(offset=offset, window=window, shift=shift, duration=dur)
@@ -158,6 +158,18 @@ def channel_cluster(
     Y = spectral_model.forward(affinity_mat)
     return Y
 
+def freq_to_subband(freq, fft_length, sample_rate):
+    """Convert freq to subband
+
+    Args:
+        freq: frequency in Hz
+
+    Returns:
+        Subband index
+    """
+    num_subbands = fft_length//2 + 1
+    return int(np.round(freq * fft_length / sample_rate))
+
 def channel_cluster_from_coherence(
         audio_signal: torch.Tensor,
         sample_rate: int = 16000,
@@ -179,18 +191,6 @@ def channel_cluster_from_coherence(
     Returns:
         Cluster assignments
     """
-    def freq_to_subband(freq, fft_length, sample_rate):
-        """Convert freq to subband
-
-        Args:
-            freq: frequency in Hz
-
-        Returns:
-            Subband index
-        """
-        num_subbands = fft_length//2 + 1
-        return int(np.round(freq * fft_length / sample_rate))
-
     k_min = freq_to_subband(freq_min, fft_length, sample_rate)
     k_max = freq_to_subband(freq_max, fft_length, sample_rate)
 
@@ -218,11 +218,11 @@ def channel_cluster_from_coherence(
         return clusters
 
 if __name__ == "__main__":
-    for n_spks in [2,3,4,5]:
-        res = generate_toy_data(n_spks=n_spks)
+    for n_clusters in [2,3,4,5]:
+        res = generate_toy_data(n_clusters=n_clusters)
         embs = res[0]
         mat = cos_similarity(embs, embs)
         Y = channel_cluster(mat=mat)
 
         print(f"Y: {Y}")
-        print(f"len(set(Y)): {len(set(Y.cpu().tolist()))}, n_spks: {n_spks}")
+        print(f"len(set(Y)): {len(set(Y.cpu().tolist()))}, n_clusters: {n_clusters}")
