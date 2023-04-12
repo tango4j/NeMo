@@ -897,6 +897,7 @@ class NMESC:
         use_subsampling_for_nme: bool = True,
         fixed_thres: float = -1.0,
         maj_vote_spk_count: bool = False,
+        force_fully_connected: bool = True,
         parallelism: bool = True,
         cuda: bool = False,
         device: torch.device = torch.device('cpu'),
@@ -932,6 +933,7 @@ class NMESC:
                 If True, take a majority vote on all p-values in the given range to estimate the number of speakers.
                 The majority voting may contribute to surpress overcounting of the speakers and improve speaker
                 counting accuracy.
+            force_fully_connected: Force the affinity matrix to be fully connected
             parallelism (bool):
                 If True, turn on parallelism based on torch.jit.script library.
             cuda (bool):
@@ -955,6 +957,7 @@ class NMESC:
         self.cuda: bool = cuda
         self.device: torch.device = device
         self.maj_vote_spk_count: bool = maj_vote_spk_count
+        self.force_fully_connected: bool = force_fully_connected
         self.parallelism: bool = parallelism
 
     def forward(self) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1005,7 +1008,7 @@ class NMESC:
 
         # Checks whether the affinity graph is fully connected.
         # If not, it adds a minimum number of connections to make it fully connected.
-        if not isGraphFullyConnected(affinity_mat, device=self.device):
+        if self.force_fully_connected and not isGraphFullyConnected(affinity_mat, device=self.device):
             affinity_mat, rp_p_value = getMinimumConnection(
                 self.mat, self.max_N, self.p_value_list, device=self.device
             )
