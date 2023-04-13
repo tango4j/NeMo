@@ -61,6 +61,34 @@ def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.
     res.fill_diagonal_(1)
     return res
 
+def drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda, drop_thres=0.1):
+    if cuda:
+        embs = emb.cuda()
+        Y = Y.cuda()
+
+    emb_means= []
+    for spk in set(Y.cpu().numpy()):
+        emb_means.append(torch.mean(embs[Y==spk], dim=0))
+    if len(emb_means) == 1:
+        return Y
+    stacked = torch.stack(emb_means)
+    spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
+    spk_aff.fill_diagonal_(0)
+    spk_aff_collapsed = torch.sum(spk_aff.fill_diagonal_(0), dim=0)/(spk_aff.shape[0]-1)
+    sorted_spk_affs = spk_aff_collapsed.sort()[0]
+    diffs = sorted_spk_affs[1:] - sorted_spk_affs[:-1] 
+    print("spk_aff_collapsed", spk_aff_collapsed)
+    print("diffs:", diffs)
+    if spk_aff.shape[0] > min_num_speakers:
+        # if spk_aff_collapsed.min() < drop_thres:
+        if diffs.max().item() > drop_thres:
+            n_clusters = int(spk_aff.shape[0]-1)
+            spectral_model = SpectralClustering(
+                n_clusters=n_clusters, n_random_trials=1, cuda=cuda, device=emb.device
+            )
+            Y = spectral_model.forward(affinity_mat)
+    return Y
+
 
 def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
     """
@@ -707,7 +735,7 @@ def split_input_data(
 
 
 def estimateNumofSpeakers(
-    affinity_mat: torch.Tensor, max_num_speakers: int, cuda: bool = False
+    affinity_mat: torch.Tensor, max_num_speakers: int, cuda: bool = False, 
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Estimate the number of speakers using eigendecomposition on the Laplacian Matrix.
@@ -1063,7 +1091,7 @@ class NMESC:
         """
         affinity_mat = getAffinityGraphMat(self.mat, p_neighbors)
         est_num_of_spk, lambdas, lambda_gap_list = estimateNumofSpeakers(
-            affinity_mat, self.max_num_speakers, self.cuda
+            affinity_mat, self.max_num_speakers, self.cuda, 
         )
         arg_sorted_idx = torch.argsort(lambda_gap_list[: self.max_num_speakers], descending=True)
         max_key = arg_sorted_idx[0]
@@ -1205,6 +1233,7 @@ class SpeakerClustering(torch.nn.Module):
         oracle_num_speakers: int = -1,
         max_rp_threshold: float = 0.15,
         max_num_speakers: int = 8,
+        min_num_speakers: int = 1,
         enhanced_count_thres: int = 40,
         sparse_search_volume: int = 30,
         fixed_thres: float = -1.0,
@@ -1313,6 +1342,9 @@ class SpeakerClustering(torch.nn.Module):
             nmesc.fixed_thres = max_rp_threshold
             est_num_of_spk, p_hat_value = nmesc.forward()
             affinity_mat = mat
+        
+        # Clip the estimated number of speakers to the range of [min_num_speakers, max_num_speakers]
+        est_num_of_spk = torch.clamp(est_num_of_spk, min=min_num_speakers, max=max_num_speakers)
 
         # n_clusters is number of speakers estimated from spectral clustering.
         if oracle_num_speakers > 0:
@@ -1326,4 +1358,7 @@ class SpeakerClustering(torch.nn.Module):
             n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=self.device
         )
         Y = spectral_model.forward(affinity_mat)
+        Y = drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda=self.cuda)
         return Y
+    
+

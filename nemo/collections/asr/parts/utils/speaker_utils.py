@@ -435,6 +435,27 @@ def generate_cluster_labels(segment_ranges: List[str], cluster_labels: List[int]
     diar_hyp = merge_stamps(cont_lines)
     return diar_hyp, lines
 
+# def drop_empty_speakers(timestamps, cluster_labels, uniq_id, out_rttm_dir):
+
+#     """
+#     """
+#     shift_length_in_seconds = 0.02
+#     frames_per_sec = int(1/shift_length_in_seconds)
+#     # Read frame files 
+#     frame_file = os.path.join(out_rttm_dir, '..', 'vad_outputs', 'frame_merged', f'{uniq_id}.frame')
+#     with open(frame_file, 'r') as f:
+#         frame_str_list = f.readlines()
+#     frames = torch.tensor([ float(x.strip()) for x in  frame_str_list])
+#     frame_int_inds = (timestamps * frames_per_sec).int()
+#     frame_logit_mean_dict = {x:[] for x in set(cluster_labels)}
+#     for spk_idx in set(cluster_labels):
+#         spk_frame_inds = frame_int_inds[cluster_labels == spk_idx]
+#         for i in range(len(spk_frame_inds) - 1):
+#             # calculate the mean of frame values
+#             frame_mean = torch.mean(frames[spk_frame_inds[i, 0]:spk_frame_inds[i, 1]]).item()
+#             frame_logit_mean_dict[spk_idx].append(frame_mean)
+#         frame_logit_mean_dict[spk_idx] = torch.tensor(frame_logit_mean_dict[spk_idx]).mean().item()
+#     return timestamps, cluster_labels
 
 def perform_clustering(
     embs_and_timestamps, AUDIO_RTTM_MAP, out_rttm_dir, clustering_params, device, verbose: bool = True
@@ -488,7 +509,7 @@ def perform_clustering(
             num_speakers = -1
 
         base_scale_idx = uniq_embs_and_timestamps['multiscale_segment_counts'].shape[0] - 1
-
+        
         cluster_labels = speaker_clustering.forward_infer(
             embeddings_in_scales=uniq_embs_and_timestamps['embeddings'],
             timestamps_in_scales=uniq_embs_and_timestamps['timestamps'],
@@ -496,6 +517,7 @@ def perform_clustering(
             multiscale_weights=uniq_embs_and_timestamps['multiscale_weights'],
             oracle_num_speakers=int(num_speakers),
             max_num_speakers=int(clustering_params.max_num_speakers),
+            min_num_speakers=int(clustering_params.get('min_num_speakers', 1)),
             max_rp_threshold=float(clustering_params.max_rp_threshold),
             sparse_search_volume=int(clustering_params.sparse_search_volume),
         )
@@ -518,6 +540,7 @@ def perform_clustering(
             lines_cluster_labels.extend([f'{uniq_id} {seg_line}\n' for seg_line in lines])
         hypothesis = labels_to_pyannote_object(labels, uniq_name=uniq_id)
         all_hypothesis.append([uniq_id, hypothesis])
+        
 
         rttm_file = audio_rttm_values.get('rttm_filepath', None)
         if rttm_file is not None and os.path.exists(rttm_file) and not no_references:

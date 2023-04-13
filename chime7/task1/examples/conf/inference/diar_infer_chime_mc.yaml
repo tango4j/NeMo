@@ -4,7 +4,7 @@
 # The configurations in this YAML file is suitable for telephone recordings involving 2~8 speakers in a session and may not show the best performance on the other types of acoustic conditions or dialogues.
 # An example line in an input manifest file (`.json` format):
 # {"audio_filepath": "/path/to/audio_file", "offset": 0, "duration": null, "label": "infer", "text": "-", "num_speakers": null, "rttm_filepath": "/path/to/rttm/file", "uem_filepath": "/path/to/uem/file"}
-name: &name "ClusterDiarizer"
+name: &name "ClusterDiarizerMCchime7"
 
 num_workers: 1
 sample_rate: 16000
@@ -20,6 +20,7 @@ diarizer:
   collar: 0.25 # Collar value for scoring
   ignore_overlap: True # Consider or ignore overlap segments while scoring
   channel_selector: ${channel_selector}
+  multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
 
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
@@ -36,6 +37,7 @@ diarizer:
       pad_offset: 0 # Adding durations after each speech segment 
       min_duration_on: 0 # Threshold for small non_speech deletion
       min_duration_off: 0.6 # Threshold for short speech segment deletion
+      split_duration: 500
       filter_speech_first: True 
 
   speaker_embeddings:

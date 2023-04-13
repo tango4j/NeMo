@@ -6,14 +6,10 @@ import glob
 import tqdm
 import numpy as np
 import soundfile as sf
-import librosa
 from nemo.utils import logging
 from collections import Counter
 from nemo.collections.asr.parts.utils.manifest_utils import (
-    read_manifest, 
-    write_manifest, 
     get_path_dict,
-    get_dict_from_wavlist,
     read_file,
     write_file,
 )
@@ -24,8 +20,6 @@ from nemo.collections.asr.parts.utils.diarization_utils import (
 )
 
 from nemo.collections.asr.parts.utils.speaker_utils import (
-    get_overlap_range,
-    is_overlap,
     rttm_to_labels,
     labels_to_rttmfile,
 )
@@ -117,6 +111,7 @@ def create_multichannel_manifest(
             duration = float(data.shape[0] / samplerate)
             audio_duration_list.append(duration)
         min_duration, max_duration = min(audio_duration_list), max(audio_duration_list)
+
         meta = [
             {
                 "audio_filepath": audio_line_list,
@@ -148,7 +143,6 @@ def create_speaker_line(start: int, end: int, speaker_id: int, output_precision:
     Returns:
         rttm_list (list): List of rttm entries
     """
-    rttm_list = []
     new_start = start
     t_stt = float(round(new_start, output_precision))
     t_end = float(round(end, output_precision))
@@ -205,7 +199,6 @@ def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str
         data['words'] = data['words'].replace("\u2019", "'")
 
     # path is relative to dataset_output_dir
-    audio_filepath = os.path.join('audio', subset, audio_filename)
     offset = float(data['start_time'])
     duration = float(data['end_time']) - offset
     end_time = float(offset + duration)
@@ -260,7 +253,7 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
     return mc_audio_file_list
 
 
-def main(data_dir: str, subset: str, output_dir: str, overwrite: bool, output_precision: int=2):
+def main(data_dir: str, subset: str, output_dir: str, overwrite: bool=True, output_precision: int=2):
     """
     Take original CHiME-7 data and prepare
     multichannel audio files and the corresponding manifests for inference and evaluation.
@@ -284,8 +277,9 @@ def main(data_dir: str, subset: str, output_dir: str, overwrite: bool, output_pr
 
         # Prepare manifest data
         manifest_data, session_duration_list = [], []
-        rttm_path_list, ctm_path_list, text_path_list, mc_audio_path_list, uniq_id_list = [], [], [], [], []
+        rttm_path_list, ctm_path_list, mc_audio_path_list, uniq_id_list = [], [], [], []
         transcriptions_scoring_files = sorted(transcriptions_scoring_files)
+        # import ipdb; ipdb.set_trace()
         for file_path in transcriptions_scoring_files:
             dataset_dir = os.path.join(data_dir, dataset)
             logging.info('Process: %s', file_path)
@@ -419,4 +413,4 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    main(data_dir=args.data_dir, subset=args.subset, output_dir=args.output_dir, overwrite=args.overwrite)
+    main(data_dir=args.data_dir, subset=args.subset, output_dir=args.output_dir)

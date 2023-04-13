@@ -14,6 +14,30 @@
 
 import json
 import os
+import shutil
+from pathlib import Path
+from typing import List, Tuple, Union
+import glob
+
+import pandas as pd
+import torch
+from pyannote.core import Annotation, Segment
+from pyannote.metrics import detection
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
+
+from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
+from nemo.collections.asr.parts.utils.vad_utils import (
+    MultichannelVADProcessor,
+    generate_vad_frame_pred,
+    generate_vad_segment_table,
+    prepare_manifest,
+)
+from nemo.core.config import hydra_runner
+from nemo.utils import logging
+######
+
+import json
+import os
 import pickle as pkl
 import shutil
 import tarfile
@@ -28,6 +52,7 @@ from tqdm import tqdm
 
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.models.classification_models import EncDecClassificationModel
+from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
 from nemo.collections.asr.parts.mixins.mixins import DiarizationMixin
 from nemo.collections.asr.parts.utils.speaker_utils import (
@@ -43,9 +68,10 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
 from nemo.collections.asr.parts.utils.vad_utils import (
     generate_overlap_vad_seq,
     generate_vad_segment_table,
-    get_vad_stream_status,
     prepare_manifest,
+    generate_vad_frame_pred,
 )
+
 from nemo.core.classes import Model
 from nemo.utils import logging, model_utils
 
@@ -70,6 +96,7 @@ def get_available_model_names(class_name):
     "lists available pretrained model names from NGC"
     available_models = class_name.list_available_models()
     return list(map(lambda x: x.pretrained_model_name, available_models))
+
 
 
 class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
@@ -105,6 +132,9 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
 
         # Clustering params
         self._cluster_params = self._diarizer_params.clustering.parameters
+        if self._diarizer_params.multi_channel_mode is not None:
+            self._mc_vad_processor = MultichannelVADProcessor(cfg=cfg)
+            self._argmax_idx_dict = {}
 
     @classmethod
     def list_available_models(cls):
@@ -116,7 +146,10 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         """
         model_path = self._cfg.diarizer.vad.model_path
         if model_path.endswith('.nemo'):
-            self._vad_model = EncDecClassificationModel.restore_from(model_path, map_location=self._cfg.device)
+            if 'frame_vad' in model_path:
+                self._vad_model = EncDecMultiClassificationModel.restore_from(restore_path=model_path, map_location=self._cfg.device)
+            else:
+                self._vad_model = EncDecClassificationModel.restore_from(model_path, map_location=self._cfg.device)
             logging.info("VAD model loaded locally from {}".format(model_path))
         else:
             if model_path not in get_available_model_names(EncDecClassificationModel):
@@ -165,11 +198,12 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             self._diarizer_params.speaker_embeddings.parameters.multiscale_weights,
         )
 
-    def _setup_vad_test_data(self, manifest_vad_input):
+    def _setup_vad_test_data(self, manifest_vad_input, batch_size=1):
         vad_dl_config = {
             'manifest_filepath': manifest_vad_input,
             'sample_rate': self._cfg.sample_rate,
-            'batch_size': self._cfg.get('batch_size'),
+            # 'batch_size': self._cfg.get('batch_size'),
+            'batch_size': batch_size,
             'vad_stream': True,
             'labels': ['infer',],
             'window_length_in_sec': self._vad_window_length_in_sec,
@@ -181,7 +215,6 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self._vad_model.setup_test_data(test_data_config=vad_dl_config)
 
     def _setup_spkr_test_data(self, manifest_file):
-
         spk_dl_config = {
             'manifest_filepath': manifest_file,
             'sample_rate': self._cfg.sample_rate,
@@ -193,7 +226,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         }
         self._speaker_model.setup_test_data(spk_dl_config)
 
-    def _run_vad(self, manifest_file):
+    def _run_vad(self, manifest_file, multi_channel=False, frame_vad=False):
         """
         Run voice activity detection. 
         Get log probability of voice activity detection and smoothes using the post processing parameters. 
@@ -202,53 +235,24 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         manifest_file (str) : Manifest file containing path to audio file and label as infer
 
         """
-
         shutil.rmtree(self._vad_dir, ignore_errors=True)
         os.makedirs(self._vad_dir)
 
         self._vad_model.eval()
 
-        time_unit = int(self._vad_window_length_in_sec / self._vad_shift_length_in_sec)
-        trunc = int(time_unit / 2)
-        trunc_l = time_unit - trunc
-        all_len = 0
-        data = []
-        for line in open(manifest_file, 'r', encoding='utf-8'):
-            # file = json.loads(line)['audio_filepath']
-            # data.append(get_uniqname_from_filepath(file))
-            json_dict = json.loads(line)
-            if 'uniq_id' in json_dict and json_dict['uniq_id'] is not None:
-                uniq_id = json_dict['uniq_id']
-            else:
-                uniq_id = get_uniqname_from_filepath(json_dict['audio_filepath'])
-            data.append(uniq_id)
-
-        status = get_vad_stream_status(data)
-        for i, test_batch in enumerate(
-            tqdm(self._vad_model.test_dataloader(), desc='vad', leave=True, disable=not self.verbose)
-        ):
-            test_batch = [x.to(self._vad_model.device) for x in test_batch]
-            with autocast():
-                log_probs = self._vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
-                probs = torch.softmax(log_probs, dim=-1)
-                pred = probs[:, 1]
-                if status[i] == 'start':
-                    to_save = pred[:-trunc]
-                elif status[i] == 'next':
-                    to_save = pred[trunc:-trunc_l]
-                elif status[i] == 'end':
-                    to_save = pred[trunc_l:]
-                else:
-                    to_save = pred
-                all_len += len(to_save)
-                outpath = os.path.join(self._vad_dir, data[i] + ".frame")
-                with open(outpath, "a", encoding='utf-8') as fout:
-                    for f in range(len(to_save)):
-                        fout.write('{0:0.4f}\n'.format(to_save[f]))
-            del test_batch
-            if status[i] == 'end' or status[i] == 'single':
-                all_len = 0
-
+        self._vad_dir, _ = generate_vad_frame_pred(
+            vad_model=self._vad_model,
+            window_length_in_sec=self._vad_params.window_length_in_sec,
+            shift_length_in_sec=self._vad_params.shift_length_in_sec,
+            manifest_vad_input=manifest_file,
+            out_dir=self._vad_dir,
+    )
+        if multi_channel:
+            self._vad_dir, self._argmax_idx_dict = self._mc_vad_processor.merge_frame_mc_vad(frame_vad_dir=self._vad_dir, 
+                                                                                             audio_rttm_map=self.AUDIO_RTTM_MAP, 
+                                                                                             method='max')
+            print("self._argmax_idx_dict", self._argmax_idx_dict)
+        
         if not self._vad_params.smoothing:
             # Shift the window by 10ms to generate the frame and use the prediction of the window to represent the label for the frame;
             self.vad_pred_dir = self._vad_dir
@@ -312,8 +316,12 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         """
         if self.has_vad_model:
             self._auto_split = True
-            self._split_duration = 50
+            self._split_duration = self._vad_params.get("split_duration", 500)
             manifest_vad_input = self._diarizer_params.manifest_filepath
+            if self._diarizer_params.get("multi_channel_mode", None) == "mc_vad":
+                manifest_vad_input = self._mc_vad_processor.split_mc_vad_manifest(manifest_vad_input)
+            else:
+                manifest_vad_input = manifest_vad_input
 
             if self._auto_split:
                 logging.info("Split long audio file to avoid CUDA memory issue")
@@ -331,8 +339,13 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                     "If you encounter CUDA memory issue, try splitting manifest entry by split_duration to avoid it."
                 )
 
-            self._setup_vad_test_data(manifest_vad_input)
-            self._run_vad(manifest_vad_input)
+            if self._diarizer_params.get("multi_channel_mode", None) == "mc_vad":
+                # mc_split_manifest_vad_input = split_mc_vad_manifest(manifest_vad_input)
+                self._setup_vad_test_data(manifest_vad_input)
+                self._run_vad(manifest_vad_input, multi_channel=True, frame_vad=True)
+            else:
+                self._setup_vad_test_data(manifest_vad_input)
+                self._run_vad(manifest_vad_input, multi_channel=False, frame_vad=False)
 
         elif self._diarizer_params.vad.external_vad_manifest is not None:
             self._speaker_manifest_path = self._diarizer_params.vad.external_vad_manifest
@@ -365,7 +378,11 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         ):
             test_batch = [x.to(self._speaker_model.device) for x in test_batch]
             audio_signal, audio_signal_len, labels, slices = test_batch
-            
+            if len(audio_signal.shape) > 2:
+                if audio_signal.shape[2] > 1:
+                    audio_signal = torch.mean(audio_signal, dim=2)
+                else:
+                    audio_signal = audio_signal.squeeze(2)
             with autocast():
                 _, embs = self._speaker_model.forward(input_signal=audio_signal, input_signal_length=audio_signal_len)
                 emb_shape = embs.shape[-1]
@@ -441,7 +458,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                 self.path2audio_files_to_manifest(paths2audio_files, self._diarizer_params.manifest_filepath)
             else:
                 raise ValueError("paths2audio_files must be of type list of paths to file containing audio file")
-
+        
         self.AUDIO_RTTM_MAP = audio_rttm_map(self._diarizer_params.manifest_filepath)
 
         out_rttm_dir = os.path.join(self._out_dir, 'pred_rttms')
@@ -475,6 +492,8 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             device=self._speaker_model.device,
             verbose=self.verbose,
         )
+
+
         logging.info("Outputs are saved in {} directory".format(os.path.abspath(self._diarizer_params.out_dir)))
 
         # Scoring

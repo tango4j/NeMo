@@ -131,7 +131,6 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
         manifest_vad_input=manifest_vad_input,
         out_dir=os.path.join(out_dir, "frames_predictions"),
     )
-
     logging.info(f"Finish generating VAD frame level prediction, output dir: {pred_dir}")
 
     logging.info("Generating segment tables for predictions")

@@ -325,7 +325,6 @@ target_label_n, "offset": offset_in_sec_n}
 
         if offset is None:
             offset = 0
-
         features = self.featurizer.process(sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim, channel_selector=self.channel_selector)
         f, fl = features, torch.tensor(features.shape[0]).long()
 

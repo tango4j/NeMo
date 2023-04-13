@@ -29,14 +29,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from copy import deepcopy 
 from pyannote.core import Annotation, Segment
 from pyannote.metrics import detection
 from sklearn.model_selection import ParameterGrid
+from nemo.collections.asr.parts.utils.manifest_utils import write_manifest
 from tqdm import tqdm
 
 from nemo.collections.asr.models import EncDecClassificationModel
 from nemo.utils import logging
+import concurrent.futures 
 
+from nemo.collections.asr.parts.utils.speaker_utils import (
+    get_uniqname_from_filepath,
+)
 try:
     from torch.cuda.amp import autocast
 except ImportError:
@@ -286,6 +292,7 @@ def generate_overlap_vad_seq(
     shift_length_in_sec: float,
     num_workers: int,
     out_dir: str = None,
+    multi_channel: bool = False,
 ) -> str:
     """
     Generate predictions with overlapping input windows/segments. Then a smoothing filter is applied to decide the label for a frame spanned by multiple windows. 
@@ -1097,9 +1104,74 @@ def extract_labels(path2ground_truth_label: str, time: list) -> list:
             labels.append(0)
     return labels
 
+def get_timing_params(window_length_in_sec, shift_length_in_sec, all_len=0):
+    time_unit = int(window_length_in_sec / shift_length_in_sec)  # num frames per window
+    trunc = int(time_unit / 2)
+    trunc_l = time_unit - trunc
+    return trunc, trunc_l, all_len
+
+def write_frame_data(outpath, to_save):
+    with open(outpath, "a", encoding='utf-8') as fout:
+        for f in range(len(to_save)):
+            fout.write('{0:0.4f}\n'.format(to_save[f]))
+    fout.close()
+
+def get_frame_data_from_logprob(
+    log_probs: torch.Tensor,
+    window_length_in_sec: float, 
+    status: str,
+    idx: int,
+    trunc: int,
+    trunc_l: int, 
+    mc_vad: bool = False):
+    """
+    Get frame data from log probability.
+
+
+    """
+    probs = torch.softmax(log_probs, dim=-1)
+    # squeeze the batch dimension, since batch size is 1
+    if not mc_vad and len(probs.shape) == 3:
+        probs = probs.squeeze(0)  # [1,T,C] -> [T,C]
+    elif mc_vad:
+        if len(probs.shape) != 3:
+            raise ValueError("mc_vad is True, but the shape of log_probs is not [Channels, T, C]")
+        probs = probs.transpose(0, 2) # [Ch,T,C] -> [C,T,Ch]
+    pred = probs[:, 1]  
+    if window_length_in_sec == 0:
+        to_save = pred
+    elif status[idx] == 'start':
+        to_save = pred[:-trunc]
+    elif status[idx] == 'next':
+        to_save = pred[trunc:-trunc_l]
+    elif status[idx] == 'end':
+        to_save = pred[trunc_l:]
+    else:
+        to_save = pred
+
+    if mc_vad:
+        to_save = to_save.transpose(0, 2) 
+    return to_save.detach().cpu()
+
+def load_data_from_vad_manifest(manifest_vad_input, use_audio_filename=True):
+    data = []
+    for line in open(manifest_vad_input, 'r', encoding='utf-8'):
+        json_dict = json.loads(line)
+        if not use_audio_filename and 'uniq_id' in json_dict and json_dict['uniq_id'] is not None:
+            uniq_id = json_dict['uniq_id']
+        else:
+            uniq_id = get_uniqname_from_filepath(json_dict['audio_filepath'])
+        data.append(uniq_id)
+    return data
 
 def generate_vad_frame_pred(
-    vad_model, window_length_in_sec: float, shift_length_in_sec: float, manifest_vad_input: str, out_dir: str
+    vad_model,
+    window_length_in_sec: float,
+    shift_length_in_sec: float,
+    manifest_vad_input: str,
+    out_dir: str,
+    use_feat: bool = False,
+    verbose: bool = True,
 ) -> str:
     """
     Generate VAD frame level prediction and write to out_dir
@@ -1107,56 +1179,37 @@ def generate_vad_frame_pred(
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 
-    time_unit = int(window_length_in_sec / shift_length_in_sec)  # num frames per window
-    trunc = int(time_unit / 2)
-    trunc_l = time_unit - trunc
-    all_len = 0
-
-    data = []
-    for line in open(manifest_vad_input, 'r', encoding='utf-8'):
-        filepath = json.loads(line)['audio_filepath']
-        file = filepath.split("/")[-1]
-        data.append(file.split(".wav")[0])
-
-    logging.info(f"Inference on {len(data)} audio files/json lines!")
+    trunc, trunc_l, all_len = get_timing_params(window_length_in_sec, shift_length_in_sec)
+    data = load_data_from_vad_manifest(manifest_vad_input, use_audio_filename=True)
+    logging.info(f"Inference on {len(data)} audio files/json lines.")
 
     all_probs = defaultdict(list)
     status = get_vad_stream_status(data)
-    for i, test_batch in enumerate(vad_model.test_dataloader()):
+    # for i, test_batch in enumerate(vad_model.test_dataloader()):
+    for i, test_batch in enumerate(tqdm(vad_model.test_dataloader(), desc='vad', leave=True, disable=not verbose)):
         test_batch = [x.to(vad_model.device) for x in test_batch]
         with autocast():
-            log_probs = vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
-            probs = torch.softmax(log_probs, dim=-1)
-            if len(probs.shape) == 3:
-                # squeeze the batch dimension, since batch size is 1
-                probs = probs.squeeze(0)  # [1,T,C] -> [T,C]
-            pred = probs[:, 1]  # [T,]
-
-            if window_length_in_sec == 0:
-                to_save = pred
-            elif status[i] == 'start':
-                to_save = pred[:-trunc]
-            elif status[i] == 'next':
-                to_save = pred[trunc:-trunc_l]
-            elif status[i] == 'end':
-                to_save = pred[trunc_l:]
+            if use_feat:
+                log_probs = vad_model(processed_signal=test_batch[0], processed_signal_length=test_batch[1])
             else:
-                to_save = pred
-
-            to_save = to_save.cpu().tolist()
+                log_probs = vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
+            to_save = get_frame_data_from_logprob(log_probs=log_probs, 
+                                                  window_length_in_sec=window_length_in_sec, 
+                                                  status=status, 
+                                                  idx=i, 
+                                                  trunc=trunc, 
+                                                  trunc_l=trunc_l)
             all_len += len(to_save)
             outpath = os.path.join(out_dir, data[i] + ".frame")
-            with open(outpath, "a", encoding='utf-8') as fout:
-                for p in to_save:
-                    fout.write(f'{p:0.4f}\n')
+            write_frame_data(outpath, to_save=to_save)
             all_probs[data[i]].extend(to_save)
 
-        del test_batch
+        del test_batch, to_save, log_probs
+        torch.cuda.empty_cache()
         if status[i] == 'end' or status[i] == 'single':
             logging.debug(f"Overall length of prediction of {data[i]} is {all_len}!")
             all_len = 0
     return out_dir, all_probs
-
 
 def init_vad_model(model_path: str):
     """
@@ -1171,7 +1224,6 @@ def init_vad_model(model_path: str):
         logging.info(f"Using NGC cloud VAD model {model_path}")
         vad_model = EncDecClassificationModel.from_pretrained(model_name=model_path)
     return vad_model
-
 
 def stitch_segmented_asr_output(
     segmented_output_manifest: str,
@@ -1473,3 +1525,153 @@ def plot_sample_from_rttm(
     if save_path:
         plt.savefig(save_path)
     return ipd.Audio(audio, rate=16000)
+
+class MultichannelVADProcessor:
+    def __init__(self, cfg):
+        self._cfg = cfg
+        self.top_k = int(self._cfg.diarizer.vad.parameters.top_k_channels)
+
+    @staticmethod
+    def split_mc_vad_manifest(manifest_vad_input: str) -> str:
+        """
+        Split multi-channel vad manifest into single-channel vad manifest.
+
+        Args:
+            manifest_vad_input (str): Path to multi-channel vad manifest with list of audio files in python list format.
+
+        Returns:
+            mc_split_manifest_vad_input (str): Path to single-channel vad manifest with single audio file in string format.
+        """
+        new_audio_manifest_list = []
+        for line in open(manifest_vad_input, 'r', encoding='utf-8'):
+            json_dict = json.loads(line)
+            if isinstance(json_dict['audio_filepath'], list):
+                if not ('uniq_id' in json_dict and json_dict['uniq_id'] is not None):
+                    raise ValueError(f"Multi-channel input with list of files but uniq_id is not present in the manifest: {manifest_vad_input}")
+                else:
+                    for audio_filepath in json_dict['audio_filepath']:
+                        split_entry_dict = deepcopy(json_dict)
+                        split_entry_dict['audio_filepath'] = audio_filepath
+                        new_audio_manifest_list.append(split_entry_dict)
+            else:
+                raise ValueError(f"Multi-channel input is not a list type: {manifest_vad_input}")
+        filename = os.path.basename(manifest_vad_input).replace('.json', '.mc_split.json') 
+        mc_split_manifest_vad_input = os.path.join(os.path.dirname(manifest_vad_input), filename)
+        write_manifest(output_path=mc_split_manifest_vad_input, 
+                       target_manifest=new_audio_manifest_list, 
+                       ensure_ascii=True)
+        return mc_split_manifest_vad_input       
+
+    @staticmethod
+    def find_uniq_id_from_audio_filepath(frame_filepath, audio_rttm_map):
+        """
+        Find uniq_id of a single channel VAD frame file from the audio_rttm_map keys.
+        """
+        uniq_id = None
+        for global_key in audio_rttm_map.keys():
+            key = global_key.split('-')[-1]
+            if key in os.path.basename(frame_filepath):
+                # uniq_id = key
+                uniq_id = global_key
+                break
+        return uniq_id
+
+    @staticmethod
+    def stack_list_frames(frame_dict: Dict[str, List[torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        """
+        Stack list of frames into a single tensor.
+
+        Args:
+            frame_dict (Dict[str, List[torch.Tensor]]): Dictionary of list of frames with uniq_id as key.
+
+        Returns:
+            frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
+        """
+        frame_mc_tensor_dict = {}
+        for uniq_id in frame_dict:
+            frame_mc_tensor_dict[uniq_id] = torch.stack(frame_dict[uniq_id], dim=0)
+        return frame_mc_tensor_dict
+
+    def merge_mc_frames(self, frame_mc_tensor_dict, method='max'):
+        """
+        Merge multi-channel frames into single channel frames.
+
+        Args:
+            frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
+            method (str): Method to merge multi-channel frames. 
+                Options: ['max', 'mean']
+        Returns:
+            frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.        
+        """
+        frame_single_channel_dict, argmax_ch_idx_dict = {}, {}
+
+        for uniq_id in frame_mc_tensor_dict:
+            argmax_ch_idx = torch.max(frame_mc_tensor_dict[uniq_id], dim=0)[1]
+            bincount = torch.bincount(argmax_ch_idx.view(-1))
+            sorted_inds = torch.sort(bincount, descending=True)[1]
+            argmax_ch_idx_dict[uniq_id] = sorted_inds
+            frame_mc_tensor_dict[uniq_id] = frame_mc_tensor_dict[uniq_id][sorted_inds[:self.top_k]]
+            if method == 'max':
+                frame_single_channel_dict[uniq_id]= torch.max(frame_mc_tensor_dict[uniq_id], dim=0)[0]
+            elif method == 'mean':
+                frame_single_channel_dict[uniq_id] = torch.mean(frame_mc_tensor_dict[uniq_id], dim=0)
+            else:
+                raise ValueError(f"Invalid method for merging multichannel VAD frames: {method}")
+        return frame_single_channel_dict, argmax_ch_idx_dict
+
+    @staticmethod
+    def write_merged_frame_pred(frame_single_channel_dict: Dict[str, torch.Tensor], frame_vad_dir: str):
+        """
+        Write merged frame-level VAD predictions to the frame VAD folder.
+
+        Args:
+            frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.
+            frame_vad_dir (str): Path to the frame VAD folder.
+        """
+        for uniq_id, frame_mat in frame_single_channel_dict.items():
+            outpath = os.path.join(frame_vad_dir, f"{uniq_id}.frame")
+            with open(outpath, "a", encoding='utf-8') as fout:
+                to_save = frame_mat.cpu().numpy()
+                for f in range(len(to_save)):
+                    fout.write('{0:0.4f}\n'.format(to_save[f]))
+
+    def load_frame_dict_from_files(self, frame_vad_dir: str, audio_rttm_map: dict):
+        """
+        Load frame dict from the frame VAD folder.
+
+        Args:
+            frame_vad_dir (str): Path to the frame VAD folder.
+            audio_rttm_map (dict): Map of audio filepaths to RTTM files.
+
+        Returns:
+            frame_dict (Dict[str, List[torch.Tensor]]): Dictionary of list of frames (torch.Tensor) with uniq_id as key.
+        """
+        frame_filepathlist = sorted(glob.glob(frame_vad_dir + "/*.frame"))
+        frame_dict = {}
+        for frame_filepath in frame_filepathlist:
+            frame_mat, name = load_tensor_from_file(frame_filepath)
+            uniq_id = self.find_uniq_id_from_audio_filepath(frame_filepath, audio_rttm_map)
+            if uniq_id in frame_dict:
+                frame_dict[uniq_id].append(frame_mat)
+            else:
+                frame_dict[uniq_id] = [frame_mat]
+        return frame_dict
+
+    def merge_frame_mc_vad(self, frame_vad_dir: str, audio_rttm_map: dict, method='max'):
+        """
+        Get single channel frame predictions from multi-channel frame predictions.
+
+        Args:
+            frame_vad_dir (str): Path to the folder containing multi-channel frame predictions.
+            audio_rttm_map (dict): Map of audio filepaths to RTTM files.
+
+        Returns:
+            out_vad_dir (str): Path to the folder containing single-channel frame predictions.
+        """
+        frame_dict = self.load_frame_dict_from_files(frame_vad_dir, audio_rttm_map)
+        frame_mc_tensor_dict = self.stack_list_frames(frame_dict)
+        frame_single_channel_dict, argmax_ch_idx_dict  = self.merge_mc_frames(frame_mc_tensor_dict, method)
+        out_vad_dir = os.path.join(frame_vad_dir, 'frame_merged')
+        Path.mkdir(Path(out_vad_dir), exist_ok=True, parents=True)
+        self.write_merged_frame_pred(frame_single_channel_dict, out_vad_dir)
+        return out_vad_dir, argmax_ch_idx_dict

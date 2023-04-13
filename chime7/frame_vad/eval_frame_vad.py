@@ -144,6 +144,7 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
             if uniq_audio_name in key_meta_map:
                 raise ValueError("Please make sure each line is with different audio name! ")
             key_meta_map[uniq_audio_name] = {'audio_filepath': audio_filepath, 'label': data["label"]}
+            import ipdb; ipdb.set_trace()
             all_labels_map[uniq_audio_name] = [int(x) for x in data["label"].split()]
 
     # Prepare manifest for streaming VAD

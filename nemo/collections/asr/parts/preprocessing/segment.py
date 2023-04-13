@@ -327,7 +327,7 @@ class AudioSegment(object):
                 trim_frame_length=trim_frame_length,
                 trim_hop_length=trim_hop_length,
                 orig_sr=orig_sr,
-                channel_selector=None,
+                channel_selector=channel_selector,
             )
             # Only single-channel individual files are supported for now
             if a_segment.num_channels != 1:
