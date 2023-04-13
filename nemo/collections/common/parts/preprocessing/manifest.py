@@ -198,19 +198,24 @@ def get_full_path(
         # If input is a string, get the corresponding full path
         audio_file = Path(audio_file)
 
-        if manifest_file is None and data_dir is None:
-            raise ValueError(f'Use either manifest_file or data_dir to specify the data directory.')
-        elif manifest_file is not None and data_dir is not None:
-            raise ValueError(f'Parameters manifest_file and data_dir cannot be used simultaneously.')
-
-        if data_dir is None:
-            if is_datastore_path(manifest_file):
-                # WORKAROUND: pathlib does not support URIs, so use os.path
-                data_dir = os.path.dirname(manifest_file)
-            else:
-                data_dir = Path(manifest_file).parent.as_posix()
-
         if (len(str(audio_file)) < audio_file_len_limit) and not audio_file.is_file() and not audio_file.is_absolute():
+            # If audio_file is not available and the path is not absolute, the full path is assumed
+            # to be relative to the manifest file parent directory or data directory.
+            if manifest_file is None and data_dir is None:
+                raise ValueError(f'Use either manifest_file or data_dir to specify the data directory.')
+            elif manifest_file is not None and data_dir is not None:
+                raise ValueError(
+                    f'Parameters manifest_file and data_dir cannot be used simultaneously. Currently manifest_file is {manifest_file} and data_dir is {data_dir}.'
+                )
+
+            # resolve the data directory
+            if data_dir is None:
+                if is_datastore_path(manifest_file):
+                    # WORKAROUND: pathlib does not support URIs, so use os.path
+                    data_dir = os.path.dirname(manifest_file)
+                else:
+                    data_dir = Path(manifest_file).parent.as_posix()
+
             # assume audio_file path is relative to data_dir
             audio_file_path = os.path.join(data_dir, audio_file.as_posix())
 

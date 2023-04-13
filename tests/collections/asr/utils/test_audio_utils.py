@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from collections import namedtuple
 from typing import List, Type, Union
 
 import librosa
@@ -183,6 +184,60 @@ class TestAudioSegment:
 
             with pytest.raises(RuntimeError, match="Expecting a single-channel audio signal"):
                 AudioSegment.from_file(audio_file=[mc_file, mc_file], channel_selector=0)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("target_sr", [8000, 16000])
+    def test_audio_segment_trim_match(self, tmpdir, target_sr):
+        """Test loading and audio signal from a file matches when using a path and a list
+        for different target_sr, int_values and trim setups.
+        """
+        sample_rate = 24000
+        signal_len_sec = 2
+        num_samples = signal_len_sec * sample_rate
+        num_examples = 10
+        rtol, atol = 1e-5, 1e-6
+
+        TrimSetup = namedtuple("TrimSetup", "ref top_db frame_length hop_length")
+        trim_setups = []
+        trim_setups.append(TrimSetup(np.max, 10, 2048, 1024))
+        trim_setups.append(TrimSetup(1.0, 35, 2048, 1024))
+        trim_setups.append(TrimSetup(0.8, 45, 2048, 1024))
+
+        for n in range(num_examples):
+            # Create a test vector
+            audio_file = os.path.join(tmpdir, f'test_audio_{n:02}.wav')
+            samples = np.random.randn(num_samples)
+            # normalize
+            samples = samples / np.max(samples)
+            # apply random scaling and window to have some samples cut by trim
+            samples = np.random.rand() * np.hanning(num_samples) * samples
+            sf.write(audio_file, samples, sample_rate, 'float')
+
+            for trim_setup in trim_setups:
+                # UUT 1: load from a path
+                audio_segment_1 = AudioSegment.from_file(
+                    audio_file,
+                    target_sr=target_sr,
+                    trim=True,
+                    trim_ref=trim_setup.ref,
+                    trim_top_db=trim_setup.top_db,
+                    trim_frame_length=trim_setup.frame_length,
+                    trim_hop_length=trim_setup.hop_length,
+                )
+
+                # UUT 2: load from a list
+                audio_segment_2 = AudioSegment.from_file(
+                    [audio_file],
+                    target_sr=target_sr,
+                    trim=True,
+                    trim_ref=trim_setup.ref,
+                    trim_top_db=trim_setup.top_db,
+                    trim_frame_length=trim_setup.frame_length,
+                    trim_hop_length=trim_setup.hop_length,
+                )
+
+                # Test
+                assert audio_segment_1 == audio_segment_2, f'trim setup {trim_setup}, loaded segments not matching'
 
 
 class TestSelectChannels:

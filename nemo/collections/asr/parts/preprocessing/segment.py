@@ -206,33 +206,36 @@ class AudioSegment(object):
         """
         samples = None
         if isinstance(audio_file, list):
-            # If a list of files is provided, load samples from individual single-channel
-            # files and concatenate them along the channel dimension
-            if isinstance(channel_selector, int):
-                if channel_selector >= len(audio_file):
-                    raise RuntimeError(
-                        f'Channel cannot be selected: channel_selector={channel_selector}, num_audio_files={len(audio_file)}'
-                    )
-                # Select only a single file
-                audio_file = [audio_file[channel_selector]]
-                # Reset the channel selector since we applied it here
-                channel_selector = None
+            return cls.from_file_list(
+                audio_file_list=audio_file,
+                target_sr=target_sr,
+                int_values=int_values,
+                offset=offset,
+                duration=duration,
+                trim=trim,
+                trim_ref=trim_ref,
+                trim_top_db=trim_top_db,
+                trim_frame_length=trim_frame_length,
+                trim_hop_length=trim_hop_length,
+                orig_sr=orig_sr,
+                channel_selector=channel_selector,
+            )
 
-            # Load all files
-            sample_rate = target_sr
-            samples = cls.from_file_list(
-                    audio_file_list=audio_file,
-                    target_sr=target_sr,
-                    int_values=int_values,
-                    offset=offset,
-                    duration=duration,
-                    trim=trim,
-                    trim_ref=trim_ref,
-                    trim_top_db=trim_top_db,
-                    trim_frame_length=trim_frame_length,
-                    trim_hop_length=trim_hop_length,
-                    orig_sr=orig_sr,
-                    channel_selector=None,
+        if not isinstance(audio_file, str) or os.path.splitext(audio_file)[-1] in sf_supported_formats:
+            try:
+                with sf.SoundFile(audio_file, 'r') as f:
+                    dtype = 'int32' if int_values else 'float32'
+                    sample_rate = f.samplerate
+                    if offset > 0:
+                        f.seek(int(offset * sample_rate))
+                    if duration > 0:
+                        samples = f.read(int(duration * sample_rate), dtype=dtype)
+                    else:
+                        samples = f.read(dtype=dtype)
+            except RuntimeError as e:
+                logging.error(
+                    f"Loading {audio_file} via SoundFile raised RuntimeError: `{e}`. "
+                    f"NeMo will fallback to loading via pydub."
                 )
 
         else:
@@ -353,6 +356,88 @@ class AudioSegment(object):
                 samples = np.concatenate([samples, a_samples], axis=1)
         samples = np.squeeze(samples)
         return samples
+
+    @classmethod
+    def from_file_list(
+        cls,
+        audio_file_list,
+        target_sr=None,
+        int_values=False,
+        offset=0,
+        duration=0,
+        trim=False,
+        channel_selector=None,
+        *args,
+        **kwargs,
+    ):
+        """
+        Function wrapper for `from_file` method. Load a list of files from `audio_file_list`.
+        The length of each audio file is unified with the duration item in the input manifest file.
+        See `from_file` method for arguments.
+
+        If a list of files is provided, load samples from individual single-channel files and
+        concatenate them along the channel dimension.
+        """
+        if isinstance(channel_selector, int):
+            # Shortcut when selecting a single channel
+            if channel_selector >= len(audio_file_list):
+                raise RuntimeError(
+                    f'Channel cannot be selected: channel_selector={channel_selector}, num_audio_files={len(audio_file_list)}'
+                )
+            # Select only a single file
+            audio_file_list = [audio_file_list[channel_selector]]
+            # Reset the channel selector since we applied it here
+            channel_selector = None
+
+        samples = None
+
+        for a_file in audio_file_list:
+            # Load audio from the current file
+            a_segment = cls.from_file(
+                a_file,
+                target_sr=target_sr,
+                int_values=int_values,
+                offset=offset,
+                duration=duration,
+                channel_selector=None,
+                trim=False,  # Do not apply trim to individual files, it will be applied to the concatenated signal
+                *args,
+                **kwargs,
+            )
+
+            # Only single-channel individual files are supported for now
+            if a_segment.num_channels != 1:
+                raise RuntimeError(
+                    f'Expecting a single-channel audio signal, but loaded {a_segment.num_channels} channels from file {a_file}'
+                )
+
+            if target_sr is None:
+                # All files need to be loaded with the same sample rate
+                target_sr = a_segment.sample_rate
+
+            # Concatenate samples
+            a_samples = a_segment.samples[:, None]
+
+            if samples is None:
+                samples = a_samples
+            else:
+                # Check the dimensions match
+                if len(a_samples) != len(samples):
+                    # import ipdb; ipdb.set_trace()
+                    raise RuntimeError(
+                        f'Loaded samples need to have identical length: {a_samples.shape} != {sample.shape}'
+                    )
+
+                # Concatenate along channel dimension
+                samples = np.concatenate([samples, a_samples], axis=1)
+
+        # Final setup for class initialization
+        samples = np.squeeze(samples)
+        sample_rate = target_sr
+
+        return cls(
+            samples, sample_rate, target_sr=target_sr, trim=trim, channel_selector=channel_selector, *args, **kwargs,
+        )
 
     @classmethod
     def segment_from_file(

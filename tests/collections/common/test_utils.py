@@ -11,12 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+import string
+from contextlib import contextmanager
+from pathlib import Path
+from unittest import mock
 
+<<<<<<< HEAD
 import os
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
+=======
+import numpy as np
+>>>>>>> origin
 import pytest
 
 from nemo.collections.common.parts.preprocessing.manifest import get_full_path
@@ -179,3 +188,63 @@ class TestPreprocessingUtils:
                     get_full_path(audio_files_relative_path, manifest_file=ais_manifest_file) == audio_files_cache_path
                 )
                 assert get_full_path(audio_files_relative_path, data_dir=ais_data_dir) == audio_files_cache_path
+<<<<<<< HEAD
+=======
+
+    @pytest.mark.unit
+    def test_get_full_path_audio_file_len_limit(self):
+        """Test with audio_file_len_limit.
+        Currently, get_full_path will always return the input path when the length
+        is over audio_file_len_limit, independend of whether the file exists.
+        """
+        # Create a few files
+        num_examples = 10
+        rand_chars = list(string.ascii_uppercase + string.ascii_lowercase + string.digits + os.sep)
+        rand_name = lambda n: ''.join(np.random.choice(rand_chars, size=n))
+
+        for audio_file_len_limit in [255, 300]:
+            for n in range(num_examples):
+                path_length = np.random.randint(low=audio_file_len_limit, high=350)
+                audio_file_path = str(Path(rand_name(path_length)))
+
+                assert (
+                    get_full_path(audio_file_path, audio_file_len_limit=audio_file_len_limit) == audio_file_path
+                ), f'Limit {audio_file_len_limit}: expected {audio_file_path} to be returned.'
+
+                audio_file_path_with_user = os.path.join('~', audio_file_path)
+                audio_file_path_with_user_expected = os.path.expanduser(audio_file_path_with_user)
+                assert (
+                    get_full_path(audio_file_path_with_user, audio_file_len_limit=audio_file_len_limit)
+                    == audio_file_path_with_user_expected
+                ), f'Limit {audio_file_len_limit}: expected {audio_file_path_with_user_expected} to be returned.'
+
+    @pytest.mark.unit
+    def test_get_full_path_invalid_type(self):
+        """Make sure exceptions are raised when audio_file is not a string or a list of strings.
+        """
+
+        with pytest.raises(ValueError, match="Unexpected audio_file type"):
+            get_full_path(1)
+
+        with pytest.raises(ValueError, match="Unexpected audio_file type"):
+            get_full_path(('a', 'b', 'c'))
+
+        with pytest.raises(ValueError, match="Unexpected audio_file type"):
+            get_full_path({'a': 1, 'b': 2, 'c': 3})
+
+        with pytest.raises(ValueError, match="Unexpected audio_file type"):
+            get_full_path([1, 2, 3])
+
+    @pytest.mark.unit
+    def test_get_full_path_invalid_type(self):
+        """Make sure exceptions are raised when audio_file is not a string or a list of strings.
+        """
+
+        with pytest.raises(ValueError, match="Use either manifest_file or data_dir"):
+            # Using a relative path without manifest_file or data_dir is not allowed
+            get_full_path('relative/path')
+
+        with pytest.raises(ValueError, match="Parameters manifest_file and data_dir cannot be used simultaneously."):
+            # Using a relative path without both manifest_file or data_dir is not allowed
+            get_full_path('relative/path', manifest_file='/manifest_dir/file.json', data_dir='/data/dir')
+>>>>>>> origin
