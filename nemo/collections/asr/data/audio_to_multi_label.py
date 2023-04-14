@@ -52,22 +52,16 @@ class AudioToMultiLabelDataset(Dataset):
         trim_silence: bool = False,
         is_regression_task: bool = False,
         delimiter: str = " ",
-<<<<<<< HEAD
-=======
         normalize_audio: bool = False,
         normalize_audio_target: float = -20.0,
->>>>>>> dev/chime7
     ):
         super().__init__()
         if isinstance(manifest_filepath, str):
             manifest_filepath = manifest_filepath.split(',')
 
         self.delimiter = delimiter
-<<<<<<< HEAD
-=======
         self.normalize_audio = normalize_audio
         self.normalize_audio_target = normalize_audio_target
->>>>>>> dev/chime7
 
         self.collection = collections.ASRSpeechLabel(
             manifests_files=manifest_filepath,
@@ -168,9 +162,6 @@ class AudioToMultiLabelDataset(Dataset):
         if offset is None:
             offset = 0
 
-<<<<<<< HEAD
-        features = self.featurizer.process(sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim)
-=======
         features = self.featurizer.process(
             sample.audio_file,
             offset=offset,
@@ -179,7 +170,6 @@ class AudioToMultiLabelDataset(Dataset):
             normalize=self.normalize_audio,
             normalize_target=self.normalize_audio_target,
         )
->>>>>>> dev/chime7
         f, fl = features, torch.tensor(features.size(0)).long()
 
         t = self._label_str_to_tensor(sample.label)
@@ -393,11 +383,8 @@ def get_audio_multi_label_dataset(cfg: DictConfig) -> AudioToMultiLabelDataset:
         trim_silence=cfg.get("trim_silence", False),
         is_regression_task=cfg.get("is_regression_task", False),
         delimiter=cfg.get("delimiter", None),
-<<<<<<< HEAD
-=======
         normalize_audio=cfg.get("normalize_audio", False),
         normalize_audio_target=cfg.get("normalize_audio_target", -20),
->>>>>>> dev/chime7
     )
     return dataset
 
