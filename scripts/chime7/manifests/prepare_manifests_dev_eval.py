@@ -1,14 +1,16 @@
-import subprocess
 import argparse
-import os
-import json
 import glob
-import tqdm
+import json
+import os
+import subprocess
+
 import numpy as np
 import soundfile as sf
-from nemo.utils import logging
-from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+import tqdm
+
 from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
+from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+from nemo.utils import logging
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -67,6 +69,7 @@ def main(data_dir: str, subset: str, output_dir: str, overwrite: bool):
                     elif dataset in ['mixer6']:
                         # drop json extension
                         audio_filename, _ = os.path.splitext(os.path.basename(file_path))
+                        data.update({'session_id': audio_filename})
 
                     # path is relative to dataset_output_dir
                     audio_filepath = os.path.join('audio', subset, audio_filename)
@@ -103,13 +106,22 @@ def main(data_dir: str, subset: str, output_dir: str, overwrite: bool):
             sc_audio_files = glob.glob(os.path.join(dataset_dir, filepath_base + file_ext))
             sc_audio_files.sort()
 
+            if dataset == 'mixer6':
+                # CH01, CH02, (lapel), and CH03 (headset), are close talk microphones that are provided
+                # for training and development, but will not be available for the final evaluation.
+                sc_audio_files = [
+                    f
+                    for f in sc_audio_files
+                    if not f.endswith('CH01.wav') and not f.endswith('CH02.wav') and not f.endswith('CH03.wav')
+                ]
+
             # Double-check that the channel count is correct
             if dataset == 'chime6':
                 assert len(sc_audio_files) in [20, 24], f'Expected 20 or 24 files, found {len(sc_audio_files)}'
             elif dataset == 'dipco':
                 assert len(sc_audio_files) == 35, f'Expected 35 files, found {len(sc_audio_files)}'
             elif dataset == 'mixer6':
-                assert len(sc_audio_files) == 13, f'Expected 13 files, found {len(sc_audio_files)}'
+                assert len(sc_audio_files) == 10, f'Expected 10 files, found {len(sc_audio_files)}'
             else:
                 raise ValueError(f'Unknown dataset: {dataset}')
 

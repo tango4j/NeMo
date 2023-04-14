@@ -30,6 +30,8 @@ from nemo.collections.asr.parts.utils.vad_utils import (
     align_labels_to_frames,
     generate_vad_frame_pred,
     generate_vad_segment_table,
+    get_frame_labels,
+    load_speech_segments_from_rttm,
     prepare_manifest,
 )
 from nemo.core.config import hydra_runner
@@ -76,6 +78,16 @@ def main(cfg):
         reports_dict[filename] = report
         pred_seg_dir_dict[filename] = pred_segment_dir
         gt_seg_dir_dict[filename] = gt_segment_dir
+
+    if cfg.get("infer_only", False):
+        logging.info("=========================================================")
+        for k, v in pred_seg_dir_dict.items():
+            logging.info(f"VAD predictions for {k} are saved in {v}")
+        logging.info("=========================================================")
+        logging.info(cfg.vad.parameters.postprocessing)
+        logging.info(Path(cfg.vad.model_path).absolute())
+        logging.info("Done.")
+        exit(0)
 
     logging.info("=========================================================")
     logging.info("Calculating aggregated Detection Error...")
@@ -143,9 +155,27 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
             uniq_audio_name = audio_filepath.split('/')[-1].rsplit('.', 1)[0]
             if uniq_audio_name in key_meta_map:
                 raise ValueError("Please make sure each line is with different audio name! ")
+<<<<<<< HEAD
             key_meta_map[uniq_audio_name] = {'audio_filepath': audio_filepath, 'label': data["label"]}
             import ipdb; ipdb.set_trace()
             all_labels_map[uniq_audio_name] = [int(x) for x in data["label"].split()]
+=======
+            key_meta_map[uniq_audio_name] = {'audio_filepath': audio_filepath}
+            if cfg.get("infer_only", False):
+                all_labels_map[uniq_audio_name] = [0]
+            elif "label" not in data:
+                rttm_key = "rttm_filepath" if "rttm_filepath" in data else "rttm_file"
+                segments = load_speech_segments_from_rttm(data[rttm_key])
+                label_str = get_frame_labels(
+                    segments=segments,
+                    frame_length=cfg.vad.parameters.shift_length_in_sec,
+                    duration=data['duration'],
+                    offset=data['offset'],
+                )
+                all_labels_map[uniq_audio_name] = [int(x) for x in label_str.split()]
+            else:
+                all_labels_map[uniq_audio_name] = [int(x) for x in data["label"].split()]
+>>>>>>> dev/chime7
 
     # Prepare manifest for streaming VAD
     manifest_vad_input = manifest_filepath
@@ -178,6 +208,11 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
             'labels': ['infer'],
             'num_workers': cfg.num_workers,
             'shuffle': False,
+<<<<<<< HEAD
+=======
+            'normalize_audio': cfg.vad.parameters.normalize_audio,
+            'normalize_audio_target': cfg.vad.parameters.normalize_audio_target,
+>>>>>>> dev/chime7
         }
     )
 
@@ -208,6 +243,7 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
         groundtruth += labels_aligned
         predictions += probs
 
+<<<<<<< HEAD
     # auroc = roc_auc_score(y_true=groundtruth, y_score=predictions)
     # threshold = cfg.vad.parameters.get("threshold", 0.5)
     # pred_labels = [int(x > threshold) for x in predictions]
@@ -217,6 +253,8 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
     # logging.info(f"Acc: {acc:0.4f}, threshold: {threshold:0.1f}")
     # logging.info("=====================================")
 
+=======
+>>>>>>> dev/chime7
     frame_length_in_sec = cfg.vad.parameters.shift_length_in_sec
 
     gt_frames_dir = dump_groundtruth_frames(out_dir, all_labels_map)
@@ -227,6 +265,10 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
         post_params=cfg.vad.parameters.postprocessing,
         frame_length_in_sec=frame_length_in_sec,
         num_workers=cfg.num_workers,
+<<<<<<< HEAD
+=======
+        infer_only=cfg.get("infer_only", False),
+>>>>>>> dev/chime7
     )
 
     return predictions, groundtruth, report, pred_segment_dir, gt_segment_dir
@@ -257,6 +299,10 @@ def calculate_detection_error(
     post_params: dict,
     frame_length_in_sec: float = 0.01,
     num_workers: int = 20,
+<<<<<<< HEAD
+=======
+    infer_only: bool = False,
+>>>>>>> dev/chime7
 ):
 
     logging.info("Generating segment tables for predictions")
@@ -269,6 +315,13 @@ def calculate_detection_error(
         out_dir=pred_segment_dir,
     )
 
+<<<<<<< HEAD
+=======
+    if infer_only:
+        logging.info("Infer only, skip calculating detection error metrics")
+        return None, pred_segment_dir, None
+
+>>>>>>> dev/chime7
     logging.info("Generating segment tables for groundtruths")
     gt_segment_dir = Path(vad_gt_frame_dir) / Path("gt_segments")
     gt_segment_dir = generate_gt_segment_table(
@@ -377,6 +430,7 @@ def vad_frame_construct_pyannote_object_per_file(
     return reference, hypothesis
 
 
+<<<<<<< HEAD
 def load_manifests(manifest_filepath: Union[str, List[str]]):
     key_meta_map = {}
     all_labels_map = {}
@@ -392,5 +446,7 @@ def load_manifests(manifest_filepath: Union[str, List[str]]):
     return key_meta_map, all_labels_map
 
 
+=======
+>>>>>>> dev/chime7
 if __name__ == '__main__':
     main()

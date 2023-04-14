@@ -79,6 +79,8 @@ class AudioSegment(object):
         trim_hop_length=512,
         orig_sr=None,
         channel_selector=None,
+        normalize=False,
+        normalize_target=-20,
     ):
         """Create audio segment from samples.
         Samples are convert float32 internally, with int scaled to [-1, 1].
@@ -113,6 +115,8 @@ class AudioSegment(object):
         self._samples = samples
         self._sample_rate = sample_rate
         self._orig_sr = orig_sr if orig_sr is not None else sample_rate
+        if normalize:
+            self.normalize(normalize_target)
 
     def __eq__(self, other):
         """Return whether two objects are equal."""
@@ -182,6 +186,8 @@ class AudioSegment(object):
         trim_hop_length=512,
         orig_sr=None,
         channel_selector=None,
+        normalize=False,
+        normalize_target=-20,
     ):
         """
         Load a file supported by librosa and return as an AudioSegment.
@@ -202,6 +208,8 @@ class AudioSegment(object):
         :param channel selector: string denoting the downmix mode, an integer denoting the channel to be selected, or an iterable
                                  of integers denoting a subset of channels. Channel selector is using zero-based indexing.
                                  If set to `None`, the original signal will be used.
+        :param normalize: if true, normalize the audio signal to a target RMS value
+        :param normalize_target: the target RMS value in decibels
         :return: AudioSegment instance
         """
         samples = None
@@ -293,6 +301,8 @@ class AudioSegment(object):
             trim_hop_length=trim_hop_length,
             orig_sr=orig_sr,
             channel_selector=channel_selector,
+            normalize=normalize,
+            normalize_target=normalize_target,
         )
     @classmethod
     def from_file_list(
@@ -535,6 +545,13 @@ class AudioSegment(object):
 
     def gain_db(self, gain):
         self._samples *= 10.0 ** (gain / 20.0)
+
+    def normalize(self, target_db=-20):
+        """Normalize the signal to a target RMS value in decibels.
+        """
+        rms_db = self.rms_db
+        gain = target_db - rms_db
+        self.gain_db(gain)
 
     def pad(self, pad_size, symmetric=False):
         """Add zero padding to the sample. The pad size is given in number
