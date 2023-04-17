@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from nemo.collections.asr.parts.preprocessing.features import make_seq_mask_like
+from nemo.collections.asr.parts.submodules.multichannel_modules import ParametricMultichannelWienerFilter
 from nemo.collections.asr.parts.utils.audio_utils import db2mag, wrap_to_pi
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types import FloatType, LengthsType, NeuralType, SpectrogramType
@@ -339,6 +340,210 @@ class MaskEstimatorRNN(NeuralModule):
         return output, input_length
 
 
+class MaskEstimatorGSS(torch.nn.Module):
+    """Estimate masks using guided source separation with a complex
+    angular Central Gaussian Mixture Model (cACGMM).
+
+    Notation is approximately following [1], where `gamma` denotes
+    the time-frequency mask, `alpha` denotes the mixture weights,
+    and `BM` denotes the shape matrix. Additionally, provided
+    source activity is denoted as `activity`.
+
+    Args:
+        num_iterations: Number of iterations for the EM algorithm
+        eps: Small value for regularization
+        dtype: Data type for internal computations
+
+
+    References:
+        [1] Ito et al., Complex Angular Central Gaussian Mixture Model for Directional Statistics in Mask-Based Microphone Array Signal Processing, 2016
+        [2] Boeddeker et al., Front-End Processing for the CHiME-5 Dinner Party Scenario, 2018
+    """
+
+    def __init__(self, num_iterations: int = 3, eps=1e-8, dtype: torch.dtype = torch.cdouble):
+        super().__init__()
+
+        self.num_iterations = num_iterations
+        self.eps = eps
+        # Internal calculations
+        assert dtype in [torch.cfloat, torch.cdouble], f'Unsupported dtype {dtype}, expecting cfloat or cdouble'
+        self.dtype = dtype
+
+        logging.debug('Initialized %s', self.__class__.__name__)
+        logging.debug('\tnum_iterations: %s', self.num_iterations)
+        logging.debug('\teps:            %g', self.eps)
+        logging.debug('\tdtype:          %s', self.dtype)
+
+    def normalize(self, x: torch.Tensor, dim=-3) -> torch.Tensor:
+        """Normalize input to have a unit L2-norm across `dim`.
+        By default, normalizes across the input channels.
+
+        Args:
+            x: C-channel input signal, shape (B, C, F, T)
+            dim: Dimension for normalization, defaults to -3 to normalize over channels
+
+        Returns:
+            Normalized signal, shape (B, C, F, T)
+        """
+        norm_x = torch.linalg.vector_norm(x, ord=2, dim=dim, keepdim=True)
+        x = x / (norm_x + self.eps)
+        return x
+
+    def update_masks(self, alpha: torch.Tensor, activity, log_pdf):
+        """Update masks for the cACGMM.
+
+        Args:
+            alpha: component weights, shape (B, num_outputs, F)
+            activity: temporal activity for the components, shape (B, num_outputs, T)
+            log_pdf: logarithm of the PDF, shape (B, num_outputs, F, T)
+
+        Returns:
+            Masks for the components of the model, shape (B, num_outputs, F, T)
+        """
+        num_inputs = log_pdf.size(-1)
+
+        # (B, num_outputs, F)
+        # normalize across outputs in the log domain
+        gamma = log_pdf - torch.max(log_pdf, axis=-3, keepdim=True)[0]
+
+        gamma = torch.exp(gamma)
+
+        # calculate the mask using weight, pdf and source activity
+        gamma = alpha[..., None] * gamma * activity[..., None, :]
+
+        # normalize across components/output channels
+        gamma = gamma / (torch.sum(gamma, dim=-3, keepdim=True) + self.eps)
+
+        return gamma
+
+    def update_weights(self, gamma):
+        """Update weights for the individual components
+        in the mixture model.
+
+        Args:
+            gamma: masks, shape (B, num_outputs, F, T)
+
+        Returns:
+            Component weights, shape (B, num_outputs, F)
+        """
+        alpha = torch.mean(gamma, dim=-1)
+        return alpha
+
+    def update_pdf(
+        self, z: torch.Tensor, gamma: torch.Tensor, zH_invBM_z: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Update PDF of the cACGMM.
+
+        Args:
+            z: directional statistics, shape (B, num_inputs, F, T)
+            gamma: masks, shape (B, num_outputs, F, T)
+            zH_invBM_z: energy weighted by shape matrices, shape (B, num_outputs, F, T)
+
+        Returns:
+            Logarithm of the PDF, shape (B, num_outputs, F, T), the energy term, shape (B, num_outputs, F, T)
+        """
+        num_inputs = z.size(-3)
+
+        # shape (B, num_outputs, F, T)
+        scale = gamma / (zH_invBM_z + self.eps)
+
+        # scale outer product and sum over time
+        # shape (B, num_outputs, F, num_inputs, num_inputs)
+        BM = num_inputs * torch.einsum('bmft,bift,bjft->bmfij', scale.to(z.dtype), z, z.conj())
+
+        # normalize across time
+        denom = torch.sum(gamma, dim=-1)
+        BM = BM / (denom[..., None, None] + self.eps)
+
+        # make sure the matrix is Hermitian
+        BM = (BM + BM.conj().transpose(-1, -2)) / 2
+
+        # use eigenvalue decomposition to calculate the log determinant
+        # --
+        # and the inverse-weighted energy term
+        L, Q = torch.linalg.eigh(BM)
+
+        # BM is positive definite, so all eigenvalues should be positive
+        # However, small negative values may occur due to a limited precision
+        L = torch.clamp(L.real, min=self.eps)
+
+        # PDF is invariant to scaling of the shape matrix [1], so
+        # eignevalues can be normalized (across num_inputs)
+        L = L / (torch.max(L, axis=-1, keepdim=True)[0] + self.eps)
+
+        # small regularization to avoid numerical issues
+        L = L + self.eps
+
+        # calculate the log determinant using the eigenvalues
+        log_detBM = torch.sum(torch.log(L), dim=-1)
+
+        # calculate the energy term using the inverse eigenvalues
+        # --
+        # zH_invBM_z = torch.einsum('bift,bmfij,bmfj,bmfkj,bkft->bmft', z.conj(), Q, (1 / L).to(Q.dtype), Q.conj(), z)
+        # # small regularization
+        # zH_invBM_z = zH_invBM_z.abs() + self.eps
+
+        # calc sqrt(L) * Q^H * z
+        zH_invBM_z = torch.einsum('bmfj,bmfkj,bkft->bmftj', (1 / L.sqrt()).to(Q.dtype), Q.conj(), z)
+        # calc squared norm
+        zH_invBM_z = zH_invBM_z.abs().pow(2).sum(-1)
+        # small regularization
+        zH_invBM_z = zH_invBM_z + self.eps
+
+        # final log PDF
+        # --
+        log_pdf = -num_inputs * torch.log(zH_invBM_z) - log_detBM[..., None]
+
+        return log_pdf, zH_invBM_z
+
+    def forward(self, input: torch.Tensor, activity: torch.Tensor) -> torch.Tensor:
+        """Apply GSS to estimate the masks.
+
+        Args:
+            input: batched C-channel input signal, shape (B, num_inputs, F, T)
+            activity: batched frame-wise activity for each output/component, shape (B, num_outputs, T)
+
+        Returns:
+            Masks for the components of the model, shape (B, num_outputs, F, T)
+        """
+        B, num_inputs, F, T = input.shape
+        num_outputs = activity.size(1)
+        assert (
+            activity.size(0) == B and activity.size(-1) == T
+        ), f'Expecting activity of shape ({B}, num_outputs, {T}), got {activity.shape}'
+        assert num_outputs > 1, f'Expecting multiple outputs, got {num_outputs}'
+
+        with torch.cuda.amp.autocast(enabled=False):
+            input = input.to(dtype=self.dtype)
+
+            assert input.is_complex(), f'Expecting complex input, got {input.dtype}'
+
+            # convert input to directional statistics
+            # by normalizing across channels
+            z = self.normalize(input, dim=-3)
+
+            # initialize masks
+            gamma = torch.clamp(activity, min=self.eps)
+            # normalize across channels
+            gamma = gamma / torch.sum(gamma, dim=-2, keepdim=True)
+            # expand to input shape
+            gamma = gamma.unsqueeze(2).expand(-1, -1, F, -1)
+
+            # initialize energy term
+            zH_invBM_z = torch.ones(B, num_outputs, F, T, dtype=input.dtype, device=input.device)
+
+            # EM iterations
+            for it in range(self.num_iterations):
+                alpha = self.update_weights(gamma)
+                log_pdf, zH_invBM_z = self.update_pdf(z, gamma, zH_invBM_z)
+                gamma = self.update_masks(alpha, activity, log_pdf)
+
+        if torch.any(torch.isnan(gamma)):
+            raise RuntimeError(f'gamma contains NaNs: {gamma}')
+
+        return gamma
+
+
 class MaskReferenceChannel(NeuralModule):
     """A simple mask processor which applies mask
     on ref_channel of the input signal.
@@ -404,36 +609,82 @@ class MaskBasedBeamformer(NeuralModule):
 
     Args:
         filter_type: string denoting the type of the filter. Defaults to `mvdr`
-        ref_channel: reference channel for processing
+        filter_beta: Parameter of the parameteric multichannel Wiener filter
+        filter_rank: Parameter of the parametric multichannel Wiener filter
+        filter_postfilter: Optional, postprocessing of the filter
+        ref_channel: Optional, reference channel. If None, it will be estimated automatically
+        ref_hard: If true, hard (one-hot) reference. If false, a soft reference
+        ref_hard_use_grad: If true, use straight-through gradient when using the hard reference
+        ref_subband_weighting: If true, use subband weighting when estimating reference channel
+        num_subbands: Optional, used to determine the parameter size for reference estimation
         mask_min_db: Threshold mask to a minimal value before applying it, defaults to -200dB
         mask_max_db: Threshold mask to a maximal value before applying it, defaults to 0dB
+        diag_reg: Optional, diagonal regularization for the multichannel filter
+        eps: Small regularization constant to avoid division by zero
     """
 
     def __init__(
         self,
         filter_type: str = 'mvdr_souden',
-        ref_channel: int = 0,
+        filter_beta: float = 0.0,
+        filter_rank: str = 'one',
+        filter_postfilter: Optional[str] = None,
+        filter_output_channel_reduction: Optional[str] = None,
+        ref_channel: Optional[int] = 0,
+        ref_hard: bool = True,
+        ref_hard_use_grad: bool = False,
+        ref_subband_weighting: bool = False,
+        num_subbands: Optional[int] = None,
         mask_min_db: float = -200,
         mask_max_db: float = 0,
+        postmask_min_db: float = 0,
+        postmask_max_db: float = 0,
+        diag_reg: Optional[float] = 1e-6,
+        eps: float = 1e-8,
     ):
-        if not HAVE_TORCHAUDIO:
-            logging.error('Could not import torchaudio. Some features might not work.')
-
-            raise ModuleNotFoundError(
-                "torchaudio is not installed but is necessary to instantiate a {self.__class__.__name__}"
-            )
-
         super().__init__()
-        self.ref_channel = ref_channel
-        self.filter_type = filter_type
-        if self.filter_type == 'mvdr_souden':
-            self.psd = torchaudio.transforms.PSD()
-            self.filter = torchaudio.transforms.SoudenMVDR()
-        else:
+        if filter_type not in ['pmwf', 'mvdr_souden']:
             raise ValueError(f'Unknown filter type {filter_type}')
+
+        self.filter_type = filter_type
+        if self.filter_type == 'mvdr_souden' and filter_beta != 0:
+            logging.warning(
+                'Using filter type %s: beta will be automatically set to zero (current beta %f) and rank to one (current rank %s).',
+                self.filter_type,
+                filter_beta,
+                filter_rank,
+            )
+            filter_beta = 0.0
+            filter_rank = 'one'
+        # Prepare filter
+        self.filter = ParametricMultichannelWienerFilter(
+            beta=filter_beta,
+            rank=filter_rank,
+            postfilter=filter_postfilter,
+            ref_channel=ref_channel,
+            ref_hard=ref_hard,
+            ref_hard_use_grad=ref_hard_use_grad,
+            ref_subband_weighting=ref_subband_weighting,
+            num_subbands=num_subbands,
+            output_channel_reduction=filter_output_channel_reduction,
+            diag_reg=diag_reg,
+            eps=eps,
+        )
         # Mask thresholding
+        assert mask_min_db < mask_max_db
         self.mask_min = db2mag(mask_min_db)
         self.mask_max = db2mag(mask_max_db)
+        # Postmask thresholding
+        assert postmask_min_db <= postmask_max_db
+        self.postmask_min = db2mag(postmask_min_db)
+        self.postmask_max = db2mag(postmask_max_db)
+
+        logging.debug('Initialized %s', self.__class__.__name__)
+        logging.debug('\tfilter_type:  %s', self.filter_type)
+        logging.debug('\tmask_min:     %e', self.mask_min)
+        logging.debug('\tmask_max:     %e', self.mask_max)
+        logging.debug('\tpostmask_min: %e', self.postmask_min)
+        logging.debug('\tpostmask_max: %e', self.postmask_max)
 
     @property
     def input_types(self) -> Dict[str, NeuralType]:
@@ -441,8 +692,9 @@ class MaskBasedBeamformer(NeuralModule):
         """
         return {
             "input": NeuralType(('B', 'C', 'D', 'T'), SpectrogramType()),
-            "input_length": NeuralType(('B',), LengthsType()),
             "mask": NeuralType(('B', 'C', 'D', 'T'), FloatType()),
+            "mask_undesired": NeuralType(('B', 'C', 'D', 'T'), FloatType(), optional=True),
+            "input_length": NeuralType(('B',), LengthsType(), optional=True),
         }
 
     @property
@@ -451,45 +703,79 @@ class MaskBasedBeamformer(NeuralModule):
         """
         return {
             "output": NeuralType(('B', 'C', 'D', 'T'), SpectrogramType()),
-            "output_length": NeuralType(('B',), LengthsType()),
+            "output_length": NeuralType(('B',), LengthsType(), optional=True),
         }
 
     @typecheck()
-    def forward(self, input: torch.Tensor, input_length: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        mask: torch.Tensor,
+        mask_undesired: Optional[torch.Tensor] = None,
+        input_length: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Apply a mask-based beamformer to the input spectrogram.
         This can be used to generate multi-channel output.
-        If `mask` has `M` channels, the output will have `M` channels as well.
+        If `mask` has multiple channels, a multichannel filter is created for each mask,
+        and the output is concatenation of individual outputs along the channel dimension.
+        The total number of outputs is `num_masks * M`, where `M` is the number of channels
+        at the filter output.
 
         Args:
             input: Input signal complex-valued spectrogram, shape (B, C, F, N)
+            mask: Mask for M output signals, shape (B, num_masks, F, N)
             input_length: Length of valid entries along the time dimension, shape (B,)
-            mask: Mask for M output signals, shape (B, M, F, N)
         
         Returns:
-            M-channel output signal complex-valued spectrogram, shape (B, M, F, N)
+            Multichannel output signal complex-valued spectrogram, shape (B, num_masks * M, F, N)
         """
-        # Apply threshold on the mask
-        mask = torch.clamp(mask, min=self.mask_min, max=self.mask_max)
         # Length mask
-        length_mask: torch.Tensor = make_seq_mask_like(
-            lengths=input_length, like=mask[:, 0, ...], time_dim=-1, valid_ones=False
-        )
-        # Use each mask to generate an output at ref_channel
-        output = []
-        for m in range(mask.size(1)):
-            # Prepare mask for the desired and the undesired signal
-            mask_desired = mask[:, m, ...].masked_fill(length_mask, 0.0)
-            mask_undesired = (1 - mask_desired).masked_fill(length_mask, 0.0)
-            # Calculate PSDs
-            psd_desired = self.psd(input, mask_desired)
-            psd_undesired = self.psd(input, mask_undesired)
+        if input_length is not None:
+            length_mask: torch.Tensor = make_seq_mask_like(
+                lengths=input_length, like=mask[:, 0, ...], time_dim=-1, valid_ones=False
+            )
+
+        # Use each mask to generate an output
+        output, num_masks = [], mask.size(1)
+        for m in range(num_masks):
+            # Desired signal mask
+            mask_d = mask[:, m, ...]
+            # Undesired signal mask
+            if mask_undesired is not None:
+                mask_u = mask_undesired[:, m, ...]
+            elif num_masks == 1:
+                # If a single mask is estimated, use the complement
+                mask_u = 1 - mask_d
+            else:
+                # Use sum of all other sources
+                mask_u = torch.sum(mask, dim=1) - mask_d
+
+            # Threshold masks
+            mask_d = torch.clamp(mask_d, min=self.mask_min, max=self.mask_max)
+            mask_u = torch.clamp(mask_u, min=self.mask_min, max=self.mask_max)
+
+            if input_length is not None:
+                mask_d = mask_d.masked_fill(length_mask, 0.0)
+                mask_u = mask_u.masked_fill(length_mask, 0.0)
+
             # Apply filter
-            output_m = self.filter(input, psd_desired, psd_undesired, reference_channel=self.ref_channel)
-            output_m = output_m.masked_fill(length_mask, 0.0)
-            # Save the current output (B, F, N)
+            output_m = self.filter(input=input, mask_s=mask_d, mask_n=mask_u)
+
+            # Optional: apply a postmask with different thresholds
+            if self.postmask_min < self.postmask_max:
+                postmask_m = torch.clamp(mask[:, m, ...], min=self.postmask_min, max=self.postmask_max)
+                output_m = output_m * postmask_m.unsqueeze(1)
+
+            # Save the current output (B, M, F, T)
             output.append(output_m)
 
-        output = torch.stack(output, axis=1)
+        # Combine outputs along the channel dimension
+        # Each output is (B, M, F, T)
+        output = torch.concatenate(output, axis=1)
+
+        # Apply masking
+        if input_length is not None:
+            output = output.masked_fill(length_mask[:, None, ...], 0.0)
 
         return output, input_length
 
@@ -513,14 +799,18 @@ class WPEFilter(NeuralModule):
         - Jukić et al, Group sparsity for MIMO speech dereverberation, 2015
     """
 
-    def __init__(
-        self, filter_length: int, prediction_delay: int, diag_reg: Optional[float] = 1e-8, eps: float = 1e-10
-    ):
+    def __init__(self, filter_length: int, prediction_delay: int, diag_reg: Optional[float] = 1e-6, eps: float = 1e-8):
         super().__init__()
         self.filter_length = filter_length
         self.prediction_delay = prediction_delay
         self.diag_reg = diag_reg
         self.eps = eps
+
+        logging.debug('Initialized %s', self.__class__.__name__)
+        logging.debug('\tfilter_length:    %d', self.filter_length)
+        logging.debug('\tprediction_delay: %d', self.prediction_delay)
+        logging.debug('\tdiag_reg:         %g', self.diag_reg)
+        logging.debug('\teps:              %g', self.eps)
 
     @property
     def input_types(self) -> Dict[str, NeuralType]:
@@ -559,7 +849,7 @@ class WPEFilter(NeuralModule):
             as the input length.
         """
         # Temporal weighting: average power over channels, shape (B, F, N)
-        weight = torch.mean(power, dim=1)
+        weight = torch.mean(power, dim=-3)
         # Use inverse power as the weight
         weight = 1 / (weight + self.eps)
 
@@ -739,7 +1029,12 @@ class WPEFilter(NeuralModule):
             Q = Q + torch.diag_embed(diag_reg.unsqueeze(-1) * torch.ones(Q.shape[-1], device=Q.device))
 
         # Solve for the filter
-        G = torch.linalg.solve(Q, R)
+        # G = torch.linalg.solve(Q, R)
+        # Use Cholesky decomposition
+        QL = torch.linalg.cholesky(Q)
+        # Forward and backward substitution
+        G = torch.linalg.solve_triangular(QL, R, upper=False)
+        G = torch.linalg.solve_triangular(QL.conj().transpose(-2, -1), G, upper=True)
 
         # Reshape to desired representation: (B, F, input channels, filter_length, output channels)
         G = G.reshape(B, F, C, filter_length, C)
@@ -796,6 +1091,7 @@ class MaskBasedDereverbWPE(NeuralModule):
         mask_max_db: Threshold mask to a minimal value before applying it, defaults to 0dB
         diag_reg: Diagonal regularization for WPE
         eps: Small regularization constant
+        dtype: Data type for internal computations
 
     References:
         - Kinoshita et al, Neural network-based spectrum estimation for online WPE dereverberation, 2017
@@ -809,8 +1105,9 @@ class MaskBasedDereverbWPE(NeuralModule):
         num_iterations: int = 1,
         mask_min_db: float = -200,
         mask_max_db: float = 0,
-        diag_reg: Optional[float] = 1e-8,
-        eps: float = 1e-10,
+        diag_reg: Optional[float] = 1e-6,
+        eps: float = 1e-8,
+        dtype: torch.dtype = torch.cdouble,
     ):
         super().__init__()
         # Filter setup
@@ -821,6 +1118,15 @@ class MaskBasedDereverbWPE(NeuralModule):
         # Mask thresholding
         self.mask_min = db2mag(mask_min_db)
         self.mask_max = db2mag(mask_max_db)
+        # Internal calculations
+        assert dtype in [torch.cfloat, torch.cdouble], f'Unsupported dtype {dtype}, expecting cfloat or cdouble'
+        self.dtype = dtype
+
+        logging.debug('Initialized %s', self.__class__.__name__)
+        logging.debug('\tnum_iterations: %s', self.num_iterations)
+        logging.debug('\tmask_min:       %g', self.mask_min)
+        logging.debug('\tmask_max:       %g', self.mask_max)
+        logging.debug('\tdtype:          %s', self.dtype)
 
     @property
     def input_types(self) -> Dict[str, NeuralType]:
@@ -848,19 +1154,20 @@ class MaskBasedDereverbWPE(NeuralModule):
         """Given an input signal `input`, apply the WPE dereverberation algoritm.
 
         Args:
-            input: C-channel complex-valued spectrogram, shape (B, C, F, N)
+            input: C-channel complex-valued spectrogram, shape (B, C, F, T)
             input_length: Optional length for each signal in the batch, shape (B,)
-            mask: Optional mask, shape (B, 1, F, N) or (B, C, F, N)
+            mask: Optional mask, shape (B, 1, F, N) or (B, C, F, T)
 
         Returns:
             Processed tensor with the same number of channels as the input,
-            shape (B, C, F, N).
+            shape (B, C, F, T).
         """
         io_dtype = input.dtype
 
         with torch.cuda.amp.autocast(enabled=False):
+            output = input.to(dtype=self.dtype)
 
-            output = input.cdouble()
+            assert output.is_complex(), f'Expecting complex input, got {input.dtype}'
 
             for i in range(self.num_iterations):
                 magnitude = torch.abs(output)
