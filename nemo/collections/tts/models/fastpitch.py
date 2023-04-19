@@ -13,6 +13,7 @@
 # limitations under the License.
 import contextlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 import torch
@@ -33,6 +34,7 @@ from nemo.collections.tts.parts.utils.helpers import (
     process_batch,
     sample_tts_input,
 )
+from nemo.collections.tts.parts.utils.callbacks import FastPitchLoggingCallback
 from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types.elements import (
@@ -113,6 +115,7 @@ class FastPitchModel(SpectrogramGenerator, Exportable):
         super().__init__(cfg=cfg, trainer=trainer)
 
         self.bin_loss_warmup_epochs = cfg.get("bin_loss_warmup_epochs", 100)
+        self.log_images = cfg.get("log_images", False)
         self.log_train_images = False
 
         loss_scale = 0.1 if self.learn_alignment else 1.0
@@ -174,6 +177,8 @@ class FastPitchModel(SpectrogramGenerator, Exportable):
         }
         if self.fastpitch.speaker_emb is not None:
             self.export_config["num_speakers"] = cfg.n_speakers
+
+        self.log_sample_config = cfg.get("log_sample_config", None)
 
     def _get_default_text_tokenizer_conf(self):
         text_tokenizer: TextTokenizerConfig = TextTokenizerConfig()
@@ -408,7 +413,7 @@ class FastPitchModel(SpectrogramGenerator, Exportable):
             self.log("t_bin_loss", bin_loss)
 
         # Log images to tensorboard
-        if self.log_train_images and isinstance(self.logger, TensorBoardLogger):
+        if self.log_images and self.log_train_images and isinstance(self.logger, TensorBoardLogger):
             self.log_train_images = False
 
             self.tb_logger.add_image(
@@ -501,7 +506,7 @@ class FastPitchModel(SpectrogramGenerator, Exportable):
 
         _, _, _, _, _, spec_target, spec_predict = outputs[0].values()
 
-        if isinstance(self.logger, TensorBoardLogger):
+        if self.log_images and isinstance(self.logger, TensorBoardLogger):
             self.tb_logger.add_image(
                 "val_mel_target",
                 plot_spectrogram_to_numpy(spec_target[0].data.cpu().float().numpy()),
@@ -788,3 +793,30 @@ class FastPitchModel(SpectrogramGenerator, Exportable):
         )
         new_speaker_emb = weight_speaker_1 * speaker_emb_1 + weight_speaker_2 * speaker_emb_2
         self.fastpitch.speaker_emb.weight.data[new_speaker_id] = new_speaker_emb
+
+    def configure_callbacks(self):
+        if not self.log_sample_config:
+            return
+
+        sample_ds_class = self.log_sample_config.dataset._target_
+        if sample_ds_class != "nemo.collections.tts.data.text_to_speech_dataset.TextToSpeechDataset":
+            raise ValueError(f"Sample logging only supported for TextToSpeechDataset, got {sample_ds_class}")
+
+        data_loader = self._setup_test_dataloader(self.log_sample_config)
+
+        log_callback = FastPitchLoggingCallback(
+            data_loader=data_loader,
+            loggers=self.trainer.loggers,
+            output_dir=Path(self.log_sample_config.sample_dir),
+            epoch_frequency=self.log_sample_config.epoch_frequency,
+            log_audio=self.log_sample_config.log_audio,
+            log_audio_gta=self.log_sample_config.log_audio_gta,
+            log_spectrogram=self.log_sample_config.log_spectrogram,
+            log_alignment=self.log_sample_config.log_alignment,
+            log_tensorboard=self.log_sample_config.log_tensorboard,
+            log_wandb=self.log_sample_config.log_wandb,
+            vocoder_type=self.log_sample_config.vocoder_type,
+            vocoder_checkpoint_path=self.log_sample_config.vocoder_checkpoint_path,
+        )
+
+        return [log_callback]
