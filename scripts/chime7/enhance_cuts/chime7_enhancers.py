@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import soundfile as sf
 import torch
+import torchaudio
 from gss.core import Activity
 from gss.utils.data_utils import GssDataset, create_sampler, start_end_context_frames
 from lhotse import CutSet, Recording, RecordingSet, SupervisionSegment, SupervisionSet
@@ -57,6 +58,17 @@ def activity_time_to_timefreq(a_time, win_length, hop_length):
     a_tf = a_tf.reshape(a_time.size(0), a_time.size(1), win_length, -1)
     a_tf = torch.abs(a_tf).any(axis=-2)
     return a_tf
+
+
+def activity_time_to_timefreq_stft(a, stft):
+    """This was the original prototype activity_time_to_timefreq.
+    Keeping it here for reference since it worked a little better than
+    the other.
+    """
+    A, _ = stft(input=a)
+    A = torch.abs(A)
+    A = torch.mean(A, axis=-2) > 0.5
+    return A
 
 
 def save_worker(exp_dir, orig_cuts, x_hat, recording_id, speaker, sample_rate, force_overwrite):
@@ -136,17 +148,35 @@ class CutEnhancer(metaclass=ABCMeta):
         num_workers=1,
         num_buckets=2,
         force_overwrite=False,
+        torchaudio_backend='soundfile',
     ):
         """Create data loaders and enhance cuts.
         This is mostly copied from from gss.core.enhancer.Enhancer.enhance_cuts.
         """
+        torchaudio.set_audio_backend(torchaudio_backend)
+        torchaudio_backend = torchaudio.get_audio_backend()
+
         logging.info('Preparing GSS dataset and data loader')
+        logging.info('\tcuts:               %s', cuts)
+        logging.info('\texp_dir:            %s', exp_dir)
+        logging.info('\tmax_batch_duration: %f', max_batch_duration)
+        logging.info('\tmax_batch_cuts:     %d', max_batch_cuts)
+        logging.info('\tnum_workers:        %d', num_workers)
+        logging.info('\tnum_buckets:        %d', num_buckets)
+        logging.info('\tforce_overwrite:    %s', force_overwrite)
+        logging.info('\ttorchaudio backend: %s', torchaudio_backend)
+
         gss_dataset = GssDataset(context_duration=self.context_duration, activity=self.activity)
         gss_sampler = create_sampler(
             cuts, max_duration=max_batch_duration, max_cuts=max_batch_cuts, num_buckets=num_buckets
         )
         dl = DataLoader(
-            gss_dataset, sampler=gss_sampler, batch_size=None, num_workers=num_workers, persistent_workers=False
+            gss_dataset,
+            sampler=gss_sampler,
+            batch_size=None,
+            num_workers=num_workers,
+            persistent_workers=False,
+            prefetch_factor=4,
         )
 
         exp_dir = pathlib.Path(exp_dir)
@@ -208,7 +238,7 @@ class CutEnhancer(metaclass=ABCMeta):
                         logging.error(f'Error enhancing batch: {e}')
                         num_errors += 1
                         # Keep the original signal (only load channel 0)
-                        x_hat = batch.audio[0:1].cpu().numpy()
+                        x_hat = batch.audio[0].cpu().numpy()
                         break
 
                 # Save the enhanced cut to disk
@@ -261,6 +291,7 @@ class FrontEnd_v1(CutEnhancer):
         mc_filter_beta=0,
         mc_filter_rank='one',
         mc_filter_postfilter='ban',
+        mc_filter_num_iterations=None,
         mc_ref_channel='max_snr',
         mc_mask_min_db=-200,
         mc_postmask_min_db=0,  # no postmasking by default
@@ -290,13 +321,15 @@ class FrontEnd_v1(CutEnhancer):
             filter_beta=mc_filter_beta,
             filter_rank=mc_filter_rank,
             filter_postfilter=mc_filter_postfilter,
+            filter_num_iterations=mc_filter_num_iterations,
             ref_channel=mc_ref_channel,
             mask_min_db=mc_mask_min_db,
             postmask_min_db=mc_postmask_min_db,
+            dtype=use_dtype,
         ).cuda()
 
     def enhance_batch(self, audio, activity, speaker_id, num_chunks=1, left_context=0, right_context=0) -> np.ndarray:
-        """Enhance batch, with chunking as implemented in the GSS package
+        """Enhance batch, as implemented in GSS package
 
         Args:
             audio: (channels, samples)

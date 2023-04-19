@@ -18,7 +18,10 @@ import numpy as np
 import torch
 
 from nemo.collections.asr.parts.preprocessing.features import make_seq_mask_like
-from nemo.collections.asr.parts.submodules.multichannel_modules import ParametricMultichannelWienerFilter
+from nemo.collections.asr.parts.submodules.multichannel_modules import (
+    ParametricMultichannelWienerFilter,
+    WeightedMinimumPowerDistortionlessResponseFilter,
+)
 from nemo.collections.asr.parts.utils.audio_utils import db2mag, wrap_to_pi
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types import FloatType, LengthsType, NeuralType, SpectrogramType
@@ -630,6 +633,9 @@ class MaskBasedBeamformer(NeuralModule):
         filter_rank: str = 'one',
         filter_postfilter: Optional[str] = None,
         filter_output_channel_reduction: Optional[str] = None,
+        filter_length: Optional[int] = None,  # used for convolutional beamformers
+        filter_prediction_delay: Optional[int] = None,  # used for convolutional beamformers
+        filter_num_iterations: Optional[int] = None,  # used for wMPDR beamformers
         ref_channel: Optional[int] = 0,
         ref_hard: bool = True,
         ref_hard_use_grad: bool = False,
@@ -641,35 +647,55 @@ class MaskBasedBeamformer(NeuralModule):
         postmask_max_db: float = 0,
         diag_reg: Optional[float] = 1e-6,
         eps: float = 1e-8,
+        dtype: torch.dtype = torch.cdouble,
     ):
         super().__init__()
-        if filter_type not in ['pmwf', 'mvdr_souden']:
+        if filter_type not in ['pmwf', 'mvdr_souden', 'wmpdr']:
             raise ValueError(f'Unknown filter type {filter_type}')
 
         self.filter_type = filter_type
-        if self.filter_type == 'mvdr_souden' and filter_beta != 0:
-            logging.warning(
-                'Using filter type %s: beta will be automatically set to zero (current beta %f) and rank to one (current rank %s).',
-                self.filter_type,
-                filter_beta,
-                filter_rank,
+
+        if filter_type in ['pmwf', 'mvdr_souden']:
+            if self.filter_type == 'mvdr_souden' and filter_beta != 0:
+                logging.warning(
+                    'Using filter type %s: beta will be automatically set to zero (current beta %f) and rank to one (current rank %s).',
+                    self.filter_type,
+                    filter_beta,
+                    filter_rank,
+                )
+                filter_beta = 0.0
+                filter_rank = 'one'
+            # Prepare filter
+            self.filter = ParametricMultichannelWienerFilter(
+                beta=filter_beta,
+                rank=filter_rank,
+                postfilter=filter_postfilter,
+                ref_channel=ref_channel,
+                ref_hard=ref_hard,
+                ref_hard_use_grad=ref_hard_use_grad,
+                ref_subband_weighting=ref_subband_weighting,
+                num_subbands=num_subbands,
+                output_channel_reduction=filter_output_channel_reduction,
+                diag_reg=diag_reg,
+                eps=eps,
+                dtype=dtype,
             )
-            filter_beta = 0.0
-            filter_rank = 'one'
-        # Prepare filter
-        self.filter = ParametricMultichannelWienerFilter(
-            beta=filter_beta,
-            rank=filter_rank,
-            postfilter=filter_postfilter,
-            ref_channel=ref_channel,
-            ref_hard=ref_hard,
-            ref_hard_use_grad=ref_hard_use_grad,
-            ref_subband_weighting=ref_subband_weighting,
-            num_subbands=num_subbands,
-            output_channel_reduction=filter_output_channel_reduction,
-            diag_reg=diag_reg,
-            eps=eps,
-        )
+        elif filter_type == 'wmpdr':
+            self.filter = WeightedMinimumPowerDistortionlessResponseFilter(
+                num_iterations=filter_num_iterations,
+                postfilter=filter_postfilter,
+                ref_channel=ref_channel,
+                ref_hard=ref_hard,
+                ref_hard_use_grad=ref_hard_use_grad,
+                ref_subband_weighting=ref_subband_weighting,
+                num_subbands=num_subbands,
+                output_channel_reduction=filter_output_channel_reduction,
+                diag_reg=diag_reg,
+                eps=eps,
+                dtype=dtype,
+            )
+        else:
+            raise ValueError(f'Unknown filter type {filter_type}')
         # Mask thresholding
         assert mask_min_db < mask_max_db
         self.mask_min = db2mag(mask_min_db)
@@ -694,6 +720,7 @@ class MaskBasedBeamformer(NeuralModule):
             "input": NeuralType(('B', 'C', 'D', 'T'), SpectrogramType()),
             "mask": NeuralType(('B', 'C', 'D', 'T'), FloatType()),
             "mask_undesired": NeuralType(('B', 'C', 'D', 'T'), FloatType(), optional=True),
+            "power": NeuralType(('B', 'C', 'D', 'T'), FloatType(), optional=True),
             "input_length": NeuralType(('B',), LengthsType(), optional=True),
         }
 
@@ -723,7 +750,9 @@ class MaskBasedBeamformer(NeuralModule):
 
         Args:
             input: Input signal complex-valued spectrogram, shape (B, C, F, N)
-            mask: Mask for M output signals, shape (B, num_masks, F, N)
+            mask: Mask for generating output signals, shape (B, num_masks, F, N)
+            mask_undesired: Mask for undesired signals, shape (B, num_masks, F, N)
+            power: Power for generating output signals, shape (B, num_masks, F, N)
             input_length: Length of valid entries along the time dimension, shape (B,)
         
         Returns:
@@ -799,7 +828,7 @@ class WPEFilter(NeuralModule):
         - Jukić et al, Group sparsity for MIMO speech dereverberation, 2015
     """
 
-    def __init__(self, filter_length: int, prediction_delay: int, diag_reg: Optional[float] = 1e-6, eps: float = 1e-8):
+    def __init__(self, filter_length: int, prediction_delay: int, diag_reg: Optional[float] = 1e-5, eps: float = 1e-8):
         super().__init__()
         self.filter_length = filter_length
         self.prediction_delay = prediction_delay
@@ -1029,12 +1058,17 @@ class WPEFilter(NeuralModule):
             Q = Q + torch.diag_embed(diag_reg.unsqueeze(-1) * torch.ones(Q.shape[-1], device=Q.device))
 
         # Solve for the filter
-        # G = torch.linalg.solve(Q, R)
-        # Use Cholesky decomposition
-        QL = torch.linalg.cholesky(Q)
-        # Forward and backward substitution
-        G = torch.linalg.solve_triangular(QL, R, upper=False)
-        G = torch.linalg.solve_triangular(QL.conj().transpose(-2, -1), G, upper=True)
+        try:
+            # Use Cholesky decomposition
+            QL = torch.linalg.cholesky(Q)
+            # Forward and backward substitution
+            G = torch.linalg.solve_triangular(QL, R, upper=False)
+            G = torch.linalg.solve_triangular(QL.conj().transpose(-2, -1), G, upper=True)
+        except torch.linalg.LinAlgError as e:
+            # Fallback to linsolve
+            logging.warning('Cholesky failed with exception: %s', e)
+            logging.info('Fallback to linsolve')
+            G = torch.linalg.solve(Q, R)
 
         # Reshape to desired representation: (B, F, input channels, filter_length, output channels)
         G = G.reshape(B, F, C, filter_length, C)
@@ -1105,7 +1139,7 @@ class MaskBasedDereverbWPE(NeuralModule):
         num_iterations: int = 1,
         mask_min_db: float = -200,
         mask_max_db: float = 0,
-        diag_reg: Optional[float] = 1e-6,
+        diag_reg: Optional[float] = 1e-5,
         eps: float = 1e-8,
         dtype: torch.dtype = torch.cdouble,
     ):
