@@ -24,6 +24,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+ENHANCER_IMPL_CHOICES = ['gss', 'nemo_v1']
+
+
 def enhance_cuts(
     enhancer_impl: str,
     cuts_per_recording: str,
@@ -41,6 +44,7 @@ def enhance_cuts(
     force_overwrite: bool,
     duration_tolerance: float,
     channels: Optional[str] = None,
+    torchaudio_backend: str = 'soundfile',
 ):
     logger.info('Enhance cuts')
     logger.info('\tenhancer_impl:      %s', enhancer_impl)
@@ -59,6 +63,7 @@ def enhance_cuts(
     logger.info('\tforce_overwrite:    %s', force_overwrite)
     logger.info('\tduration_tolerance: %f', duration_tolerance)
     logger.info('\tchannels:           %s', channels)
+    logger.info('\ttorchaudio_backend: %s', torchaudio_backend)
 
     # ########################################
     # Setup as in gss.bin.modes.enhance.cuts_
@@ -97,7 +102,6 @@ def enhance_cuts(
             activity_garbage_class=use_garbage_class,
             wpe=True,
         )
-
     elif enhancer_impl == 'nemo_v1':
         enhancer = FrontEnd_v1(
             stft_fft_length=1024,
@@ -133,6 +137,7 @@ def enhance_cuts(
         num_workers=num_workers,
         num_buckets=num_buckets,
         force_overwrite=force_overwrite,
+        torchaudio_backend=torchaudio_backend,
     )
     end = time.time()
 
@@ -149,7 +154,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--enhancer-impl',
         type=str,
-        choices=['gss', 'nemo_v1'],
+        choices=ENHANCER_IMPL_CHOICES,
         default='nemo',
         help='Implementation of the enhancer, e.g., gss',
     )
@@ -202,6 +207,13 @@ if __name__ == '__main__':
         '--duration-tolerance', type=float, default=3.0,
     )
     parser.add_argument('--channels', type=str, default=None, help='Comma-separated list of channels')
+    parser.add_argument(
+        '--torchaudio-backend',
+        type=str,
+        choices=['sox_io', 'soundfile'],
+        default='soundfile',  # faster than the defaulut sox_io
+        help='Backend used for torchaudio',
+    )
     args = parser.parse_args()
 
     enhance_cuts(
@@ -221,4 +233,5 @@ if __name__ == '__main__':
         force_overwrite=args.force_overwrite,
         duration_tolerance=args.duration_tolerance,
         channels=args.channels,
+        torchaudio_backend=args.torchaudio_backend,
     )
