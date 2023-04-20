@@ -21,6 +21,7 @@ from nemo.collections.asr.metrics.der import evaluate_der
 from nemo.collections.asr.parts.utils.diarization_utils import OfflineDiarWithASR
 from nemo.collections.asr.parts.utils.manifest_utils import read_file
 from nemo.collections.asr.parts.utils.speaker_utils import (
+    audio_rttm_map,
     get_uniqname_from_filepath,
     labels_to_pyannote_object,
     rttm_to_labels,
@@ -131,6 +132,7 @@ def main(
     hyp_ctm_list_path: str,
     ref_ctm_list_path: str,
     hyp_json_list_path: str,
+    test_manifest_path: str,
     diar_eval_mode: str = "all",
     root_path: str = "./",
 ):
@@ -141,10 +143,13 @@ def main(
     hyp_ctm_list = read_file_path(hyp_ctm_list_path) if hyp_ctm_list_path else None
     ref_ctm_list = read_file_path(ref_ctm_list_path) if ref_ctm_list_path else None
     hyp_json_list = read_file_path(hyp_json_list_path) if hyp_json_list_path else None
+    test_manifest = read_file_path(test_manifest) if hyp_json_list_path else None
 
     audio_rttm_map_dict = make_meta_dict(hyp_rttm_list, ref_rttm_list)
 
     trans_info_dict = make_trans_info_dict(hyp_json_list) if hyp_json_list else None
+    if test_manifest is not None:
+        test_manifest_dict = audio_rttm_map(test_manifest)
 
     all_hypothesis = get_pyannote_objs_from_rttms(hyp_rttm_list)
     all_reference = get_pyannote_objs_from_rttms(ref_rttm_list)
@@ -213,6 +218,9 @@ if __name__ == "__main__":
         "--ref_ctm_list", help="path to the filelist of reference CTM files", type=str, required=False, default=None
     )
     parser.add_argument(
+        "--test_manifest", help="path to the test_manifest", type=str, required=False, default=None
+    )
+    parser.add_argument(
         "--hyp_json_list",
         help="(Optional) path to the filelist of hypothesis JSON files",
         type=str,
@@ -238,6 +246,7 @@ if __name__ == "__main__":
         args.hyp_ctm_list,
         args.ref_ctm_list,
         args.hyp_json_list,
+        args.test_manifest,
         args.diar_eval_mode,
         args.root_path,
     )

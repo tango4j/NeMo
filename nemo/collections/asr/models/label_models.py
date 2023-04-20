@@ -232,7 +232,8 @@ class EncDecSpeakerLabelModel(ModelPT, ExportableEncDecModel):
                 trim=config.get('trim_silence', False),
                 normalize_audio=config.get('normalize_audio', False),
                 cal_labels_occurrence=config.get('cal_labels_occurrence', False),
-                channel_selector=config.get('channel_selector', None)
+                channel_selector=config.get('channel_selector', None),
+                max_ch=config.get('max_ch', 1),
             )
             if dataset.labels_occurrence:
                 self.labels_occurrence = dataset.labels_occurrence

@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 from typing import List, Tuple, Union
 import glob
+from collections import Counter
 
 import pandas as pd
 import torch
@@ -34,6 +35,8 @@ from nemo.collections.asr.parts.utils.vad_utils import (
 )
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
+from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+
 ######
 
 import json
@@ -72,8 +75,11 @@ from nemo.collections.asr.parts.utils.vad_utils import (
     generate_vad_frame_pred,
 )
 
+
+
 from nemo.core.classes import Model
 from nemo.utils import logging, model_utils
+from nemo.collections.asr.parts.utils.channel_clustering import channel_cluster_from_coherence
 
 try:
     from torch.cuda.amp import autocast
@@ -135,6 +141,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         if self._diarizer_params.multi_channel_mode is not None:
             self._mc_vad_processor = MultichannelVADProcessor(cfg=cfg)
             self._argmax_idx_dict = {}
+            self._ch_avg_mat = {}
 
     @classmethod
     def list_available_models(cls):
@@ -222,6 +229,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             'labels': None,
             'num_workers': self._cfg.num_workers,
             'channel_selector': self._cfg.get('channel_selector', None),
+            'max_ch': self.max_ch,
         }
         self._speaker_model.setup_test_data(spk_dl_config)
 
@@ -247,11 +255,10 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             out_dir=self._vad_dir,
     )
         if multi_channel:
-            self._vad_dir, self._argmax_idx_dict = self._mc_vad_processor.merge_frame_mc_vad(frame_vad_dir=self._vad_dir, 
+            self._vad_dir, self._argmax_idx_dict, self._ch_avg_mat = self._mc_vad_processor.merge_frame_mc_vad(frame_vad_dir=self._vad_dir, 
                                                                                              audio_rttm_map=self.AUDIO_RTTM_MAP, 
                                                                                              method='max')
             print("self._argmax_idx_dict", self._argmax_idx_dict)
-        
         if not self._vad_params.smoothing:
             # Shift the window by 10ms to generate the frame and use the prediction of the window to represent the label for the frame;
             self.vad_pred_dir = self._vad_dir
@@ -318,7 +325,9 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             self._split_duration = self._vad_params.get("split_duration", 500)
             manifest_vad_input = self._diarizer_params.manifest_filepath
             if self._diarizer_params.get("multi_channel_mode", None) == "mc_vad":
-                manifest_vad_input = self._mc_vad_processor.split_mc_vad_manifest(manifest_vad_input)
+                manifest_vad_input = self._mc_vad_processor.split_mc_vad_manifest(manifest_vad_input, channel_clustering=False)
+            elif self._diarizer_params.get("multi_channel_mode", None) == "mc_vad_cc":
+                manifest_vad_input = self._mc_vad_processor.split_mc_vad_manifest(manifest_vad_input, channel_clustering=True)
             else:
                 manifest_vad_input = manifest_vad_input
 
@@ -338,7 +347,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                     "If you encounter CUDA memory issue, try splitting manifest entry by split_duration to avoid it."
                 )
 
-            if self._diarizer_params.get("multi_channel_mode", None) == "mc_vad":
+            if self._diarizer_params.get("multi_channel_mode", None) in ["mc_vad", "mc_vad_cc"]:
                 # mc_split_manifest_vad_input = split_mc_vad_manifest(manifest_vad_input)
                 self._setup_vad_test_data(manifest_vad_input)
                 self._run_vad(manifest_vad_input, multi_channel=True, frame_vad=True)
@@ -355,7 +364,33 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             raise ValueError(
                 "Only one of diarizer.oracle_vad, vad.model_path or vad.external_vad_manifest must be passed from config"
             )
+        self.max_ch = self._mc_vad_processor.max_ch
         validate_vad_manifest(self.AUDIO_RTTM_MAP, vad_manifest=self._speaker_manifest_path)
+
+    def _get_mc_weights_per_batch(self, manifest_file):
+        """
+        This method returns the weights for each channel for the current batch
+
+        Args:
+
+        Returns:
+            ch_merge_cal_mats (Tensor):
+                A tensor of shape (batch_counts, 1, input_ch_n) containing the weights for each channel
+        """
+        manifest_list = read_manifest(manifest_file)
+        # max_ch = max([x.shape[1] for key, x in self._ch_avg_mat.items()])
+        uniq_id_list = [x['uniq_id'] for x in manifest_list]
+        ordered_uniq_id_set = list(dict.fromkeys(uniq_id_list))
+        counted_uniq_ids = Counter(uniq_id_list)
+        ch_merge_cal_mats = []
+        for uniq_id in set(ordered_uniq_id_set):
+            repeated_mat = self._ch_avg_mat[uniq_id].sum(dim=0).unsqueeze(0).repeat(counted_uniq_ids[uniq_id], 1).unsqueeze(1)
+            if repeated_mat.shape[2] < self.max_ch: # pad if the number of channels is less than max_ch
+                repeated_mat = torch.nn.functional.pad(repeated_mat, (0, self.max_ch - repeated_mat.shape[2]))
+            ch_merge_cal_mats.append(repeated_mat)
+        ch_merger_mats = torch.cat(ch_merge_cal_mats, dim=0)
+        ch_merger_mats_list = torch.split(ch_merger_mats, self._cfg.batch_size, dim=0)
+        return ch_merger_mats_list
 
     def _extract_embeddings(self, manifest_file: str, scale_idx: int, num_scales: int):
         """
@@ -369,17 +404,28 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self.time_stamps = {}
 
         all_embs = torch.empty([0])
-        for test_batch in tqdm(
+        if self._diarizer_params.multi_channel_mode == "mc_vad_cc":
+            ch_merge_cal_mats_list = self._get_mc_weights_per_batch(manifest_file)
+        else:
+            ch_merge_cal_mats_list = []
+
+        # for test_batch in tqdm(
+        for bi, test_batch in enumerate(tqdm(
             self._speaker_model.test_dataloader(),
             desc=f'[{scale_idx+1}/{num_scales}] extract embeddings',
             leave=True,
             disable=not self.verbose,
-        ):
+        )):
             test_batch = [x.to(self._speaker_model.device) for x in test_batch]
             audio_signal, audio_signal_len, labels, slices = test_batch
-            if len(audio_signal.shape) > 2:
+            if len(audio_signal.shape) > 2: # If multi-channel
                 if audio_signal.shape[2] > 1:
-                    audio_signal = torch.mean(audio_signal, dim=2)
+                    if self._diarizer_params.multi_channel_mode == "mc_vad_cc":
+                        ch_merger_mat = ch_merge_cal_mats_list[bi].to(self._speaker_model.device)
+                        print(f"ch_merger_mat.shape: {ch_merger_mat.shape}")
+                        audio_signal = torch.bmm(ch_merger_mat, audio_signal.transpose(2,1)).squeeze(1)
+                    else:
+                        audio_signal = torch.mean(audio_signal, dim=2)
                 else:
                     audio_signal = audio_signal.squeeze(2)
             with autocast():

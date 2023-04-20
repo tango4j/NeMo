@@ -43,6 +43,8 @@ import concurrent.futures
 from nemo.collections.asr.parts.utils.speaker_utils import (
     get_uniqname_from_filepath,
 )
+from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
+from nemo.collections.asr.parts.utils.channel_clustering import channel_cluster_from_coherence
 try:
     from torch.cuda.amp import autocast
 except ImportError:
@@ -1526,13 +1528,70 @@ def plot_sample_from_rttm(
         plt.savefig(save_path)
     return ipd.Audio(audio, rate=16000)
 
+def get_channel_averaging_matrix(channel_clustering_mapping):
+    """
+    Generate channel averaging matrix for channel clustering.
+
+    """
+    ch_bin_count = torch.bincount(channel_clustering_mapping)
+    out_ch_count, in_ch_count = len(ch_bin_count), len(channel_clustering_mapping)
+    avg_cal_mat_select = torch.zeros(out_ch_count, in_ch_count)
+    avg_cal_mat_select[channel_clustering_mapping, torch.arange(in_ch_count)] = 1
+    avg_cal_mat = avg_cal_mat_select / avg_cal_mat_select.sum(dim=1).unsqueeze(1)
+    return avg_cal_mat
+
+# def get_single_ch_averaging_matrix(channel_clustering_mapping):
+#     """
+#     Generate channel averaging matrix for channel clustering.
+
+#     """
+#     ch_bin_count = torch.bincount(channel_clustering_mapping)
+#     in_ch_count = len(channel_clustering_mapping)
+#     avg_cal_mat_select = torch.zeros(1, in_ch_count)
+#     avg_cal_mat_select[channel_clustering_mapping, torch.arange(in_ch_count)] = 1
+#     avg_cal_mat = avg_cal_mat_select / avg_cal_mat_select.sum(dim=1).unsqueeze(1)
+#     return avg_cal_mat
+
+
+def get_channel_averaged_frame_logits(frame_mc_logits, avg_cal_mat):
+    clustered_avg_ch_logits = torch.matmul(avg_cal_mat, frame_mc_logits)
+    return clustered_avg_ch_logits
+
 class MultichannelVADProcessor:
     def __init__(self, cfg):
         self._cfg = cfg
         self.top_k = int(self._cfg.diarizer.vad.parameters.top_k_channels)
+        # self.channel_cluster = self._cfg.diarizer.vad.parameters.get("channel_cluster", True)
+        if self._cfg.diarizer.multi_channel_mode == "mc_vad_cc":
+            self.channel_cluster = True
+        else:
+            self.channel_cluster = False
 
-    @staticmethod
-    def split_mc_vad_manifest(manifest_vad_input: str) -> str:
+        self.channel_cluster_mapping = {}
+        self.sample_rate = 16000
+        self.use_subset_for_chclus = True
+        self.max_ch = 1
+
+    def get_channel_cluster_mapping(self, json_dict):
+        logging.info(f"Channel clustering for {json_dict['uniq_id']}")
+        if self.use_subset_for_chclus:
+            duration = min(json_dict['duration'], 100)
+        else:
+            duration = json_dict['duration']
+        audio_segment = AudioSegment.from_file(audio_file=json_dict['audio_filepath'], 
+                                                target_sr=self.sample_rate, 
+                                                offset=json_dict['offset'], 
+                                                duration=duration)
+            
+        audio_signal = torch.tensor(audio_segment.samples.T)
+        clusters, mag_coherence = channel_cluster_from_coherence(
+                                        audio_signal=audio_signal,
+                                        sample_rate=self.sample_rate,
+                                        output_coherence=True,
+                                        )
+        self.channel_cluster_mapping[json_dict['uniq_id']] = clusters
+
+    def split_mc_vad_manifest(self, manifest_vad_input: str, channel_clustering: bool) -> str:
         """
         Split multi-channel vad manifest into single-channel vad manifest.
 
@@ -1549,6 +1608,10 @@ class MultichannelVADProcessor:
                 if not ('uniq_id' in json_dict and json_dict['uniq_id'] is not None):
                     raise ValueError(f"Multi-channel input with list of files but uniq_id is not present in the manifest: {manifest_vad_input}")
                 else:
+                    self.max_ch = max(self.max_ch, len(json_dict['audio_filepath']))
+                    if channel_clustering:
+                        self.get_channel_cluster_mapping(json_dict)
+
                     for audio_filepath in json_dict['audio_filepath']:
                         split_entry_dict = deepcopy(json_dict)
                         split_entry_dict['audio_filepath'] = audio_filepath
@@ -1591,7 +1654,28 @@ class MultichannelVADProcessor:
         for uniq_id in frame_dict:
             frame_mc_tensor_dict[uniq_id] = torch.stack(frame_dict[uniq_id], dim=0)
         return frame_mc_tensor_dict
+    
+    def merge_channel_clustered_frames(self, frame_mc_tensor_dict, method='max'):
+        """
+        Merge channel-clustered frames.
+        Only turned on when channel_cluster is True.
+        This function changes the channel indices and creates the new channel indices.
 
+        Args:
+            frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
+            method (str): Method to merge multi-channel frames. 
+                Options: ['max', 'mean']
+        Returns:
+            frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.        
+        """
+        ch_avged_tensors, avg_cal_mats = {}, {}
+        for uniq_id in frame_mc_tensor_dict:
+            avg_cal_mat = get_channel_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
+            # avg_1ch_cal_mat = get_single_ch_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
+            avg_cal_mats[uniq_id] = avg_cal_mat
+            ch_avged_tensors[uniq_id] = get_channel_averaged_frame_logits(frame_mc_logits=frame_mc_tensor_dict[uniq_id], avg_cal_mat=avg_cal_mat)
+        return ch_avged_tensors, avg_cal_mats
+    
     def merge_mc_frames(self, frame_mc_tensor_dict, method='max'):
         """
         Merge multi-channel frames into single channel frames.
@@ -1670,8 +1754,13 @@ class MultichannelVADProcessor:
         """
         frame_dict = self.load_frame_dict_from_files(frame_vad_dir, audio_rttm_map)
         frame_mc_tensor_dict = self.stack_list_frames(frame_dict)
+        if self.channel_cluster:
+            print("Merge frames using channel clustering...")
+            frame_mc_tensor_dict, avg_cal_mats = self.merge_channel_clustered_frames(frame_mc_tensor_dict, method)
+        else:
+            avg_cal_mats = None
         frame_single_channel_dict, argmax_ch_idx_dict  = self.merge_mc_frames(frame_mc_tensor_dict, method)
         out_vad_dir = os.path.join(frame_vad_dir, 'frame_merged')
         Path.mkdir(Path(out_vad_dir), exist_ok=True, parents=True)
         self.write_merged_frame_pred(frame_single_channel_dict, out_vad_dir)
-        return out_vad_dir, argmax_ch_idx_dict
+        return out_vad_dir, argmax_ch_idx_dict, avg_cal_mats

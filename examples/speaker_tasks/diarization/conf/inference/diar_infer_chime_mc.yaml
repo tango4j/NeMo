@@ -6,12 +6,15 @@
 # {"audio_filepath": "/path/to/audio_file", "offset": 0, "duration": null, "label": "infer", "text": "-", "num_speakers": null, "rttm_filepath": "/path/to/rttm/file", "uem_filepath": "/path/to/uem/file"}
 name: &name "ClusterDiarizerMCchime7"
 
-num_workers: 1
+num_workers: 20
 sample_rate: 16000
 batch_size: 64
 device: cuda:0 # can specify a specific device, i.e: cuda:1 (default cuda if cuda available, else cpu)
 verbose: True # enable additional logging
-channel_selector: [1]
+max_ch: 1
+channel_selector: null
+# channel_selector: [1]
+# channel_selector: average
 # 'average' # Channel number (e.g. 0), list of channels (e.g. [0,5,7] or method (e.g. average)
 
 diarizer:
@@ -21,7 +24,9 @@ diarizer:
   collar: 0.25 # Collar value for scoring
   ignore_overlap: True # Consider or ignore overlap segments while scoring
   channel_selector: ${channel_selector}
-  multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
+  # multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
+  multi_channel_mode: 'mc_vad_cc' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
+  # multi_channel_mode: 'mc_vad'
 
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
@@ -32,13 +37,22 @@ diarizer:
       shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
       smoothing: False # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
-      onset: 0.01
-      offset: 0.01
-      pad_onset: 0.25 # Adding durations before each speech segment 
-      pad_offset: 0.25 # Adding durations after each speech segment 
-      min_duration_on: 0.25 # Threshold for small non_speech deletion
-      min_duration_off: 0.0 # Threshold for short speech segment deletion
-      split_duration: 50
+      ####### Steve's recommendations
+      onset: 0.2 # onset threshold for detecting the beginning and end of a speech
+      offset: 0.3 # offset threshold for detecting the end of a speech.
+      pad_onset: 0.3 # adding durations before each speech segment
+      pad_offset: 0.3 # adding durations after each speech segment
+      min_duration_on: 0.0 # threshold for small non_speech deletion
+      min_duration_off: 0.8 # threshold for short speech segment deletion
+
+      #### Regular chime7-mixer6 setup
+      # onset: 0.01
+      # offset: 0.01
+      # pad_onset: 0.25 # Adding durations before each speech segment 
+      # pad_offset: 0.25 # Adding durations after each speech segment 
+      # min_duration_on: 0.25 # Threshold for small non_speech deletion
+      # min_duration_off: 0.0 # Threshold for short speech segment deletion
+      split_duration: 1500
       filter_speech_first: True 
       top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
 
