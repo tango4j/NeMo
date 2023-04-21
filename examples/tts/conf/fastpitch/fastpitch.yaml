@@ -44,6 +44,7 @@ model:
   dur_loss_scale: 0.1
   pitch_loss_scale: 0.1
   energy_loss_scale: 0.1
+  aligner_loss_scale: 0.1
 
   preprocessor:
     _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
@@ -165,7 +166,7 @@ model:
       dataset_meta: ${log_ds_meta}
 
     dataloader_params:
-      batch_size: 8
+      batch_size: 4
       num_workers: 2
 
   input_fft:
@@ -196,6 +197,9 @@ model:
   alignment_module:
     _target_: nemo.collections.tts.modules.aligner.AlignmentEncoder
     n_text_channels: ${model.symbols_embedding_dim}
+    #dist_type: l2
+    dist_type: cosine
+    temperature: 15.0
 
   duration_predictor:
     _target_: nemo.collections.tts.modules.fastpitch.TemporalPredictor

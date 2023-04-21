@@ -24,7 +24,13 @@ class AlignmentEncoder(torch.nn.Module):
     """Module for alignment text and mel spectrogram. """
 
     def __init__(
-        self, n_mel_channels=80, n_text_channels=512, n_att_channels=80, temperature=0.0005, condition_types=[]
+        self,
+        n_mel_channels=80,
+        n_text_channels=512,
+        n_att_channels=80,
+        temperature=0.0005,
+        condition_types=[],
+        dist_type="l2"
     ):
         super().__init__()
         self.temperature = temperature
@@ -38,13 +44,20 @@ class AlignmentEncoder(torch.nn.Module):
             ConvNorm(n_text_channels * 2, n_att_channels, kernel_size=1, bias=True),
         )
 
+        query_input_dim = n_mel_channels
         self.query_proj = nn.Sequential(
-            ConvNorm(n_mel_channels, n_mel_channels * 2, kernel_size=3, bias=True, w_init_gain='relu'),
+            ConvNorm(query_input_dim, n_mel_channels * 2, kernel_size=3, bias=True, w_init_gain='relu'),
             torch.nn.ReLU(),
             ConvNorm(n_mel_channels * 2, n_mel_channels, kernel_size=1, bias=True),
             torch.nn.ReLU(),
             ConvNorm(n_mel_channels, n_att_channels, kernel_size=1, bias=True),
         )
+        if dist_type == "l2":
+            self.dist_fn = self.get_euclidean_distance
+        elif dist_type == "cosine":
+            self.dist_fn = self.get_cosine_distance
+        else:
+            raise ValueError(f"Unknown distance type '{dist_type}'")
 
     def get_dist(self, keys, queries, mask=None):
         """Calculation of distance matrix.
@@ -57,15 +70,40 @@ class AlignmentEncoder(torch.nn.Module):
         Output:
             dist (torch.tensor): B x T1 x T2 tensor.
         """
-        keys_enc = self.key_proj(keys)  # B x n_attn_dims x T2
-        queries_enc = self.query_proj(queries)  # B x n_attn_dims x T1
-        attn = (queries_enc[:, :, :, None] - keys_enc[:, :, None]) ** 2  # B x n_attn_dims x T1 x T2
-        dist = attn.sum(1, keepdim=True)  # B x 1 x T1 x T2
+        # B x n_attn_dims x T2
+        keys_enc = self.key_proj(keys)
+        # B x n_attn_dims x T1
+        queries_enc = self.query_proj(queries)
+
+        # B x T1 x T2
+        dist = self.dist_fn(queries=queries_enc, keys=keys_enc)
 
         if mask is not None:
-            dist.data.masked_fill_(mask.permute(0, 2, 1).unsqueeze(2), float("inf"))
+            dist.data.masked_fill_(mask.permute(0, 2, 1), float("inf"))
 
-        return dist.squeeze(1)
+        return dist
+
+    @staticmethod
+    def get_euclidean_distance(queries, keys):
+        # B x n_attn_dims x T1 x 1
+        queries = queries.unsqueeze(3)
+        # B x n_attn_dims x 1 x T2
+        keys = keys.unsqueeze(2)
+        # B x n_attn_dims x T1 x T2
+        distance = (queries - keys) ** 2
+        # B x T1 x T2
+        l2_dist = distance.sum(axis=1)
+        return l2_dist
+
+    @staticmethod
+    def get_cosine_distance(queries, keys):
+        # B x n_attn_dims x T1 x 1
+        queries = queries.unsqueeze(3)
+        # B x n_attn_dims x 1 x T2
+        keys = keys.unsqueeze(2)
+        # B x T1 x T2
+        cosine_dist = (-1.0) * torch.nn.functional.cosine_similarity(queries, keys, dim=1)
+        return cosine_dist
 
     @staticmethod
     def get_durations(attn_soft, text_len, spect_len):
@@ -159,12 +197,15 @@ class AlignmentEncoder(torch.nn.Module):
             attn_logprob (torch.tensor): B x 1 x T1 x T2 log-prob attention mask.
         """
         keys = self.cond_input(keys.transpose(1, 2), conditioning).transpose(1, 2)
-        keys_enc = self.key_proj(keys)  # B x n_attn_dims x T2
-        queries_enc = self.query_proj(queries)  # B x n_attn_dims x T1
-
-        # Simplistic Gaussian Isotopic Attention
-        attn = (queries_enc[:, :, :, None] - keys_enc[:, :, None]) ** 2  # B x n_attn_dims x T1 x T2
-        attn = -self.temperature * attn.sum(1, keepdim=True)
+        # B x n_attn_dims x T2
+        keys_enc = self.key_proj(keys)
+        # B x n_attn_dims x T1
+        queries_enc = self.query_proj(queries)
+        # B x T1 x T2
+        distance = self.dist_fn(queries=queries_enc, keys=keys_enc)
+        attn = -self.temperature * distance
+        # B x 1 x T1 x T2
+        attn = attn.unsqueeze(1)
 
         if attn_prior is not None:
             attn = self.log_softmax(attn) + torch.log(attn_prior[:, None] + 1e-8)
