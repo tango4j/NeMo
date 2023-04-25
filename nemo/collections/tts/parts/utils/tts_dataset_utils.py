@@ -193,7 +193,7 @@ def filter_dataset_by_duration(entries: List[dict], min_duration: float, max_dur
     total_hours = total_duration / 3600.0
     filtered_hours = filtered_duration / 3600.0
 
-    return filtered_entries, filtered_hours, total_hours
+    return filtered_entries, total_hours, filtered_hours
 
 
 def get_weighted_sampler(

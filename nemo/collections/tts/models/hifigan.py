@@ -47,6 +47,7 @@ class HifiGanModel(Vocoder, Exportable):
         # Convert to Hydra 1.0 compatible DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
         cfg = model_utils.maybe_update_config_version(cfg)
+        self.ds_class = cfg.train_ds.dataset._target_
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -112,7 +113,13 @@ class HifiGanModel(Vocoder, Exportable):
         if sched_config is not None:
             max_steps = self._cfg.get("max_steps", None)
             if max_steps is None or max_steps < 0:
-                max_steps = self._get_max_steps()
+                if "max_epochs" not in self._cfg:
+                    raise ValueError("Must specifc 'max_steps' or 'max_epochs'.")
+
+                if "steps_per_epoch" in self._cfg:
+                    max_steps = self._cfg.max_epochs * self._cfg.steps_per_epoch
+                else:
+                    max_steps = self._get_max_steps()
 
             warmup_steps = HifiGanModel.get_warmup_steps(
                 max_steps=max_steps,
@@ -153,12 +160,7 @@ class HifiGanModel(Vocoder, Exportable):
         return self(spec=spec).squeeze(1)
 
     def training_step(self, batch, batch_idx):
-        if self.input_as_mel:
-            # Pre-computed spectrograms will be used as input
-            audio, audio_len, audio_mel = batch
-        else:
-            audio, audio_len = batch
-            audio_mel, _ = self.audio_to_melspec_precessor(audio, audio_len)
+        audio, audio_len, audio_mel, audio_mel_len = self._process_batch(batch)
 
         # Mel as input for L1 mel loss
         audio_trg_mel, _ = self.trg_melspec_fn(audio, audio_len)
@@ -219,14 +221,9 @@ class HifiGanModel(Vocoder, Exportable):
         self.log("g_l1_loss", loss_mel, prog_bar=True, logger=False, sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
-        if self.input_as_mel:
-            audio, audio_len, audio_mel = batch
-            audio_mel_len = [audio_mel.shape[1]] * audio_mel.shape[0]
-        else:
-            audio, audio_len = batch
-            audio_mel, audio_mel_len = self.audio_to_melspec_precessor(audio, audio_len)
-        audio_pred = self(spec=audio_mel)
+        audio, audio_len, audio_mel, audio_mel_len = self._process_batch(batch)
 
+        audio_pred = self(spec=audio_mel)
         # Perform bias denoising
         pred_denoised = self._bias_denoise(audio_pred, audio_mel).squeeze(1)
         pred_denoised_mel, _ = self.audio_to_melspec_precessor(pred_denoised, audio_len)
@@ -284,6 +281,21 @@ class HifiGanModel(Vocoder, Exportable):
 
             self.logger.experiment.log({"audio": clips, "specs": specs})
 
+    def _process_batch(self, batch):
+        if self.input_as_mel:
+            audio, audio_len, audio_mel = batch
+            audio_mel_len = [audio_mel.shape[1]] * audio_mel.shape[0]
+            return audio, audio_len, audio_mel, audio_mel_len
+
+        if self.ds_class == "nemo.collections.tts.data.vocoder_dataset.VocoderDataset":
+            audio = batch.get("audio")
+            audio_len = batch.get("audio_lens")
+        else:
+            audio, audio_len = batch
+
+        audio_mel, audio_mel_len = self.audio_to_melspec_precessor(audio, audio_len)
+        return audio, audio_len, audio_mel, audio_mel_len
+
     def _bias_denoise(self, audio, mel):
         def stft(x):
             comp = torch.stft(x.squeeze(1), n_fft=1024, hop_length=256, win_length=1024, return_complex=True)
@@ -311,6 +323,26 @@ class HifiGanModel(Vocoder, Exportable):
 
         return audio_denoised
 
+    def _setup_train_dataloader(self, cfg):
+        dataset = instantiate(cfg.dataset)
+        sampler = dataset.get_sampler(cfg.dataloader_params.batch_size)
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            collate_fn=dataset.collate_fn,
+            sampler=sampler,
+            **cfg.dataloader_params
+        )
+        return data_loader
+
+    def _setup_test_dataloader(self, cfg):
+        dataset = instantiate(cfg.dataset)
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            collate_fn=dataset.collate_fn,
+            **cfg.dataloader_params
+        )
+        return data_loader
+
     def __setup_dataloader_from_config(self, cfg, shuffle_should_be: bool = True, name: str = "train"):
         if "dataset" not in cfg or not isinstance(cfg.dataset, DictConfig):
             raise ValueError(f"No dataset for {name}")
@@ -333,10 +365,16 @@ class HifiGanModel(Vocoder, Exportable):
         return torch.utils.data.DataLoader(dataset, collate_fn=dataset.collate_fn, **cfg.dataloader_params)
 
     def setup_training_data(self, cfg):
-        self._train_dl = self.__setup_dataloader_from_config(cfg)
+        if self.ds_class == "nemo.collections.tts.data.vocoder_dataset.VocoderDataset":
+            self._train_dl = self._setup_train_dataloader(cfg)
+        else:
+            self._train_dl = self.__setup_dataloader_from_config(cfg)
 
     def setup_validation_data(self, cfg):
-        self._validation_dl = self.__setup_dataloader_from_config(cfg, shuffle_should_be=False, name="validation")
+        if self.ds_class == "nemo.collections.tts.data.vocoder_dataset.VocoderDataset":
+            self._validation_dl = self._setup_test_dataloader(cfg)
+        else:
+            self._validation_dl = self.__setup_dataloader_from_config(cfg, shuffle_should_be=False, name="validation")
 
     def setup_test_data(self, cfg):
         pass
