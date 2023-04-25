@@ -20,7 +20,7 @@ from nemo.collections.nlp.modules.common.megatron.megatron_utils import compute_
 from nemo.collections.nlp.parts.nlp_overrides import (
     NLPDDPStrategy,
     NLPNativeMixedPrecisionPlugin,
-    NLPPrecisionPlugin,
+    # NLPPrecisionPlugin,
     NLPSaveRestoreConnector,
 )
 from nemo.core.config import hydra_runner

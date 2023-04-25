@@ -228,6 +228,8 @@ def main(cfg) -> None:
         raise ValueError("need at least a nemo file or checkpoint dir")
 
     model.freeze()
+    import pdb; pdb.set_trace()
+
 
     # Have to turn off activations_checkpoint_method for inference
     try:
@@ -251,45 +253,76 @@ def main(cfg) -> None:
         "compute_logprob": cfg.inference.compute_logprob,
     }
 
-    # First method of running text generation, call model.generate method
-    response = model.generate(
-        inputs=OmegaConf.to_container(cfg.prompts), length_params=length_params, sampling_params=sampling_params
-    )
+    # collect questions from SQuAD dataset
+    lines = []
+    import json
+    with open("/mnt/ssd8/llm/data/squad/dev-v1.1_gpt_sft.jsonl", "r") as f:
+        # read all lines
+        lines = f.readlines()
+        lines = [json.loads(line) for line in lines]
 
-    print("***************************")
-    print(response)
-    print("***************************")
+    cfg.prompts = [line["input"] for line in lines]
+    # # First method of running text generation, call model.generate method
+    # response = model.generate(
+    #     inputs=OmegaConf.to_container(cfg.prompts), length_params=length_params, sampling_params=sampling_params
+    # )
 
+    # print("***************************")
+    # # print(response)
+    # print(len(response["sentences"]) == len(lines))
+    # print("***************************")
+
+    bs = 40
     # Second method of running text generation, call trainer.predict
     ds = RequestDataSet(OmegaConf.to_container(cfg.prompts))
-    request_dl = DataLoader(dataset=ds, batch_size=2)
+    request_dl = DataLoader(dataset=ds, batch_size=bs)
     config = OmegaConf.to_container(cfg.inference)
     model.set_inference_config(config)
     response = trainer.predict(model, request_dl)
+    response_sentences = []
+    for response_ in response:
+        response_sentences.extend(response_["sentences"])
 
-    print("***************************")
-    print(response)
-    print("***************************")
+    assert len(response_sentences) == len(lines)
+    exact_match = 0
+    with open("/media/ebakhturina/gitlab/llm_long_context/gpt_finetuning/output.jsonl", "w") as f:
+        for original_line, response_ in zip(lines, response_sentences):
+            # remove context from response
+            end_of_context = "<extra_id_2>"
+            response_ = response_[response_.index(end_of_context) + len(end_of_context):]
+            original_line["whole_response"] = response_
+            if "<extra_id_1>" in response_:  # if there are multiple predictions
+                response_ = response_[: response_.index("<extra_id_1>")]
+            original_line["pred_text"] = response_
+            original_line["text"] = original_line["output"].replace("<extra_id_1>", "") # remove tokens from ground truth
+            original_line["duration"] = 0.01
+            original_line["audio_filepath"] = "n/a"
+            f.write(json.dumps(original_line) + "\n")
 
-    # Third method of running text generation, use inference server
-    if cfg.server:
-        if parallel_state.is_pipeline_first_stage() and parallel_state.get_tensor_model_parallel_rank() == 0:
-            if cfg.web_server:
-                loop = asyncio.new_event_loop()
-                thread = threading.Thread(
-                    target=get_demo,
-                    daemon=True,
-                    args=(cfg.share, cfg.username, cfg.password, cfg.port, cfg.web_port, loop),
-                )
-                thread.start()
-            server = MegatronServer(model.cuda())
-            server.run("0.0.0.0", port=cfg.port)
+    # import pdb; pdb.set_trace()
+    # print("***************************")
+    # print(response)
+    # print("***************************")
 
-        while True:
-            choice = torch.cuda.LongTensor(1)
-            torch.distributed.broadcast(choice, 0)
-            if choice[0].item() == 0:
-                generate(model.cuda())
+    # # Third method of running text generation, use inference server
+    # if cfg.server:
+    #     if parallel_state.is_pipeline_first_stage() and parallel_state.get_tensor_model_parallel_rank() == 0:
+    #         if cfg.web_server:
+    #             loop = asyncio.new_event_loop()
+    #             thread = threading.Thread(
+    #                 target=get_demo,
+    #                 daemon=True,
+    #                 args=(cfg.share, cfg.username, cfg.password, cfg.port, cfg.web_port, loop),
+    #             )
+    #             thread.start()
+    #         server = MegatronServer(model.cuda())
+    #         server.run("0.0.0.0", port=cfg.port)
+
+    #     while True:
+    #         choice = torch.cuda.LongTensor(1)
+    #         torch.distributed.broadcast(choice, 0)
+    #         if choice[0].item() == 0:
+    #             generate(model.cuda())
 
 
 if __name__ == '__main__':
