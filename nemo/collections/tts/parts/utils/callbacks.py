@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import torch
 
-from nemo.collections.tts.parts.utils.helpers import save_plot
+from nemo.collections.tts.parts.utils.helpers import mask_sequence_tensor, save_plot
 
 HAVE_WANDB = True
 try:
@@ -37,6 +37,90 @@ def _load_vocoder(vocoder_type, vocoder_checkpoint):
         raise ValueError(f"Unknown vocoder type '{vocoder_type}'")
 
     return vocoder
+
+
+class VocoderLoggingCallback(Callback):
+
+    def __init__(
+        self,
+        sample_rate: int,
+        data_loader: torch.utils.data.DataLoader,
+        output_dir: Path,
+        epoch_frequency: int = 1,
+        log_tensorboard: bool = False,
+        log_wandb: bool = False,
+        loggers: Optional[List[Logger]] = None,
+    ):
+        self.sample_rate = sample_rate
+        self.data_loader = data_loader
+        self.output_dir = output_dir
+        self.epoch_frequency = epoch_frequency
+        self.log_tensorboard = log_tensorboard
+        self.log_wandb = log_wandb
+
+        if log_tensorboard:
+            self.tensorboard_logger = _get_logger(loggers, TensorBoardLogger)
+        else:
+            self.tensorboard_logger = None
+
+        if log_wandb:
+            if not HAVE_WANDB:
+                raise ValueError("Wandb not installed.")
+
+            self.wandb_logger = _get_logger(loggers, WandbLogger)
+        else:
+            self.wandb_logger = None
+
+    def _log_audio(self, audio_id, filepath, audio, step):
+        sf.write(file=filepath, data=audio, samplerate=self.sample_rate)
+
+        if self.tensorboard_logger:
+            self.tensorboard_logger.add_audio(
+                tag=audio_id,
+                snd_tensor=audio,
+                global_step=step,
+                sample_rate=self.sample_rate,
+            )
+
+        if self.wandb_logger:
+            wandb_audio = wandb.Audio(audio, sample_rate=self.sample_rate, caption=audio_id),
+            self.wandb_logger.log({audio_id: wandb_audio})
+
+    def on_train_epoch_end(self, trainer: Trainer, vocoder_model: LightningModule):
+        epoch = 1 + vocoder_model.current_epoch
+        if epoch % self.epoch_frequency != 0:
+            return
+
+        log_epoch_dir = self.output_dir / f"epoch_{epoch}"
+        log_epoch_dir.mkdir(parents=True, exist_ok=True)
+
+        for batch_dict in self.data_loader:
+            audio_filepaths = batch_dict.get("audio_filepaths")
+            audio = batch_dict.get("audio").to(vocoder_model.device)
+            audio_len = batch_dict.get("audio_lens").to(vocoder_model.device)
+
+            audio_ids = [str(p.with_suffix("")).replace(os.sep, "_") for p in audio_filepaths]
+            audio_paths = [log_epoch_dir / s for s in audio_ids]
+
+            spec, spec_len = vocoder_model.audio_to_melspec_precessor(audio, audio_len)
+
+            with torch.no_grad():
+                # [batch, 1, time]
+                audio_pred = vocoder_model.forward(spec=spec)
+
+            audio_pred = mask_sequence_tensor(tensor=audio_pred, lengths=audio_len)
+
+            for i, (audio_id, audio_path) in enumerate(zip(audio_ids, audio_paths)):
+                audio_file = f"{audio_path}.wav"
+                audio_pred_i = audio_pred[i][0][:audio_len[i]]
+                audio_pred_i = audio_pred_i.cpu().numpy()
+                log_audio_id = f"audio_{audio_id}"
+                self._log_audio(
+                    audio_id=log_audio_id,
+                    filepath=audio_file,
+                    audio=audio_pred_i,
+                    step=vocoder_model.global_step
+                )
 
 
 class FastPitchLoggingCallback(Callback):

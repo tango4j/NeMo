@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +24,7 @@ from pytorch_lightning.loggers.wandb import WandbLogger
 from nemo.collections.tts.losses.hifigan_losses import DiscriminatorLoss, FeatureMatchingLoss, GeneratorLoss
 from nemo.collections.tts.models.base import Vocoder
 from nemo.collections.tts.modules.hifigan_modules import MultiPeriodDiscriminator, MultiScaleDiscriminator
+from nemo.collections.tts.parts.utils.callbacks import VocoderLoggingCallback
 from nemo.collections.tts.parts.utils.helpers import get_batch_size, get_num_workers, plot_spectrogram_to_numpy
 from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
@@ -70,6 +72,8 @@ class HifiGanModel(Vocoder, Exportable):
         if self._train_dl:
             self.input_as_mel = self._train_dl.dataset.load_precomputed_mel
 
+        self.log_audio = cfg.get("log_audio", False)
+        self.log_sample_config = cfg.get("log_sample_config", None)
         self.automatic_optimization = False
 
     def _get_max_steps(self):
@@ -236,7 +240,7 @@ class HifiGanModel(Vocoder, Exportable):
         self.log_dict({"val_loss": loss_mel}, on_epoch=True, sync_dist=True)
 
         # Plot audio once per epoch
-        if batch_idx == 0 and isinstance(self.logger, WandbLogger) and HAVE_WANDB:
+        if self.log_audio and batch_idx == 0 and isinstance(self.logger, WandbLogger) and HAVE_WANDB:
             clips = []
             specs = []
             for i in range(min(5, audio.shape[0])):
@@ -529,3 +533,25 @@ class HifiGanModel(Vocoder, Exportable):
         Runs the generator, for inputs and outputs see input_types, and output_types
         """
         return self.generator(x=spec)
+
+    def configure_callbacks(self):
+        if not self.log_sample_config:
+            return
+
+        sample_ds_class = self.log_sample_config.dataset._target_
+        if sample_ds_class != "nemo.collections.tts.data.vocoder_dataset.VocoderDataset":
+            raise ValueError(f"Sample logging only supported for VocoderDataset, got {sample_ds_class}")
+
+        data_loader = self._setup_test_dataloader(self.log_sample_config)
+
+        log_callback = VocoderLoggingCallback(
+            sample_rate=self.sample_rate,
+            data_loader=data_loader,
+            output_dir=Path(self.log_sample_config.sample_dir),
+            epoch_frequency=self.log_sample_config.epoch_frequency,
+            log_tensorboard=self.log_sample_config.log_tensorboard,
+            log_wandb=self.log_sample_config.log_wandb,
+            loggers=self.trainer.loggers,
+        )
+
+        return [log_callback]

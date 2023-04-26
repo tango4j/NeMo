@@ -10,6 +10,9 @@ weighted_sample_steps: null
 
 train_ds_meta: ???
 val_ds_meta: ???
+log_ds_meta: ???
+
+log_sample_dir: ???
 
 defaults:
   - model/generator: v1
@@ -72,6 +75,23 @@ model:
 
     dataloader_params:
       batch_size: ${batch_size}
+      num_workers: 2
+
+  log_sample_config:
+    sample_dir: ${log_sample_dir}
+    epoch_frequency: 100
+    log_tensorboard: false
+    log_wandb: false
+    dataset:
+      _target_: nemo.collections.tts.data.vocoder_dataset.VocoderDataset
+      sample_rate: ${feature.sample_rate}
+      n_segments: null
+      min_duration: null
+      max_duration: null
+      dataset_meta: ${log_ds_meta}
+
+    dataloader_params:
+      batch_size: 4
       num_workers: 2
 
   optim:
