@@ -228,7 +228,6 @@ def main(cfg) -> None:
         raise ValueError("need at least a nemo file or checkpoint dir")
 
     model.freeze()
-    import pdb; pdb.set_trace()
 
 
     # Have to turn off activations_checkpoint_method for inference
@@ -254,14 +253,17 @@ def main(cfg) -> None:
     }
 
     # collect questions from SQuAD dataset
+    qasper_dev = "qasper/qasper_scrolls/validation_sft_gpt.jsonl"
+    squad_dev = "squad/dev-v1.1_gpt_sft.jsonl"
     lines = []
     import json
-    with open("/mnt/ssd8/llm/data/squad/dev-v1.1_gpt_sft.jsonl", "r") as f:
+    import pdb; pdb.set_trace()
+    with open(f"/mnt/ssd8/llm/data/{qasper_dev}", "r") as f:
         # read all lines
         lines = f.readlines()
         lines = [json.loads(line) for line in lines]
 
-    cfg.prompts = [line["input"] for line in lines]
+    cfg.prompts = [line["input"] for line in lines[:100]]
     # # First method of running text generation, call model.generate method
     # response = model.generate(
     #     inputs=OmegaConf.to_container(cfg.prompts), length_params=length_params, sampling_params=sampling_params
@@ -274,6 +276,7 @@ def main(cfg) -> None:
 
     bs = 40
     # Second method of running text generation, call trainer.predict
+    # ds = RequestDataSet(prompts)
     ds = RequestDataSet(OmegaConf.to_container(cfg.prompts))
     request_dl = DataLoader(dataset=ds, batch_size=bs)
     config = OmegaConf.to_container(cfg.inference)
