@@ -171,6 +171,7 @@ def score_labels(
         CER = metric['confusion'] / metric['total']
         FA = metric['false alarm'] / metric['total']
         MISS = metric['missed detection'] / metric['total']
+        
         itemized_errors = (DER, CER, FA, MISS)
 
         logging.info(

@@ -25,8 +25,8 @@ diarizer:
   ignore_overlap: True # Consider or ignore overlap segments while scoring
   channel_selector: ${channel_selector}
   # multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-  multi_channel_mode: 'mc_vad_cc' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-  # multi_channel_mode: 'mc_vad'
+  # multi_channel_mode: 'mc_vad_cc_mixer' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
+  multi_channel_mode: 'mc_vad_cc_mixer'
 
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
@@ -38,12 +38,12 @@ diarizer:
       smoothing: False # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
       ####### Steve's recommendations
-      onset: 0.2 # onset threshold for detecting the beginning and end of a speech
-      offset: 0.3 # offset threshold for detecting the end of a speech.
-      pad_onset: 0.3 # adding durations before each speech segment
-      pad_offset: 0.3 # adding durations after each speech segment
-      min_duration_on: 0.0 # threshold for small non_speech deletion
-      min_duration_off: 0.8 # threshold for short speech segment deletion
+      # onset: 0.2 # onset threshold for detecting the beginning and end of a speech
+      # offset: 0.3 # offset threshold for detecting the end of a speech.
+      # pad_onset: 0.3 # adding durations before each speech segment
+      # pad_offset: 0.3 # adding durations after each speech segment
+      # min_duration_on: 0.0 # threshold for small non_speech deletion
+      # min_duration_off: 0.8 # threshold for short speech segment deletion
 
       #### Regular chime7-mixer6 setup
       # onset: 0.01
@@ -52,6 +52,15 @@ diarizer:
       # pad_offset: 0.25 # Adding durations after each speech segment 
       # min_duration_on: 0.25 # Threshold for small non_speech deletion
       # min_duration_off: 0.0 # Threshold for short speech segment deletion
+
+      ### Chime6 - harsh audio setup
+      onset: 0.2
+      offset: 0.3
+      pad_onset: 0.0 # Adding durations before each speech segment 
+      pad_offset: 0.0 # Adding durations after each speech segment 
+      min_duration_on: 0.5 # Threshold for small non_speech deletion
+      min_duration_off: 0.0 # Threshold for short speech segment deletion
+
       split_duration: 1500
       filter_speech_first: True 
       top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
@@ -83,7 +92,7 @@ diarizer:
       oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
       max_num_speakers: 8 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
-      max_rp_threshold: 0.25 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
+      max_rp_threshold: 0.05 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
       sparse_search_volume: 30 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
   

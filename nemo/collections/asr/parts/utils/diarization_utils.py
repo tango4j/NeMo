@@ -586,7 +586,7 @@ class OfflineDiarWithASR:
             ref_labels = rttm_to_labels(ref_rttm)
             ref_n_spk = get_num_of_spk_from_labels(ref_labels)
             est_n_spk = get_num_of_spk_from_labels(pred_labels)
-
+            
             _DER, _CER, _FA, _MISS = (
                 (score['confusion'] + score['false alarm'] + score['missed detection']) / score['total'],
                 score['confusion'] / score['total'],

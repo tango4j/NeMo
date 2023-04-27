@@ -1562,7 +1562,7 @@ class MultichannelVADProcessor:
         self._cfg = cfg
         self.top_k = int(self._cfg.diarizer.vad.parameters.top_k_channels)
         # self.channel_cluster = self._cfg.diarizer.vad.parameters.get("channel_cluster", True)
-        if self._cfg.diarizer.multi_channel_mode == "mc_vad_cc":
+        if self._cfg.diarizer.multi_channel_mode in ["mc_vad_cc", "mc_vad_cc_mixer"]:
             self.channel_cluster = True
         else:
             self.channel_cluster = False
@@ -1571,6 +1571,7 @@ class MultichannelVADProcessor:
         self.sample_rate = 16000
         self.use_subset_for_chclus = True
         self.max_ch = 1
+        self.max_clus = 1
 
     def get_channel_cluster_mapping(self, json_dict):
         logging.info(f"Channel clustering for {json_dict['uniq_id']}")
@@ -1673,6 +1674,7 @@ class MultichannelVADProcessor:
             avg_cal_mat = get_channel_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
             # avg_1ch_cal_mat = get_single_ch_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
             avg_cal_mats[uniq_id] = avg_cal_mat
+            self.max_clus = max(self.max_clus, avg_cal_mat.shape[0])
             ch_avged_tensors[uniq_id] = get_channel_averaged_frame_logits(frame_mc_logits=frame_mc_tensor_dict[uniq_id], avg_cal_mat=avg_cal_mat)
         return ch_avged_tensors, avg_cal_mats
     
