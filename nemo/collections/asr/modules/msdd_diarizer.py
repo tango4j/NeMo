@@ -114,7 +114,7 @@ class MSDD_module(NeuralModule, Exportable):
 
     def __init__(
         self,
-        num_spks: int = 2,
+        num_spks: int = 4,
         hidden_size: int = 256,
         num_lstm_layers: int = 2,
         dropout_rate: float = 0.5,
@@ -132,6 +132,12 @@ class MSDD_module(NeuralModule, Exportable):
         self.length: int = 50
         self.emb_dim: int = emb_dim
         self.num_spks: int = num_spks
+        self.unit_n_spks: int = 2
+        if self.num_spks % self.unit_n_spks != 0:
+            raise ValueError("The number of speakers must be divisible by unit_n_spks.")
+        elif self.num_spks > self.unit_n_spks:
+            self.n_stream = self.num_spks // self.unit_n_spks
+        
         self.scale_n: int = scale_n
         self.cnn_output_ch: int = cnn_output_ch
         self.conv_repeat: int = conv_repeat
@@ -158,7 +164,7 @@ class MSDD_module(NeuralModule, Exportable):
                     ConvLayer(
                         in_channels=1,
                         out_channels=cnn_output_ch,
-                        kernel_size=(self.scale_n + self.scale_n * num_spks, 1),
+                        kernel_size=(self.scale_n + self.scale_n *  self.unit_n_spks, 1),
                         stride=(1, 1),
                     )
                 ]
@@ -181,12 +187,17 @@ class MSDD_module(NeuralModule, Exportable):
         else:
             raise ValueError(f"No such weighting scheme as {self.weighting_scheme}")
 
-        self.hidden_to_spks = nn.Linear(2 * hidden_size, self.num_spks)
+        self.hidden_to_spks = nn.Linear(2 * hidden_size, self.unit_n_spks)
+        self.single_hidden_to_spks = nn.Linear(hidden_size, self.unit_n_spks)
         if self.context_vector_type == "cos_sim":
-            self.dist_to_emb = nn.Linear(self.scale_n * self.num_spks, hidden_size)
+            self.dist_to_emb = nn.Linear(self.scale_n * self.unit_n_spks, hidden_size)
+            self.dist_to_emb.apply(self.init_weights)
+        elif self.context_vector_type == "cos_sim_vad":
+            self.dist_to_emb = nn.Linear(self.scale_n * self.unit_n_spks, int(hidden_size/2))
+            self.emb_of_input = nn.Linear(self.emb_dim, int(hidden_size/2))
             self.dist_to_emb.apply(self.init_weights)
         elif self.context_vector_type == "elem_prod":
-            self.product_to_emb = nn.Linear(self.emb_dim * self.num_spks, hidden_size)
+            self.product_to_emb = nn.Linear(self.emb_dim * self.unit_n_spks, hidden_size)
         else:
             raise ValueError(f"No such context vector type as {self.context_vector_type}")
 
@@ -226,7 +237,7 @@ class MSDD_module(NeuralModule, Exportable):
         self.length = ms_emb_seq.shape[1]
         self.emb_dim = ms_emb_seq.shape[-1]
 
-        _ms_emb_seq = ms_emb_seq.unsqueeze(4).expand(-1, -1, -1, -1, self.num_spks)
+        _ms_emb_seq = ms_emb_seq.unsqueeze(4).expand(-1, -1, -1, -1, self.unit_n_spks)
         ms_emb_seq_single = ms_emb_seq
         ms_avg_embs = ms_avg_embs.unsqueeze(1).expand(-1, self.length, -1, -1, -1)
 
@@ -242,17 +253,46 @@ class MSDD_module(NeuralModule, Exportable):
 
         if self.context_vector_type == "cos_sim":
             context_emb = self.cosine_similarity(scale_weights, ms_avg_embs, _ms_emb_seq)
+        elif self.context_vector_type == "cos_sim_vad":
+            context_emb_diar = self.cosine_similarity(scale_weights, ms_avg_embs, _ms_emb_seq)
+            scale_w_ms_emb_seq = self.get_scale_weighted_ms_seq(scale_weights, ms_emb_seq)
+            context_emb_vad = self.emb_of_input(scale_w_ms_emb_seq)
+            context_emb_vad = context_emb_vad.reshape(self.batch_size, self.length, -1)
+            context_emb = torch.cat((context_emb_vad, context_emb_diar), dim=2)
         elif self.context_vector_type == "elem_prod":
             context_emb = self.element_wise_product(scale_weights, ms_avg_embs, _ms_emb_seq)
         else:
             raise ValueError(f"No such context vector type as {self.context_vector_type}")
+        return context_emb, scale_weights
 
-        context_emb = self.dropout(F.relu(context_emb))
+    def lstm_classifier(self, context_emb, scale_weights):
         lstm_output = self.lstm(context_emb)
         lstm_hidden_out = self.dropout(F.relu(lstm_output[0]))
         spk_preds = self.hidden_to_spks(lstm_hidden_out)
         preds = nn.Sigmoid()(spk_preds)
         return preds, scale_weights
+
+    def get_scale_weighted_ms_seq(self, scale_weights, ms_emb_seq):
+        """
+        Calculate scale-weighted multi-scale embedding sequence.
+
+        Args:
+            scale_weights (Tensor):
+                Multiscale weights per each base-scale segment.
+            ms_emb_seq (Tensor):
+                Multiscale input embedding sequence
+
+        Returns:
+            scale_w_ms_emb_seq (Tensor):
+                Scale-weighted multi-scale embedding sequence.
+        """
+        scale_weight_flatten = scale_weights.reshape(self.batch_size * self.length, self.unit_n_spks, self.scale_n).mean(dim=1)
+        ms_emb_seq_flatten = ms_emb_seq.reshape(-1, self.scale_n, self.emb_dim)
+        scale_w_ms_emb_seq = torch.bmm(
+        scale_weight_flatten.reshape(self.batch_size * self.length, 1, self.scale_n),
+        ms_emb_seq_flatten.reshape(self.batch_size * self.length, self.scale_n, self.emb_dim)
+        )
+        return scale_w_ms_emb_seq
 
     def element_wise_product(self, scale_weights, ms_avg_embs, ms_emb_seq):
         """
@@ -270,24 +310,24 @@ class MSDD_module(NeuralModule, Exportable):
             ms_emb_seq (Tensor):
                 Tensor containing multi-scale speaker embedding sequences. `ms_emb_seq` is a single channel input from the
                 given audio stream input.
-                Shape: (batch_size, length, num_spks, emb_dim)
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
 
         Returns:
             context_emb (Tensor):
                 Output of `dist_to_emb` linear layer containing context for speaker label estimation.
         """
-        scale_weight_flatten = scale_weights.reshape(self.batch_size * self.length, self.num_spks, self.scale_n)
+        scale_weight_flatten = scale_weights.reshape(self.batch_size * self.length, self.unit_n_spks, self.scale_n)
         ms_avg_embs_flatten = ms_avg_embs.reshape(
-            self.batch_size * self.length, self.scale_n, self.emb_dim, self.num_spks
+            self.batch_size * self.length, self.scale_n, self.emb_dim, self.unit_n_spks
         )
         ms_emb_seq_flatten = ms_emb_seq.reshape(-1, self.scale_n, self.emb_dim)
-        ms_emb_seq_flatten_rep = ms_emb_seq_flatten.unsqueeze(3).reshape(-1, self.scale_n, self.emb_dim, self.num_spks)
+        ms_emb_seq_flatten_rep = ms_emb_seq_flatten.unsqueeze(3).reshape(-1, self.scale_n, self.emb_dim, self.unit_n_spks)
         elemwise_product = ms_avg_embs_flatten * ms_emb_seq_flatten_rep
         context_vectors = torch.bmm(
-            scale_weight_flatten.reshape(self.batch_size * self.num_spks * self.length, 1, self.scale_n),
-            elemwise_product.reshape(self.batch_size * self.num_spks * self.length, self.scale_n, self.emb_dim),
+            scale_weight_flatten.reshape(self.batch_size * self.unit_n_spks * self.length, 1, self.scale_n),
+            elemwise_product.reshape(self.batch_size * self.unit_n_spks * self.length, self.scale_n, self.emb_dim),
         )
-        context_vectors = context_vectors.reshape(self.batch_size, self.length, self.emb_dim * self.num_spks)
+        context_vectors = context_vectors.reshape(self.batch_size, self.length, self.emb_dim * self.unit_n_spks)
         context_emb = self.product_to_emb(context_vectors)
         return context_emb
 
@@ -306,7 +346,7 @@ class MSDD_module(NeuralModule, Exportable):
             _ms_emb_seq (Tensor):
                 Tensor containing multi-scale speaker embedding sequences. `ms_emb_seq` is a single channel input from the
                 given audio stream input.
-                Shape: (batch_size, length, num_spks, emb_dim)
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
 
         Returns:
             context_emb (Tensor):
@@ -331,20 +371,20 @@ class MSDD_module(NeuralModule, Exportable):
             ms_emb_seq (Tensor):
                 Tensor containing multi-scale speaker embedding sequences. `ms_emb_seq` is input from the
                 given audio stream input.
-                Shape: (batch_size, length, num_spks, emb_dim)
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
 
         Returns:
             scale_weights (Tensor):
                 Weight vectors that determine the weight of each scale.
-                Shape: (batch_size, length, num_spks, emb_dim)
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
         """
         self.W_a(ms_emb_seq.flatten(0, 1))
         mat_a = self.W_a(ms_emb_seq.flatten(0, 1))
         mat_b = ms_avg_embs_perm.flatten(0, 1).permute(0, 2, 1)
 
-        weighted_corr = torch.matmul(mat_a, mat_b).reshape(-1, self.scale_n, self.scale_n, self.num_spks)
+        weighted_corr = torch.matmul(mat_a, mat_b).reshape(-1, self.scale_n, self.scale_n, self.unit_n_spks)
         scale_weights = torch.sigmoid(torch.diagonal(weighted_corr, dim1=1, dim2=2))
-        scale_weights = scale_weights.reshape(self.batch_size, self.length, self.scale_n, self.num_spks)
+        scale_weights = scale_weights.reshape(self.batch_size, self.length, self.scale_n, self.unit_n_spks)
         scale_weights = self.softmax(scale_weights)
         return scale_weights
 
@@ -360,12 +400,12 @@ class MSDD_module(NeuralModule, Exportable):
             ms_emb_seq_single (Tensor):
                 Tensor containing multi-scale speaker embedding sequences. ms_emb_seq_single is input from the
                 given audio stream input.
-                Shape: (batch_size, length, num_spks, emb_dim)
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
 
         Returns:
             scale_weights (Tensor):
                 Weight vectors that determine the weight of each scale.
-                Shape: (batch_size, length, num_spks, emb_dim)
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
         """
         ms_cnn_input_seq = torch.cat([ms_avg_embs_perm, ms_emb_seq_single], dim=2)
         ms_cnn_input_seq = ms_cnn_input_seq.unsqueeze(2).flatten(0, 1)
@@ -385,7 +425,7 @@ class MSDD_module(NeuralModule, Exportable):
         hidden_seq = self.conv_to_linear(lin_input_seq)
         hidden_seq = self.dropout(F.leaky_relu(hidden_seq))
         scale_weights = self.softmax(self.linear_to_weights(hidden_seq))
-        scale_weights = scale_weights.unsqueeze(3).expand(-1, -1, -1, self.num_spks)
+        scale_weights = scale_weights.unsqueeze(3).expand(-1, -1, -1, self.unit_n_spks)
         return scale_weights
 
     def conv_forward(self, conv_input, conv_module, bn_module, first_layer=False):
@@ -400,7 +440,7 @@ class MSDD_module(NeuralModule, Exportable):
         Args:
             conv_input (Tensor):
                 Reshaped tensor containing cluster-average embeddings and multi-scale embedding sequences.
-                Shape: (batch_size*length, 1, scale_n*(num_spks+1), emb_dim)
+                Shape: (batch_size*length, 1, scale_n*(unit_n_spks+1), emb_dim)
             conv_module (ConvLayer):
                 ConvLayer instance containing torch.nn.modules.conv modules.
             bn_module (torch.nn.modules.batchnorm.BatchNorm2d):
@@ -424,7 +464,46 @@ class MSDD_module(NeuralModule, Exportable):
 
     @typecheck()
     def forward(self, ms_emb_seq, length, ms_avg_embs, targets):
-        preds, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs, targets)
+        if self.n_stream > 1:
+            ms_avg_embs_r = ms_avg_embs.reshape(ms_avg_embs.shape[0]*self.n_stream, ms_avg_embs.shape[1], ms_avg_embs.shape[2], self.unit_n_spks)
+            split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
+            ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, split_tup, dim=3), dim=0)
+            ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
+            length = length.repeat(self.n_stream)
+            ms_avg_embs = ms_avg_embs_concat
+
+        context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs, targets)
+        preds, scale_weights = self.lstm_classifier(context_emb, scale_weights)
+
+        if self.n_stream > 1:
+            preds_split_tup = (int(preds.shape[0]/self.n_stream),) * (self.n_stream - 1)
+            preds_reshaped = torch.cat(torch.tensor_split(preds, preds_split_tup, dim=0), dim=2)
+            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, preds_split_tup, dim=0), dim=3)
+            preds, scale_weights = preds_reshaped, scale_weights_reshaped
+        return preds, scale_weights
+    
+    def forward_context(self, ms_emb_seq, length, ms_avg_embs, targets):
+        if self.n_stream > 1:
+            seg_split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
+            ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, seg_split_tup, dim=3), dim=0)
+            ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
+            length = length.repeat(self.n_stream)
+            ms_avg_embs = ms_avg_embs_concat
+
+        context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs, targets)
+        context_emb = self.dropout(F.relu(context_emb))
+        return context_emb, scale_weights
+
+    def forward_speaker_logits(self, lstm_output, scale_weights):
+        lstm_hidden_out = self.dropout(F.relu(lstm_output))
+        spk_preds = self.single_hidden_to_spks(lstm_hidden_out)
+        preds = nn.Sigmoid()(spk_preds)
+
+        if self.n_stream > 1:
+            preds_split_tup = (int(preds.shape[0]/self.n_stream),) * (self.n_stream - 1)
+            preds_reshaped = torch.cat(torch.tensor_split(preds, preds_split_tup, dim=0), dim=2)
+            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, preds_split_tup, dim=0), dim=3)
+            preds, scale_weights = preds_reshaped, scale_weights_reshaped
         return preds, scale_weights
 
     def input_example(self):
