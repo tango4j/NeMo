@@ -95,7 +95,6 @@ class MSDD_module(NeuralModule, Exportable):
                 "ms_emb_seq": NeuralType(('B', 'T', 'C', 'D'), SpectrogramType()),
                 "length": NeuralType(tuple('B'), LengthsType()),
                 "ms_avg_embs": NeuralType(('B', 'C', 'D', 'C'), EncodedRepresentation()),
-                "targets": NeuralType(('B', 'T', 'C'), ProbsType()),
             }
         )
 
@@ -206,7 +205,7 @@ class MSDD_module(NeuralModule, Exportable):
         self.lstm.apply(self.init_weights)
         self.clamp_max = clamp_max
 
-    def core_model(self, ms_emb_seq, length, ms_avg_embs, targets):
+    def core_model(self, ms_emb_seq, length, ms_avg_embs):
         """
         Core model that accepts multi-scale cosine similarity values and estimates per-speaker binary label.
 
@@ -220,9 +219,6 @@ class MSDD_module(NeuralModule, Exportable):
             ms_avg_embs (Tensor):
                 Cluster-average speaker embedding vectors.
                 Shape: (batch_size, scale_n, self.emb_dim, max_spks)
-            targets (Tensor):
-                Ground-truth labels for the finest segment.
-                Shape: (batch_size, feats_len, max_spks)
 
         Returns:
             preds (Tensor):
@@ -463,7 +459,7 @@ class MSDD_module(NeuralModule, Exportable):
         return conv_out
 
     @typecheck()
-    def forward(self, ms_emb_seq, length, ms_avg_embs, targets):
+    def forward(self, ms_emb_seq, length, ms_avg_embs):
         if self.n_stream > 1:
             ms_avg_embs_r = ms_avg_embs.reshape(ms_avg_embs.shape[0]*self.n_stream, ms_avg_embs.shape[1], ms_avg_embs.shape[2], self.unit_n_spks)
             split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
@@ -472,7 +468,7 @@ class MSDD_module(NeuralModule, Exportable):
             length = length.repeat(self.n_stream)
             ms_avg_embs = ms_avg_embs_concat
 
-        context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs, targets)
+        context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs)
         preds, scale_weights = self.lstm_classifier(context_emb, scale_weights)
 
         if self.n_stream > 1:
@@ -482,7 +478,7 @@ class MSDD_module(NeuralModule, Exportable):
             preds, scale_weights = preds_reshaped, scale_weights_reshaped
         return preds, scale_weights
     
-    def forward_context(self, ms_emb_seq, length, ms_avg_embs, targets):
+    def forward_context(self, ms_emb_seq, length, ms_avg_embs):
         if self.n_stream > 1:
             seg_split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
             ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, seg_split_tup, dim=3), dim=0)
@@ -490,7 +486,7 @@ class MSDD_module(NeuralModule, Exportable):
             length = length.repeat(self.n_stream)
             ms_avg_embs = ms_avg_embs_concat
 
-        context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs, targets)
+        context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs)
         context_emb = self.dropout(F.relu(context_emb))
         return context_emb, scale_weights
 
@@ -517,5 +513,4 @@ class MSDD_module(NeuralModule, Exportable):
         lens = torch.full(size=(input_example.shape[0],), fill_value=123, device=device)
         input_example = torch.randn(1, lens, self.scale_n, self.emb_dim, device=device)
         avg_embs = torch.randn(1, self.scale_n, self.emb_dim, self.num_spks, device=device)
-        targets = torch.randn(1, lens, self.num_spks).round().float()
-        return tuple([input_example, lens, avg_embs, targets])
+        return tuple([input_example, lens, avg_embs])

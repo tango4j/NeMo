@@ -8,7 +8,7 @@
 name: "MultiscaleDiarDecoder" 
 sample_rate: 16000
 num_workers: 30
-batch_size: 7
+batch_size: 8
 
 model: 
   diarizer:
@@ -66,7 +66,7 @@ model:
     random_flip: False
     
     labels: null
-    batch_size: 2
+    batch_size: ${batch_size}
     emb_batch_size: ${model.emb_batch_size}
     shuffle: False
   
@@ -79,7 +79,7 @@ model:
     session_len_sec: ${model.session_len_sec}
     random_flip: False
     labels: null
-    batch_size: 2
+    batch_size: ${batch_size}
     shuffle: False
     seq_eval_mode: True
 

@@ -457,6 +457,102 @@ def generate_cluster_labels(segment_ranges: List[str], cluster_labels: List[int]
 #         frame_logit_mean_dict[spk_idx] = torch.tensor(frame_logit_mean_dict[spk_idx]).mean().item()
 #     return timestamps, cluster_labels
 
+def perform_clustering_embs(
+    embeddings, 
+    time_stamps,
+    vad_probs,
+    scale_mapping,
+    AUDIO_RTTM_MAP, 
+    out_rttm_dir,
+    clustering_params, 
+    device, 
+    verbose: bool = True,
+    # vad_threshold: float = 0.35,
+    vad_threshold: float = 0.55,
+):
+    # vad_threshold = 0.5 works the best, base_seg_idx = 2
+    uniq_clus_labels = {}
+    cuda = True
+    all_hypothesis, all_reference = [], []
+    no_references = False
+    lines_cluster_labels = []
+    base_scale_idx = 3
+    if device.type != 'cuda':
+        logging.warning("cuda=False, using CPU for eigen decomposition. This might slow down the clustering process.")
+        cuda = False
+
+    speaker_clustering = SpeakerClustering(cuda=cuda)
+    # If True, export torch script module and save it to the base folder.
+    for uniq_id, audio_rttm_values in tqdm(AUDIO_RTTM_MAP.items(), desc='clustering', leave=True, disable=not verbose):
+        scale_map = scale_mapping[uniq_id]
+        base_seg_inds = torch.where((scale_map[base_scale_idx][1:] ==  scale_map[base_scale_idx][:-1] ) == False)[0]
+
+        ms_silsp_embs = embeddings[uniq_id][:, :(base_scale_idx+1), :][base_seg_inds, :, :]
+        ms_ts = time_stamps[uniq_id][base_scale_idx][base_seg_inds]/100
+        vad_prob_mat = vad_probs[uniq_id][base_seg_inds]
+        vad_decision = vad_prob_mat > vad_threshold
+        ms_embs = ms_silsp_embs[vad_decision, : , :]
+
+        speech_ratio=sum(vad_prob_mat > vad_threshold)/vad_prob_mat.shape[0]
+
+        if clustering_params.oracle_num_speakers:
+            num_speakers = audio_rttm_values.get('num_speakers', None)
+            if num_speakers is None:
+                raise ValueError("Provided option as oracle num of speakers but num_speakers in manifest is null")
+        else:
+            num_speakers = -1
+        
+        cluster_labels = speaker_clustering.forward_embs(
+            ms_embs=ms_embs,
+            oracle_num_speakers=int(num_speakers),
+            max_num_speakers=int(clustering_params.max_num_speakers),
+            min_num_speakers=int(clustering_params.get('min_num_speakers', 1)),
+            max_rp_threshold=float(clustering_params.max_rp_threshold),
+            sparse_search_volume=int(clustering_params.sparse_search_volume),
+        )
+
+        # Convert cluster labels to the finest scale
+        clus_labels_infer_org_scale = torch.zeros(scale_map[base_scale_idx].max()+1) 
+        clus_labels_infer_org_scale[:vad_decision.shape[0]][vad_decision] = (cluster_labels + 1).float().to(ms_embs.device)
+        clus_labels_infer_org_scale -= 1
+
+        # Convert clustering to the base scale 
+        cluster_labels_infer = torch.zeros(scale_map[0].shape[0])
+        cluster_labels_infer[scale_map[len(scale_map)-1]] = clus_labels_infer_org_scale[scale_map[base_scale_idx]]
+
+        del ms_embs
+        if cuda:
+            torch.cuda.empty_cache()
+        else:
+            gc.collect()
+        
+        uniq_clus_labels[uniq_id] = cluster_labels_infer
+        
+        timestamps = ms_ts[vad_decision, :]
+        cluster_labels = cluster_labels.cpu().numpy()
+        if len(cluster_labels) != timestamps.shape[0]:
+            raise ValueError("Mismatch of length between cluster_labels and timestamps.")
+
+        labels, lines = generate_cluster_labels(timestamps, cluster_labels)
+        if out_rttm_dir:
+            labels_to_rttmfile(labels, uniq_id, out_rttm_dir)
+            lines_cluster_labels.extend([f'{uniq_id} {seg_line}\n' for seg_line in lines])
+        hypothesis = labels_to_pyannote_object(labels, uniq_name=uniq_id)
+        all_hypothesis.append([uniq_id, hypothesis])
+
+        rttm_file = audio_rttm_values.get('rttm_filepath', None)
+        if rttm_file is not None and os.path.exists(rttm_file) and not no_references:
+            ref_labels = rttm_to_labels(rttm_file)
+            reference = labels_to_pyannote_object(ref_labels, uniq_name=uniq_id)
+            all_reference.append([uniq_id, reference])
+        else:
+            no_references = True
+            all_reference = []
+
+    if out_rttm_dir:
+        write_cluster_labels(base_scale_idx, lines_cluster_labels, out_rttm_dir)    
+    return all_reference, all_hypothesis, uniq_clus_labels
+    
 def perform_clustering(
     embs_and_timestamps, AUDIO_RTTM_MAP, out_rttm_dir, clustering_params, device, verbose: bool = True
 ):
@@ -527,7 +623,7 @@ def perform_clustering(
             torch.cuda.empty_cache()
         else:
             gc.collect()
-
+        
         timestamps = speaker_clustering.timestamps_in_scales[base_scale_idx]
         cluster_labels = cluster_labels.cpu().numpy()
         if len(cluster_labels) != timestamps.shape[0]:
@@ -955,8 +1051,48 @@ def segments_manifest_to_subsegments_manifest(
 
     return subsegments_manifest_file
 
+def get_subsegments(
+    offset: float, 
+    window: float, 
+    shift: float, 
+    duration: float, 
+    min_subsegment_duration: float = 0.03
+    ) -> List[List[float]]:
+    """
+    Return subsegments from a segment of audio file.
+    
+    Example:
+        (window, shift) = 1.5, 0.75
+        Segment:  [12.05, 14.45]    
+        Subsegments: [[12.05, 13.55], [12.8, 14.3], [13.55, 14.45], [14.3, 14.45]]
 
-def get_subsegments(offset: float, window: float, shift: float, duration: float) -> List[List[float]]:
+    Args:
+        offset (float): start time of audio segment
+        window (float): window length for segments to subsegments length
+        shift (float): hop length for subsegments shift
+        duration (float): duration of segment
+    Returns:
+        subsegments (List[tuple[float, float]]): subsegments generated for the segments as list of tuple of start and duration of each subsegment
+    """
+    subsegments:  List[List[float]] = []
+    start = offset
+    slice_end = start + duration
+    base = math.ceil((duration - window) / shift)
+    slices = 1 if base < 0 else base + 1
+    if slices == 1:
+        if min(duration, window) >= min_subsegment_duration:
+            subsegments.append([start, min(duration, window)])
+    else:
+        start_col = torch.arange(offset, slice_end, shift)[:slices]
+        dur_col = window * torch.ones(slices)
+        dur_col[-1] = min(slice_end - start_col[-1], window)
+        ss_tensor = torch.stack([start_col, dur_col], dim=1)
+        for k in range(ss_tensor.shape[0]):
+            if dur_col[k] >= min_subsegment_duration:
+                subsegments.append([float(ss_tensor[k,0].item()), float(ss_tensor[k,1].item())])
+    return subsegments
+
+def get_subsegments_(offset: float, window: float, shift: float, duration: float) -> List[List[float]]:
     """
     Return subsegments from a segment of audio file
     Args:
@@ -1359,7 +1495,7 @@ def get_adaptive_threshold(estimated_num_of_spks: int, min_threshold: float, ove
 
 
 def generate_speaker_timestamps(
-    clus_labels: List[Union[float, int]], msdd_preds: List[torch.Tensor], **params
+    clus_labels: List[Union[float, int]], msdd_preds: List[torch.Tensor], timestamps, **params
 ) -> Tuple[List[str], List[str]]:
     '''
     Generate speaker timestamps from the segmentation information. If `use_clus_as_main=True`, use clustering result for main speaker
@@ -1397,28 +1533,39 @@ def generate_speaker_timestamps(
     overlap_speaker_list = [[] for _ in range(estimated_num_of_spks)]
     infer_overlap = estimated_num_of_spks < int(params['overlap_infer_spk_limit'])
     main_speaker_lines = []
-    if params['use_adaptive_thres']:
-        threshold = get_adaptive_threshold(
-            estimated_num_of_spks, params['threshold'], params['overlap_infer_spk_limit']
-        )
-    else:
-        threshold = params['threshold']
+    # if params['use_adaptive_thres']:
+    #     threshold = get_adaptive_threshold(
+    #         estimated_num_of_spks, params['threshold'], params['overlap_infer_spk_limit']
+    #     )
+    # else:
+    params['infer_overlap'] = True
+    threshold = params['threshold']
     for seg_idx, cluster_label in enumerate(clus_labels):
         msdd_preds.squeeze(0)
-        spk_for_seg = (msdd_preds[0, seg_idx] > threshold).int().cpu().numpy().tolist()
-        sm_for_seg = msdd_preds[0, seg_idx].cpu().numpy()
+        # spk_for_seg = (msdd_preds[0, seg_idx] > threshold).int().cpu().numpy().tolist()
+        spk_for_seg = (msdd_preds[seg_idx] > threshold).int().cpu().numpy().tolist()
+        # sm_for_seg = msdd_preds[0, seg_idx].cpu().numpy()
+        sm_for_seg = msdd_preds[seg_idx].cpu().numpy()
 
         if params['use_clus_as_main']:
-            main_spk_idx = int(cluster_label[2])
+            # main_spk_idx = int(cluster_label[2])
+            main_spk_idx = int(cluster_label)
         else:
-            main_spk_idx = np.argsort(msdd_preds[0, seg_idx].cpu().numpy())[::-1][0]
-
+            # main_spk_idx = np.argsort(msdd_preds[0, seg_idx].cpu().numpy())[::-1][0]
+            main_spk_idx = np.argsort(msdd_preds[seg_idx].cpu().numpy())[::-1][0]
         if sum(spk_for_seg) > 1 and infer_overlap:
+        # if spk_for_seg > 1 and infer_overlap:
             idx_arr = np.argsort(sm_for_seg)[::-1]
             for ovl_spk_idx in idx_arr[: params['max_overlap_spks']].tolist():
                 if ovl_spk_idx != int(main_spk_idx):
                     overlap_speaker_list[ovl_spk_idx].append(seg_idx)
-        main_speaker_lines.append(f"{cluster_label[0]} {cluster_label[1]} speaker_{main_spk_idx}")
+        # main_speaker_lines.append(f"{cluster_label[0]} {cluster_label[1]} speaker_{main_spk_idx}")
+        if sum(spk_for_seg)>0:
+            main_spk_idx = np.argsort(msdd_preds[seg_idx].cpu().numpy())[::-1][0]
+            main_speaker_lines.append(f"{timestamps[seg_idx][0]} {timestamps[seg_idx][1]} speaker_{main_spk_idx}")
+            # print(f"seg_idx: {seg_idx}, msdd_preds[seg_idx]: {msdd_preds[seg_idx]} threshold: {threshold}, spk_for_seg: {spk_for_seg}")
+            # print(f"main_spk_idx: {main_spk_idx}, cluster_label: {cluster_label}")
+            # import ipdb; ipdb.set_trace()
     cont_stamps = get_contiguous_stamps(main_speaker_lines)
     maj_labels = merge_stamps(cont_stamps)
     ovl_labels = get_overlap_stamps(cont_stamps, overlap_speaker_list)
@@ -1554,10 +1701,12 @@ def extract_timestamps(manifest_file: str):
     return time_stamps
 
 
+    # msdd_preds: List[torch.Tensor],
 def make_rttm_with_overlap(
     manifest_file_path: str,
     clus_label_dict: Dict[str, List[Union[float, int]]],
-    msdd_preds: List[torch.Tensor],
+    preds_dict: Dict[str, torch.Tensor],
+    ms_ts,
     **params,
 ):
     """
@@ -1596,7 +1745,19 @@ def make_rttm_with_overlap(
             manifest_dic = AUDIO_RTTM_MAP[uniq_id]
             clus_labels = clus_label_dict[uniq_id]
             manifest_file_lengths_list.append(len(clus_labels))
-            maj_labels, ovl_labels = generate_speaker_timestamps(clus_labels, msdd_preds[i], **params)
+            
+            # maj_labels, ovl_labels = generate_speaker_timestamps(clus_labels, msdd_preds[i], **params)
+            msdd_preds = preds_dict[uniq_id]
+            time_stamps = ms_ts[uniq_id][-1] # Last scale (scale_idx=-1) has the time stamps
+
+            # Disable the channels that are not active
+            active_spk_inds = torch.unique(clus_labels[clus_labels >= 0]).long()
+            mask_ch_inds = torch.ones(msdd_preds.shape[1]).bool()
+            mask_ch_inds[active_spk_inds] = False
+            msdd_preds[:, mask_ch_inds] = 0.0
+            # msdd_preds[clus_labels==-1] = 0.0 # Mask if VAD is not active
+
+            maj_labels, ovl_labels = generate_speaker_timestamps(clus_labels, msdd_preds, time_stamps, **params)
             if params['infer_overlap']:
                 hyp_labels = maj_labels + ovl_labels
             else:

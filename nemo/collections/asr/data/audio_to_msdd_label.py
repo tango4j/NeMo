@@ -27,6 +27,67 @@ from nemo.collections.common.parts.preprocessing.collections import DiarizationS
 from nemo.core.classes import Dataset
 from nemo.core.neural_types import AudioSignal, EncodedRepresentation, LengthsType, NeuralType, ProbsType
 
+
+
+def get_subsegments_to_scale_timestamps(subsegments: List[Tuple[float, float]], feat_per_sec):
+    """
+    Convert subsegment timestamps to scale timestamps.
+
+    Args:
+        subsegments (List[Tuple[float, float]]):
+            List of subsegment timestamps.
+
+    Returns:
+        scale_ts (torch.tensor):
+            Tensor containing scale timestamps.
+    """
+    scale_ts = (torch.tensor(subsegments) * feat_per_sec).long()
+    scale_ts[:, 1] = scale_ts[:, 0] + scale_ts[:, 1]
+    return scale_ts 
+
+def get_ms_seg_timestamps(
+    uniq_id: str, 
+    offset: float, 
+    duration: float, 
+    feat_per_sec: int, 
+    scale_n: int,
+    multiscale_args_dict: Dict,
+    dtype,
+    min_subsegment_duration: float,
+    ):
+    """
+    Get start and end time of segments in each scale.
+
+    Args:
+        sample:
+            `DiarizationSpeechLabel` instance from preprocessing.collections
+    Returns:
+        ms_seg_timestamps (torch.tensor):
+            Tensor containing Multiscale segment timestamps.
+        ms_seg_counts (torch.tensor):
+            Number of segments for each scale. This information is used for reshaping embedding batch
+            during forward propagation.
+    """
+    ms_seg_timestamps_list = []
+    total_steps = None
+    ms_seg_counts = [0 for _ in range(scale_n)]
+    for scale_idx in reversed(range(scale_n)):
+        subsegments = get_subsegments(offset=0, 
+                                        window=multiscale_args_dict['scale_dict'][scale_idx][0],
+                                        shift=multiscale_args_dict['scale_dict'][scale_idx][1],
+                                        duration=duration, 
+                                        min_subsegment_duration=min_subsegment_duration)
+        scale_ts_tensor = get_subsegments_to_scale_timestamps(subsegments, feat_per_sec)
+        if scale_idx == scale_n - 1:
+            total_steps = scale_ts_tensor.shape[0]
+        ms_seg_counts[scale_idx] = scale_ts_tensor.shape[0]
+        scale_ts_padded = torch.cat([scale_ts_tensor, torch.zeros(total_steps - scale_ts_tensor.shape[0], 2, dtype=scale_ts_tensor.dtype)], dim=0)
+        ms_seg_timestamps_list.append(scale_ts_padded.detach())
+    ms_seg_timestamps_list = ms_seg_timestamps_list[::-1]
+    ms_seg_timestamps = torch.stack(ms_seg_timestamps_list).type(dtype)
+    ms_seg_counts = torch.tensor(ms_seg_counts)
+    return ms_seg_timestamps, ms_seg_counts
+
 def get_frame_targets_from_rttm(
     rttm_timestamps: list, 
     offset: float, 
@@ -112,29 +173,10 @@ def extract_seg_info_from_rttm(uniq_id, offset, duration, rttm_lines, mapping_di
     Get RTTM lines containing speaker labels, start time and end time. target_spks contains two targeted
     speaker indices for creating groundtruth label files. Only speakers in target_spks variable will be
     included in the output lists.
-
-    Args:
-        uniq_id (str):
-            Unique file ID that refers to an input audio file and corresponding RTTM (Annotation) file.
-        rttm_lines (list):
-            List containing RTTM lines in str format.
-        mapping_dict (dict):
-            Mapping between the estimated speakers and the speakers in the ground-truth annotation.
-            `mapping_dict` variable is only provided when the inference mode is running in sequence-eval mode.
-            Sequence eval mode uses the mapping between the estimated speakers and the speakers in ground-truth annotation.
-    Returns:
-        rttm_tup (tuple):
-            Tuple containing lists of start time, end time and speaker labels.
-
     """
     rttm_stt, rttm_end = offset, offset + duration
     stt_list, end_list, speaker_list, pairwise_infer_spks = [], [], [], []
-    if target_spks:
-        inv_map = {v: k for k, v in mapping_dict.items()}
-        for spk_idx in target_spks:
-            spk_str = f'speaker_{spk_idx}'
-            if spk_str in inv_map:
-                pairwise_infer_spks.append(inv_map[spk_str])
+
     speaker_set = []
     for rttm_line in rttm_lines:
         start, end, speaker = convert_rttm_line(rttm_line)
@@ -153,6 +195,99 @@ def extract_seg_info_from_rttm(uniq_id, offset, duration, rttm_lines, mapping_di
     rttm_mat = (stt_list, end_list, speaker_list)
     return rttm_mat
 
+## copied from trainer dataloader
+def get_soft_label_vectors(
+    feat_level_target, 
+    duration, 
+    ms_seg_counts,
+    feat_per_sec,
+    seg_stride,
+    feat_per_segment,
+    max_spks,
+    ):
+    """
+    Generate the final targets for the actual diarization step.
+    """
+    soft_label_vec_list = []
+    stride = int(feat_per_sec * seg_stride)
+    for index in range(torch.max(ms_seg_counts)):
+        seg_stt_feat, seg_end_feat = (stride * index), (stride * index + feat_per_segment)
+        if seg_stt_feat < feat_level_target.shape[0]:
+            range_label_sum = torch.sum(feat_level_target[seg_stt_feat:seg_end_feat, :], axis=0)
+            soft_label_vec_list.append(range_label_sum)
+        else:
+            range_label_sum = torch.zeros(max_spks)
+            range_label_sum[0] = int(feat_per_segment) # Silence label should exist always
+            soft_label_vec_list.append(range_label_sum)
+    return soft_label_vec_list
+
+def get_step_level_targets(
+    soft_label_vec_list,
+    feat_per_segment,
+    randomize_overlap_labels,
+    div_n,
+    soft_label_thres,
+    ): 
+    soft_label_sum = torch.stack(soft_label_vec_list)
+    total_steps = soft_label_sum.shape[0]
+    label_total = soft_label_sum.sum(dim=1) # Only sum speaker labels, not silence at dim 0
+    label_total = torch.clamp(label_total, max=feat_per_segment) # Clamp the maximum value to make max vector value 1
+    label_total[label_total == 0] = 1 # Avoid divide by zero by assigning 1
+    if randomize_overlap_labels:
+        # Randomize the overlap labels to shuffle argmax function results
+        soft_label_sum = (torch.rand_like(soft_label_sum)/div_n + (1- 1/div_n)) * soft_label_sum
+    soft_label_vec = (soft_label_sum.t()/label_total).t()
+    step_target = (soft_label_vec >= soft_label_thres).float()
+
+    base_clus_label = soft_label_vec.argmax(dim=1) 
+    base_clus_label[soft_label_vec.sum(dim=1)== 0] = -1 # If there is no existing label, put -1 
+    if base_clus_label.shape[0] != total_steps:
+        raise ValueError(f"base_clus_label.shape[0] != total_steps, {base_clus_label.shape[0]} != {total_steps}")
+    return step_target, base_clus_label
+
+def parse_rttm_for_ms_targets(
+    uniq_id, 
+    rttm_file, 
+    offset, 
+    duration, 
+    ms_seg_counts,
+    round_digits,
+    feat_per_sec,
+    seg_stride,
+    max_spks,
+    feat_per_segment,
+    randomize_overlap_labels,
+    div_n,
+    soft_label_thres,
+    ):
+    """
+    Generate target tensor variable by extracting groundtruth diarization labels from an RTTM file.
+    """
+    rttm_lines = open(rttm_file).readlines()
+    # uniq_id = get_uniq_id_with_range(sample)
+    rttm_timestamps = extract_seg_info_from_rttm(uniq_id, offset, duration, rttm_lines)
+    fr_level_target = get_frame_targets_from_rttm(rttm_timestamps=rttm_timestamps, 
+                                                    offset=offset,
+                                                    duration=duration,
+                                                    round_digits=round_digits, 
+                                                    feat_per_sec=feat_per_sec, 
+                                                    max_spks=max_spks) 
+    
+    soft_label_vectors = get_soft_label_vectors(feat_level_target=fr_level_target, 
+                                                duration=duration, 
+                                                ms_seg_counts=ms_seg_counts,
+                                                feat_per_sec=feat_per_sec,
+                                                seg_stride=seg_stride,
+                                                feat_per_segment=feat_per_segment,
+                                                max_spks=max_spks)
+
+    seg_target, base_clus_label = get_step_level_targets(soft_label_vec_list=soft_label_vectors,
+                                                        feat_per_segment=feat_per_segment,
+                                                        randomize_overlap_labels=randomize_overlap_labels,
+                                                        div_n=div_n,
+                                                        soft_label_thres=soft_label_thres,
+        )
+    return seg_target, base_clus_label
 
 class _AudioMSDDTrainDataset(Dataset):
     """
@@ -224,11 +359,12 @@ class _AudioMSDDTrainDataset(Dataset):
         dtype=torch.float32,
         randomize_overlap_labels: bool = True,
         randomize_offset: bool = True,
+        encoder_infer_mode: bool = False,
     ):
         super().__init__()
         self.collection = DiarizationSpeechLabel(
             manifests_files=manifest_filepath.split(','),
-            emb_dict=None,
+            # emb_dict=None,
             clus_label_dict=None,
             pairwise_infer=pairwise_infer,
         )
@@ -263,6 +399,7 @@ class _AudioMSDDTrainDataset(Dataset):
         self.min_subsegment_duration = min_subsegment_duration
         self.num_workers = num_workers
         self.dtype = dtype
+        self.encoder_infer_mode = encoder_infer_mode
 
     def __len__(self):
         return len(self.collection)
@@ -436,18 +573,21 @@ class _AudioMSDDTrainDataset(Dataset):
         sample = self.collection[index]
         if sample.offset is None:
             sample.offset = 0
-        offset = sample.offset
-        if self.randomize_offset and self.session_len_sec < sample.duration:
-            n_durs = max(int( (sample.duration-self.session_len_sec) // self.session_len_sec) - 1, 0)
-            offset = round(torch.randint(0, n_durs, (1,)).item() * self.session_len_sec, self.round_digits)
-            duration = round(self.session_len_sec, self.round_digits)
-        else:
+        if self.encoder_infer_mode:
+            offset = sample.offset
             duration = min(sample.duration, self.session_len_sec)
-            offset = 0
+        else:
+            if self.randomize_offset and self.session_len_sec < sample.duration:
+                n_durs = max(int( (sample.duration-self.session_len_sec) // self.session_len_sec) - 1, 0)
+                offset = round(torch.randint(0, n_durs, (1,)).item() * self.session_len_sec, self.round_digits)
+                duration = round(self.session_len_sec, self.round_digits)
+            else:
+                duration = min(sample.duration, self.session_len_sec)
+                offset = 0
         uniq_id = self.get_uniq_id_with_range(sample)
         ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(uniq_id=uniq_id, 
                                                                       offset=offset,
-                                                                      duration=duration,
+                                                                      duration=self.session_len_sec,
                                                                       feat_per_sec=self.feat_per_sec)
         
         scale_mapping = torch.stack(get_argmin_mat(ms_seg_timestamps))
@@ -456,7 +596,6 @@ class _AudioMSDDTrainDataset(Dataset):
                                                                    offset=offset,
                                                                    duration=duration,
                                                                    ms_seg_counts=ms_seg_counts)
-
         features = self.featurizer.process(sample.audio_file, offset=offset, duration=duration)
         feature_length = torch.tensor(features.shape[0]).long()
         if self.random_flip:
@@ -521,11 +660,13 @@ class _AudioMSDDInferDataset(Dataset):
         self,
         *,
         manifest_filepath: str,
-        emb_dict: Dict,
+        max_spks: int,
         emb_seq: Dict,
         clus_label_dict: Dict,
+        multiscale_args_dict: Dict,
         soft_label_thres: float,
         seq_eval_mode: bool,
+        session_len_sec: float,
         window_stride: float,
         use_single_scale_clus: bool,
         pairwise_infer: bool,
@@ -533,12 +674,11 @@ class _AudioMSDDInferDataset(Dataset):
         super().__init__()
         self.collection = DiarizationSpeechLabel(
             manifests_files=manifest_filepath.split(','),
-            emb_dict=emb_dict,
             clus_label_dict=clus_label_dict,
             seq_eval_mode=seq_eval_mode,
             pairwise_infer=pairwise_infer,
         )
-        self.emb_dict = emb_dict
+        self.manifest_filepath = manifest_filepath
         self.emb_seq = emb_seq
         self.clus_label_dict = clus_label_dict
         self.round_digits = 2
@@ -546,9 +686,24 @@ class _AudioMSDDInferDataset(Dataset):
         self.feat_per_sec = int(1 / window_stride)
         self.soft_label_thres = soft_label_thres
         self.pairwise_infer = pairwise_infer
-        self.max_spks = 2
+        self.max_spks = max_spks
         self.use_single_scale_clus = use_single_scale_clus
         self.seq_eval_mode = seq_eval_mode
+        self.session_len_sec = session_len_sec
+
+        self.multiscale_args_dict = multiscale_args_dict 
+        self.scale_n = len(self.multiscale_args_dict['scale_dict'])
+        self.scale_dict = {int(k): v for k, v in multiscale_args_dict['scale_dict'].items()}
+        self.feat_per_sec = int(1 / window_stride)
+        self.feat_per_segment = int(self.scale_dict[self.scale_n-1][0] / window_stride)
+        self.randomize_overlap_labels = False
+
+        self.seg_stride = self.scale_dict[self.scale_n-1][1]
+        self.max_raw_feat_len = int(self.multiscale_args_dict['scale_dict'][0][0] * self.feat_per_sec)
+        self.div_n = 20
+        self.round_digits = 2
+        self.min_subsegment_duration = 0.03
+        self.dtype = torch.float32
 
     def __len__(self):
         return len(self.collection)
@@ -574,7 +729,8 @@ class _AudioMSDDInferDataset(Dataset):
             raise ValueError(f"RTTM file is not provided for this sample {sample}")
         rttm_lines = open(sample.rttm_file).readlines()
         uniq_id = os.path.splitext(os.path.basename(sample.rttm_file))[0]
-        mapping_dict = self.emb_dict[max(self.emb_dict.keys())][uniq_id]['mapping']
+        # mapping_dict = self.emb_dict[max(self.emb_dict.keys())][uniq_id]['mapping']
+        mapping_dict = {}
         rttm_timestamps = extract_seg_info_from_rttm(uniq_id, offset, duration, rttm_lines, mapping_dict, sample.target_spks)
         fr_level_target = assign_frame_level_spk_vector(rttm_timestamps, 
                                                         offset, 
@@ -626,34 +782,39 @@ class _AudioMSDDInferDataset(Dataset):
         sample = self.collection[index]
         if sample.offset is None:
             sample.offset = 0
-
+        offset, duration = sample.offset, sample.duration
         uniq_id = os.path.splitext(os.path.basename(sample.audio_file))[0]
-        scale_n = len(self.emb_dict.keys())
-        _avg_embs = torch.stack([self.emb_dict[scale_index][uniq_id]['avg_embs'] for scale_index in range(scale_n)])
+        
+        ms_seg_timestamps, ms_seg_counts = get_ms_seg_timestamps(uniq_id=uniq_id, 
+                                                                offset=offset,
+                                                                duration=duration,
+                                                                feat_per_sec=self.feat_per_sec,
+                                                                scale_n=self.scale_n,
+                                                                multiscale_args_dict=self.multiscale_args_dict,
+                                                                dtype=self.dtype, 
+                                                                min_subsegment_duration=self.min_subsegment_duration,
+                                                                )
 
-        if self.pairwise_infer:
-            avg_embs = _avg_embs[:, :, self.collection[index].target_spks]
-        else:
-            avg_embs = _avg_embs
-
-        if avg_embs.shape[2] > self.max_spks:
-            raise ValueError(
-                f" avg_embs.shape[2] {avg_embs.shape[2]} should be less than or equal to self.max_num_speakers {self.max_spks}"
-            )
-
-        feats = []
-        for scale_index in range(scale_n):
-            repeat_mat = self.emb_seq["session_scale_mapping"][uniq_id][scale_index]
-            feats.append(self.emb_seq[scale_index][uniq_id][repeat_mat, :])
-        feats_out = torch.stack(feats).permute(1, 0, 2)
-        feats_len = feats_out.shape[0]
-
-        if self.seq_eval_mode:
-            targets = self.parse_rttm_multiscale(sample)
-        else:
-            targets = torch.zeros(feats_len, 2).float()
-
-        return feats_out, feats_len, targets, avg_embs
+        targets, _ = parse_rttm_for_ms_targets(uniq_id=uniq_id, 
+                                                rttm_file=sample.rttm_file,
+                                                offset=offset,
+                                                duration=duration,
+                                                ms_seg_counts=ms_seg_counts,
+                                                round_digits=self.round_digits,
+                                                feat_per_sec=self.feat_per_sec,
+                                                seg_stride=self.seg_stride,
+                                                max_spks=self.max_spks,
+                                                feat_per_segment=self.feat_per_segment,
+                                                randomize_overlap_labels=self.randomize_overlap_labels,
+                                                div_n=self.div_n,
+                                                soft_label_thres=self.soft_label_thres,
+                                                )
+        offset_index = int(offset / self.scale_dict[ms_seg_counts.shape[0]-1][1])
+        seq_length = ms_seg_counts[-1]
+        ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
+        clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
+        return ms_emb_seq, ms_seg_timestamps, seq_length, clus_label_index, targets
+            # ms_emb_seq, lengths, ms_emb_avg, clus_label_index, targets = test_batch
 
 
 def _msdd_train_collate_fn(self, batch):
@@ -749,30 +910,41 @@ def _msdd_infer_collate_fn(self, batch):
     """
 
     packed_batch = list(zip(*batch))
-    feats, feats_len, targets, ms_avg_embs = packed_batch
-    feats_list, flen_list, targets_list, ms_avg_embs_list = [], [], [], []
-    max_audio_len = max(feats_len)
+    feats, ms_ts, lbl_len, clus_label, targets = packed_batch
+        # return ms_emb_seq, lengths, clus_label_index, targets
+    feats_list, flen_list, ms_ts_list, clus_label_list, targets_list = [], [], [], [], []
+    max_seq_len = max(lbl_len)
     max_target_len = max([x.shape[0] for x in targets])
 
-    for feature, feat_len, target, ivector in batch:
-        flen_list.append(feat_len)
-        ms_avg_embs_list.append(ivector)
-        if feat_len < max_audio_len:
-            pad_a = (0, 0, 0, 0, 0, max_audio_len - feat_len)
+    for feature, ms_seg_ts, lbl_len, label, target in batch:
+        flen_list.append(lbl_len)
+        # ms_avg_embs_list.append(ivector)
+        if lbl_len < max_seq_len:
+            pad_a = (0, 0, 0, 0, 0, max_seq_len - lbl_len)
+            pad_ts = (0, 0, 0, max_target_len - lbl_len)
+            pad_lbl = (0, max_target_len - lbl_len)
             pad_t = (0, 0, 0, max_target_len - target.shape[0])
             padded_feature = torch.nn.functional.pad(feature, pad_a)
             padded_target = torch.nn.functional.pad(target, pad_t)
+            padded_label = torch.nn.functional.pad(label, pad_lbl)
+            padded_ms_seg_ts = torch.nn.functional.pad(ms_seg_ts, pad_ts)
             feats_list.append(padded_feature)
+            ms_ts_list.append(padded_ms_seg_ts)
             targets_list.append(padded_target)
+            clus_label_list.append(padded_label)
         else:
-            targets_list.append(target.clone().detach())
             feats_list.append(feature.clone().detach())
+            ms_ts_list.append(ms_seg_ts.clone().detach())
+            targets_list.append(target.clone().detach())
+            clus_label_list.append(label.clone().detach())
 
     feats = torch.stack(feats_list)
     feats_len = torch.tensor(flen_list)
+    ms_seg_ts = torch.stack(ms_ts_list)
+    clus_label = torch.stack(clus_label_list)
     targets = torch.stack(targets_list)
-    ms_avg_embs = torch.stack(ms_avg_embs_list)
-    return feats, feats_len, targets, ms_avg_embs
+    # ms_avg_embs = torch.stack(ms_avg_embs_list)
+    return feats, ms_seg_ts, feats_len, clus_label, targets
 
 
 class AudioToSpeechMSDDTrainDataset(_AudioMSDDTrainDataset):
@@ -823,6 +995,7 @@ class AudioToSpeechMSDDTrainDataset(_AudioMSDDTrainDataset):
         emb_batch_size,
         pairwise_infer: bool,
         global_rank: int,
+        encoder_infer_mode: bool,
     ):
         super().__init__(
             manifest_filepath=manifest_filepath,
@@ -837,6 +1010,7 @@ class AudioToSpeechMSDDTrainDataset(_AudioMSDDTrainDataset):
             emb_batch_size=emb_batch_size,
             pairwise_infer=pairwise_infer,
             global_rank=global_rank,
+            encoder_infer_mode=encoder_infer_mode,
         )
 
     def msdd_train_collate_fn(self, batch):
@@ -884,13 +1058,13 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
         self,
         *,
         manifest_filepath: str,
-        emb_dict: Dict,
+        # emb_dict: Dict,
         emb_seq: Dict,
         clus_label_dict: Dict,
+        multiscale_args_dict: Dict,
         soft_label_thres: float,
         session_len_sec: float,
-        random_flip: bool,
-        num_spks: int,
+        max_spks: int,
         use_single_scale_clus: bool,
         seq_eval_mode: bool,
         window_stride: float,
@@ -898,13 +1072,13 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
     ):
         super().__init__(
             manifest_filepath=manifest_filepath,
-            emb_dict=emb_dict,
+            # emb_dict=emb_dict,
             emb_seq=emb_seq,
             clus_label_dict=clus_label_dict,
+            multiscale_args_dict=multiscale_args_dict,
             soft_label_thres=soft_label_thres,
             session_len_sec=session_len_sec,
-            random_flip=random_flip,
-            num_spks=num_spks,
+            max_spks=max_spks,
             use_single_scale_clus=use_single_scale_clus,
             window_stride=window_stride,
             seq_eval_mode=seq_eval_mode,

@@ -632,7 +632,7 @@ class DiarizationSpeechLabel(DiarizationLabel):
     def __init__(
         self,
         manifests_files: Union[str, List[str]],
-        emb_dict: Dict,
+        # emb_dict: Dict,
         clus_label_dict: Dict,
         round_digit=2,
         seq_eval_mode=False,
@@ -663,7 +663,7 @@ class DiarizationSpeechLabel(DiarizationLabel):
             **kwargs: Kwargs to pass to `SpeechLabel` constructor.
         """
         self.round_digit = round_digit
-        self.emb_dict = emb_dict
+        # self.emb_dict = emb_dict
         self.clus_label_dict = clus_label_dict
         self.seq_eval_mode = seq_eval_mode
         self.pairwise_infer = pairwise_infer
@@ -681,18 +681,19 @@ class DiarizationSpeechLabel(DiarizationLabel):
 
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item_rttm):
             # Inference mode
+            self.pairwise_infer = False
             if self.pairwise_infer:
                 clus_speaker_digits = sorted(list(set([x[2] for x in clus_label_dict[item['uniq_id']]])))
-                if item['rttm_file']:
-                    base_scale_index = max(self.emb_dict.keys())
-                    _sess_spk_dict = self.emb_dict[base_scale_index][item['uniq_id']]['mapping']
-                    sess_spk_dict = {int(v.split('_')[-1]): k for k, v in _sess_spk_dict.items()}
-                    rttm_speaker_digits = [int(v.split('_')[1]) for k, v in _sess_spk_dict.items()]
-                    if self.seq_eval_mode:
-                        clus_speaker_digits = rttm_speaker_digits
-                else:
-                    sess_spk_dict = None
-                    rttm_speaker_digits = None
+                # if item['rttm_file']:
+                #     base_scale_index = max(self.emb_dict.keys())
+                #     _sess_spk_dict = self.emb_dict[base_scale_index][item['uniq_id']]['mapping']
+                #     sess_spk_dict = {int(v.split('_')[-1]): k for k, v in _sess_spk_dict.items()}
+                #     rttm_speaker_digits = [int(v.split('_')[1]) for k, v in _sess_spk_dict.items()]
+                #     if self.seq_eval_mode:
+                #         clus_speaker_digits = rttm_speaker_digits
+                # else:
+                sess_spk_dict = None
+                rttm_speaker_digits = None
 
             # Training mode
             else:
@@ -710,22 +711,35 @@ class DiarizationSpeechLabel(DiarizationLabel):
                 target_spks = tuple(sess_spk_dict.keys())
                 clus_speaker_digits = target_spks
                 rttm_speaker_digits = target_spks
+            pairwise_msdd= False
+            # if pairwise_msdd:
+            #     if len(clus_speaker_digits) <= 2:
+            #         spk_comb_list = [(0, 1)]
+            #     else:
+            #         spk_comb_list = [x for x in combinations(clus_speaker_digits, 2)]
 
-            if len(clus_speaker_digits) <= 2:
-                spk_comb_list = [(0, 1)]
-            else:
-                spk_comb_list = [x for x in combinations(clus_speaker_digits, 2)]
+            #     import ipdb; ipdb.set_trace()
+            #     for target_spks in spk_comb_list:
+            #         audio_files.append(item['audio_file'])
+            #         uniq_ids.append(item['uniq_id'])
+            #         durations.append(item['duration'])
+            #         rttm_files.append(item['rttm_file'])
+            #         offsets.append(item['offset'])
+            #         target_spks_list.append(target_spks)
+            #         sess_spk_dicts.append(sess_spk_dict)
+            #         clus_spk_list.append(clus_speaker_digits)
+            #         rttm_spk_list.append(rttm_speaker_digits)
+            # else:
+            audio_files.append(item['audio_file'])
+            uniq_ids.append(item['uniq_id'])
+            durations.append(item['duration'])
+            rttm_files.append(item['rttm_file'])
+            offsets.append(item['offset'])
+            target_spks_list.append(target_spks)
+            sess_spk_dicts.append(sess_spk_dict)
+            clus_spk_list.append(clus_speaker_digits)
+            rttm_spk_list.append(rttm_speaker_digits)
 
-            for target_spks in spk_comb_list:
-                audio_files.append(item['audio_file'])
-                uniq_ids.append(item['uniq_id'])
-                durations.append(item['duration'])
-                rttm_files.append(item['rttm_file'])
-                offsets.append(item['offset'])
-                target_spks_list.append(target_spks)
-                sess_spk_dicts.append(sess_spk_dict)
-                clus_spk_list.append(clus_speaker_digits)
-                rttm_spk_list.append(rttm_speaker_digits)
 
         super().__init__(
             audio_files,

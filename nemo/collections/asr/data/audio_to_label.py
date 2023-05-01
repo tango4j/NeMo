@@ -142,7 +142,7 @@ def _fixed_seq_collate_fn(self, batch):
                 rep_sig = torch.cat(repeat * [sig])
                 sig = torch.cat((rep_sig, sub))
             new_audio_lengths.append(torch.tensor(fixed_length))
-            if sig.shape[1] < self.max_ch:
+            if self.max_ch > 1 and sig.shape[1] < self.max_ch:
                 pad = (0, self.max_ch - sig.shape[1])
                 sig = torch.nn.functional.pad(sig, pad)
             audio_signal.append(sig)

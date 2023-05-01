@@ -61,6 +61,28 @@ def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.
     res.fill_diagonal_(1)
     return res
 
+def cos_similarity_batch(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
+    """
+    Calculate cosine similarities of the given two set of tensors. The output is an N by N
+    matrix where N is the number of feature vectors.
+
+    Args:
+        a (Tensor):
+            Matrix containing speaker representation vectors. (batch, N, embedding_dim)
+        b (Tensor):
+            Matrix containing speaker representation vectors. (batch, N, embedding_dim)
+
+    Returns:
+        res (Tensor):
+            N by N matrix containing the cosine similarities of the values.
+    """
+    if emb_a.shape[1] == 1 or emb_b.shape[1] == 1:
+        raise ValueError(f"Number of feature vectors should be greater than 1 but got {emb_a.shape} and {emb_b.shape}")
+    a_norm = emb_a / torch.tile((torch.norm(emb_a, dim=2).unsqueeze(2) + eps), (1,1,emb_a.shape[-1]))
+    b_norm = emb_b / torch.tile((torch.norm(emb_b, dim=2).unsqueeze(2) + eps), (1,1,emb_a.shape[-1]))
+    res = torch.bmm(a_norm, b_norm.transpose(1, 2))
+    return res
+
 def drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda, drop_thres=0.1):
     if cuda:
         embs = emb.cuda()
@@ -410,8 +432,36 @@ def getRepeatedList(mapping_argmat: torch.Tensor, score_mat_size: torch.Tensor) 
     repeat_list[idxs] = counts.int().to(mapping_argmat.device)
     return repeat_list
 
-
 def get_argmin_mat(timestamps_in_scales: List[torch.Tensor]) -> List[torch.Tensor]:
+    """
+    Calculate the mapping between the base scale and other scales. A segment from a longer scale is
+    repeatedly mapped to a segment from a shorter scale or the base scale.
+
+    Args:
+        timestamps_in_scales (list):
+            List containing timestamp tensors for each scale.
+            Each tensor has dimensions of (Number of base segments) x 2.
+
+    Returns:
+        session_scale_mapping_list (list):
+            List containing argmin arrays indexed by scale index.
+    """
+    scale_list = list(range(len(timestamps_in_scales)))
+    session_scale_mapping_list = []
+    for scale_idx in reversed(scale_list):
+        time_stamps_float = timestamps_in_scales[scale_idx]
+        mean_interval = torch.mean(time_stamps_float, dim=1)
+        curr_scale_anchor = mean_interval[mean_interval != 0]
+        if scale_idx == max(scale_list): # base scale
+            base_scale_anchor = curr_scale_anchor
+        curr_mat = torch.tile(curr_scale_anchor, (base_scale_anchor.shape[0], 1))
+        base_mat = torch.tile(base_scale_anchor, (curr_scale_anchor.shape[0], 1)).t()
+        argmin_mat = torch.argmin(torch.abs(curr_mat - base_mat), dim=1)
+        session_scale_mapping_list.append(argmin_mat)
+    session_scale_mapping_list.reverse()
+    return session_scale_mapping_list
+
+def get_argmin_mat_WRONG(timestamps_in_scales: List[torch.Tensor]) -> List[torch.Tensor]:
     """
     Calculate the mapping between the base scale and other scales. A segment from a longer scale is
     repeatedly mapped to a segment from a shorter scale or the base scale.
@@ -1362,4 +1412,59 @@ class SpeakerClustering(torch.nn.Module):
         Y = drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda=self.cuda)
         return Y
     
+    def forward_embs(
+        self,
+        ms_embs: torch.Tensor,
+        oracle_num_speakers: int = -1,
+        max_rp_threshold: float = 0.15,
+        max_num_speakers: int = 8,
+        min_num_speakers: int = 1,
+        enhanced_count_thres: int = 40,
+        sparse_search_volume: int = 30,
+        fixed_thres: float = -1.0,
+        kmeans_random_trials: int = 1,
+    ) -> torch.LongTensor:
 
+
+        embs = ms_embs.mean(dim=1)
+        mat = getCosAffinityMatrix(embs)
+        
+        nmesc = NMESC(
+            mat,
+            max_num_speakers=max_num_speakers,
+            max_rp_threshold=max_rp_threshold,
+            sparse_search=self.sparse_search,
+            sparse_search_volume=sparse_search_volume,
+            fixed_thres=fixed_thres,
+            nme_mat_size=self.nme_mat_size,
+            maj_vote_spk_count=self.maj_vote_spk_count,
+            parallelism=self.parallelism,
+            cuda=self.cuda,
+            device=self.device,
+        )
+
+        # If there are less than `min_samples_for_nmesc` segments, est_num_of_spk is 1.
+        if mat.shape[0] > self.min_samples_for_nmesc:
+            est_num_of_spk, p_hat_value = nmesc.forward()
+            affinity_mat = getAffinityGraphMat(mat, p_hat_value)
+        else:
+            nmesc.fixed_thres = max_rp_threshold
+            est_num_of_spk, p_hat_value = nmesc.forward()
+            affinity_mat = mat
+        
+        # Clip the estimated number of speakers to the range of [min_num_speakers, max_num_speakers]
+        est_num_of_spk = torch.clamp(est_num_of_spk, min=min_num_speakers, max=max_num_speakers)
+
+        # n_clusters is number of speakers estimated from spectral clustering.
+        if oracle_num_speakers > 0:
+            n_clusters = int(oracle_num_speakers)
+        else:
+            n_clusters = int(est_num_of_spk.item())
+
+        spectral_model = SpectralClustering(
+            n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=self.device
+        )
+        Y = spectral_model.forward(affinity_mat)
+        # Y = drop_and_recluster(embs, Y, min_num_speakers, affinity_mat, cuda=self.cuda)
+        return Y
+    
