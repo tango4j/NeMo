@@ -52,6 +52,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.utilities import rank_zero_only
 from tqdm import tqdm
+import torch.nn.functional as F
 
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.models.classification_models import EncDecClassificationModel
@@ -70,7 +71,7 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
     write_rttm2manifest,
     get_uniq_id_list_from_manifest,
 )
-from nemo.collections.asr.parts.utils.offline_clustering import get_argmin_mat
+from nemo.collections.asr.parts.utils.offline_clustering import get_argmin_mat_large
 from nemo.collections.asr.parts.utils.vad_utils import (
     generate_overlap_vad_seq,
     generate_vad_segment_table,
@@ -158,7 +159,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         else:
             self.max_ch = 1
             self.max_clus = 1
-
+        
         self._ch_avg_mat = {}
         self._init_clus_diarizer()
 
@@ -239,6 +240,9 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             self._diarizer_params.speaker_embeddings.parameters.multiscale_weights,
         )
         self._diarizer_model._init_msdd_scales()
+        
+        if self._diarizer_params.vad.parameters.use_external_vad:
+            self._diarizer_model.msdd._vad_model = self._vad_model
         self.multiscale_args_dict = self._diarizer_model.multiscale_args_dict
 
     def _setup_vad_test_data(self, manifest_vad_input, batch_size=1):
@@ -269,7 +273,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         }
         self._speaker_model.setup_test_data(spk_dl_config)
 
-    def _setup_diarizer_test_data(self, manifest_file):
+    def _setup_diarizer_validation_data(self, manifest_file):
         # diar_dl_config = {
         #     'manifest_filepath': manifest_file,
         #     'sample_rate': self._cfg.sample_rate,
@@ -309,6 +313,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             self._vad_dir, self._argmax_ch_idx_dict, self._ch_avg_mat = self._mc_vad_processor.merge_frame_mc_vad(frame_vad_dir=self._vad_dir, 
                                                                                              audio_rttm_map=self.AUDIO_RTTM_MAP, 
                                                                                              method='max')
+            self.max_clus = self._mc_vad_processor.max_clus
             print("self._argmax_ch_idx_dict", self._argmax_ch_idx_dict)
         if not self._vad_params.smoothing:
             # Shift the window by 10ms to generate the frame and use the prediction of the window to represent the label for the frame;
@@ -375,12 +380,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             self._auto_split = True
             self._split_duration = self._vad_params.get("split_duration", 500)
             manifest_vad_input = self._diarizer_params.manifest_filepath
-            if self._diarizer_params.get("multi_channel_mode", None) == "mc_vad":
-                manifest_vad_input = self._mc_vad_processor.split_mc_vad_manifest(manifest_vad_input, channel_clustering=False)
-            elif self._diarizer_params.get("multi_channel_mode", None) in ["mc_vad_cc", "mc_vad_cc_mixer"]:
-                manifest_vad_input = self._mc_vad_processor.split_mc_vad_manifest(manifest_vad_input, channel_clustering=True)
-            else:
-                manifest_vad_input = manifest_vad_input
+            manifest_vad_input = manifest_vad_input
 
             if self._auto_split:
                 logging.info("Split long audio file to avoid CUDA memory issue")
@@ -398,13 +398,8 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                     "If you encounter CUDA memory issue, try splitting manifest entry by split_duration to avoid it."
                 )
 
-            if self._diarizer_params.get("multi_channel_mode", None) in ["mc_vad", "mc_vad_cc", "mc_vad_cc_mixer"]:
-                # mc_split_manifest_vad_input = split_mc_vad_manifest(manifest_vad_input)
-                self._setup_vad_test_data(manifest_vad_input)
-                self._run_vad(manifest_vad_input, multi_channel=True, frame_vad=True)
-            else:
-                self._setup_vad_test_data(manifest_vad_input)
-                self._run_vad(manifest_vad_input, multi_channel=False, frame_vad=False)
+            self._setup_vad_test_data(manifest_vad_input)
+            self._run_vad(manifest_vad_input, multi_channel=False, frame_vad=False)
 
         elif self._diarizer_params.vad.external_vad_manifest is not None:
             self._speaker_manifest_path = self._diarizer_params.vad.external_vad_manifest
@@ -484,12 +479,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self.time_stamps = {}
 
         all_embs = torch.empty([0])
-        if self._diarizer_params.multi_channel_mode in ["mc_vad_cc", "mc_vad_cc_mixer"]:
-            ch_merge_cal_mats_list, ch_clus_mats_list = self._get_mc_weights_per_batch(manifest_file)
-        else:
-            ch_merge_cal_mats_list, ch_clus_mats_list = [], []
 
-        # for test_batch in tqdm(
         for bi, test_batch in enumerate(tqdm(
             self._speaker_model.test_dataloader(),
             desc=f'[{scale_idx+1}/{num_scales}] extract embeddings',
@@ -500,19 +490,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             audio_signal, audio_signal_len, labels, slices = test_batch
             if len(audio_signal.shape) > 2: # If multi-channel
                 if audio_signal.shape[2] > 1:
-                    if self._diarizer_params.multi_channel_mode == "mc_vad_cc":
-                        ch_merger_mat = ch_merge_cal_mats_list[bi].to(self._speaker_model.device)
-                        print(f"ch_merger_mat.shape: {ch_merger_mat.shape}")
-                        audio_signal = torch.bmm(ch_merger_mat, audio_signal.transpose(2,1)).squeeze(1)
-                    elif self._diarizer_params.multi_channel_mode == "mc_vad_cc_mixer":
-                        ch_merger_mat = ch_merge_cal_mats_list[bi].to(self._speaker_model.device)
-                        print(f"ch_merger_mat.shape: {ch_merger_mat.shape}")
-                        ch_clus_mat = ch_clus_mats_list[bi].to(self._speaker_model.device)
-                        audio_signal_clus = torch.bmm(ch_clus_mat, audio_signal.transpose(2,1)).squeeze(1)
-                        ch_merger_mat = self._get_ch_merger_mat(audio_signal, audio_signal_len, ch_clus_mat)
-                        audio_signal = torch.bmm(ch_merger_mat, audio_signal_clus).squeeze(1)
-                    else:
-                        audio_signal = torch.mean(audio_signal, dim=2)
+                    audio_signal = torch.mean(audio_signal, dim=2)
                 else:
                     audio_signal = audio_signal.squeeze(2)
             with autocast():
@@ -596,44 +574,40 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         ms_emb_seq has dimension: (batch_size, time_steps, scale_n, emb_dim)
 
         """
-        # self._speaker_model.test_dataloader(),
-        self._setup_diarizer_test_data(manifest_file)
-        # self._setup_diarizer_validation_data(manifest_file)
+        self._setup_diarizer_validation_data(manifest_file)
         self._diarizer_model.msdd.eval()
         self._diarizer_model.msdd._speaker_model.eval()
+        self._diarizer_model.msdd._vad_model.eval()
         self._vad_model.eval()
+        self.feat_per_sec = 100
         
         self._diarizer_model.cfg.interpolated_scale
-        all_embs_list, all_ts_list, all_seg_counts_list, all_mapping_list, all_vad_probs_list = [], [], [], [], []
+        all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list = [], [], [], []
+        
         for bi, val_batch in enumerate(tqdm(
             self._diarizer_model.val_dataloader(),
-            desc=f'extract embeddings from diarization model',
+            desc=f'Encoding speaker embeddings',
             leave=True,
             disable=not self.verbose,
         )):
             val_batch = [x.to(self._diarizer_model.device) for x in val_batch]
-            features, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, targets = val_batch
-            window_length_in_sec, shift_length_in_sec = self._diarizer_model.diar_window, self._diarizer_model.diar_window_shift
-            
-            self.subsample_vad = int(self._diarizer_params.vad.parameters.shift_length_in_sec / 0.01)
+            audio_signal, audio_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets = val_batch
             with autocast():
-                log_probs = self._vad_model(input_signal=features, input_signal_length=feature_length)
-                vad_probs = torch.softmax(log_probs, dim=-1)[:,:,1]
-                vad_probs_frame = torch.repeat_interleave(vad_probs, self.subsample_vad, dim=1)
-                ms_emb_seq, vad_probs, ms_ts_rep = self._diarizer_model.forward_encoder(features=features,
-                                                                  feature_length=feature_length,
-                                                                  ms_seg_timestamps=ms_seg_timestamps,
-                                                                  ms_seg_counts=ms_seg_counts,
-                                                                  scale_mapping=scale_mapping, vad_probs_frame=vad_probs_frame)
+                ms_emb_seq, vad_probs, ms_ts_rep = self._diarizer_model.forward_encoder(audio_signal=audio_signal,
+                                                                                        audio_signal_length=audio_length,
+                                                                                        ms_seg_timestamps=ms_seg_timestamps,
+                                                                                        ms_seg_counts=ms_seg_counts,
+                                                                                        scale_mapping=scale_mapping, 
+                                                                                        ch_clus_mat=ch_clus_mat)
                 all_embs_list.append(ms_emb_seq.detach().cpu())
                 all_ts_list.append(ms_ts_rep.detach().cpu())
                 all_mapping_list.append(scale_mapping.detach().cpu())
                 all_vad_probs_list.append(vad_probs.detach().cpu())
-
+            
             del val_batch
             torch.cuda.empty_cache()
 
-        embeddings, time_stamps, vad_probs, scale_mapping = self._stitch_and_save(manifest_file, all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list)
+        embeddings, time_stamps, vad_probs, scale_mapping = self._stitch_and_save(manifest_file, all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list) 
         return embeddings, time_stamps, vad_probs, scale_mapping
 
     def _stitch_and_save(
@@ -642,7 +616,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         all_embs_list, 
         all_ts_list, 
         all_mapping_list,
-        all_vad_probs_list
+        all_vad_probs_list,
         ):
         diar_manifest = read_manifest(manifest_file)
         batch_size = self._diarizer_model.cfg.validation_ds.batch_size
@@ -653,43 +627,56 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
 
         overlap_sec = self._diarizer_model.diar_window - self._diarizer_params.speaker_embeddings.parameters.window_length_in_sec[0]
         self.embeddings, self.time_stamps, self.scale_mapping, self.vad_probs = {}, {}, {}, {}
-        
+        base_shift = self._diarizer_model.cfg.interpolated_scale/2 
         base_seg_per_longest_seg = int((self._diarizer_model.diar_window - self._diarizer_model.diar_window_shift) / (self._diarizer_model.cfg.interpolated_scale/2))-1
         all_manifest_uniq_ids = get_uniq_id_list_from_manifest(self._diarizer_model.segmented_manifest_path)
-        
-        for batch_idx, (embs, time_stamps, vad_probs) in enumerate(zip(all_embs_list, all_ts_list, all_vad_probs_list)):
+
+        for batch_idx, (embs, time_stamps, vad_probs) in enumerate(tqdm(zip(all_embs_list, all_ts_list, all_vad_probs_list), desc="Stitching batch outputs")):
             batch_len = embs.shape[0]
             batch_uniq_ids = all_manifest_uniq_ids[batch_idx * batch_size: (batch_idx+1) * batch_size ]
             batch_manifest = self._diarizer_model.segmented_manifest_list[batch_idx * batch_size: (batch_idx+1) * batch_size ]
             for sample_id, uniq_id in enumerate(batch_uniq_ids):
+                offset_feat = int(batch_manifest[sample_id]['offset']*feat_per_sec)
+                last_trunc_index = int(batch_manifest[sample_id]['duration']/base_shift) 
+                
                 if uniq_id in self.embeddings:
-                    
                     embs_trunc = self.embeddings[uniq_id][:-base_seg_per_longest_seg, :, :]
-                    embs_add = all_embs_list[batch_idx][sample_id]
-                    
-                    offset_sample = int(batch_manifest[sample_id]['offset']*feat_per_sec)
                     ts_trunc = self.time_stamps[uniq_id][:, :-base_seg_per_longest_seg, :] 
-                    ts_add = all_ts_list[batch_idx][sample_id][:] + offset_sample
-                    
                     vadp_trunc = self.vad_probs[uniq_id][:-base_seg_per_longest_seg]
-                    vadp_add = all_vad_probs_list[batch_idx][sample_id]
-
+               
+                # Check if the last segment is truncated 
+                if batch_manifest[sample_id]['duration'] < self._diarizer_model.cfg.session_len_sec:
+                    embs_add = embs[sample_id][:last_trunc_index]
+                    ts_add = time_stamps[sample_id][:, :last_trunc_index] + offset_feat
+                    vadp_add = vad_probs[sample_id][:last_trunc_index]
+                else:
+                    embs_add = embs[sample_id]
+                    ts_add = time_stamps[sample_id]+ offset_feat
+                    vadp_add = vad_probs[sample_id]
+                        
+                if uniq_id in self.embeddings:
                     self.embeddings[uniq_id] = torch.cat((embs_trunc, embs_add), dim=0)
                     self.time_stamps[uniq_id]= torch.cat((ts_trunc, ts_add), dim=1)
                     self.vad_probs[uniq_id]= torch.cat((vadp_trunc, vadp_add), dim=0)
                 else:
-                    self.embeddings[uniq_id] = all_embs_list[batch_idx][sample_id]
-                    self.time_stamps[uniq_id] = all_ts_list[batch_idx][sample_id][:, :, :]
-                    self.vad_probs[uniq_id] = all_vad_probs_list[batch_idx][sample_id]
+                    self.embeddings[uniq_id] = embs_add
+                    self.time_stamps[uniq_id] = ts_add
+                    self.vad_probs[uniq_id] = vadp_add
         
-        for uniq_id, ms_ts in self.time_stamps.items():
+        global_scale_mapping = None
+        for uniq_id, ms_ts in tqdm(self.time_stamps.items(), desc="Calculating scale mapping"):
+            if global_scale_mapping is not None:
+                self.scale_mapping[uniq_id] = global_scale_mapping
             timestamps_in_scales = []
+            logging.info(f"Calculating unique timestamps in scales for {uniq_id}")
             for scale_idx in range(ms_ts.shape[0]):
                 unique_ts = torch.vstack((torch.unique(ms_ts[scale_idx][:, 0]), torch.unique(ms_ts[scale_idx][:, 1]))).t()
                 timestamps_in_scales.append(unique_ts)
-            scale_mapping = get_argmin_mat(timestamps_in_scales)
-            self.scale_mapping[uniq_id] = scale_mapping
-
+            logging.info(f"Launching argmin_mat_large for {uniq_id}")
+            global_scale_mapping = get_argmin_mat_large(timestamps_in_scales)
+            self.scale_mapping[uniq_id] = global_scale_mapping
+        
+        logging.info(f"End of stitch_and_save: Saving embeddings to {self._speaker_dir}")
         return self.embeddings, self.time_stamps, self.vad_probs, self.scale_mapping
 
     def _save_embeddings(self, manifest_file):
@@ -703,24 +690,22 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         pkl.dump(self.embeddings, open(self._embeddings_file, 'wb'))
         logging.info("Saved embedding files to {}".format(embedding_dir))
     
-    def reshape_embs_and_timestamps(self, embeddings, time_stamps, vad_logits):
-        return None
-
     def forward(self, batch_size: int = None):
         """
         Forward pass for end-to-end (including end-to-end optimized models) diarization.
         To deal with the long session audio inputs, we split the audio into smaller chunks and process.
         Each session is saved in terms of `uniq_id` in dictionary format.
 
-        Args:
+        Argsu
             batch_size (int): batch size for speaker encoder
 
         Returns:
             clus_label_index (dict): dictionary containing uniq_id as key and list of cluster labels as value
         """
-        embeddings, time_stamps, vad_probs, scale_mapping = self._forward_speaker_encoder(manifest_file=self._diarizer_params.manifest_filepath,
-                                                                            batch_size=batch_size)
-        # embs_and_timestamps = self.reshape_embs_and_timestamps(embeddings, time_stamps, vad_probs)
+        # if self._mc_vad_processor is not None:
+        #     self._perform_speech_activity_detection()
+        
+        embeddings, time_stamps, vad_probs, scale_mapping = self._forward_speaker_encoder(manifest_file=self._diarizer_params.manifest_filepath, batch_size=batch_size)
         session_clus_labels = self._run_clustering(embeddings, time_stamps, vad_probs, scale_mapping)
         return embeddings, time_stamps, vad_probs, session_clus_labels
     
@@ -737,17 +722,20 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             AUDIO_RTTM_MAP=self.AUDIO_RTTM_MAP,
             out_rttm_dir=out_rttm_dir,
             clustering_params=self._cluster_params,
+            verbose=self.verbose,
+            vad_threshold=self._diarizer_params.vad.parameters.frame_vad_threshold,
             device=self._diarizer_model.device,
-            verbose=self.verbose,
         )
-        score_labels(
-            self.AUDIO_RTTM_MAP,
-            all_ref,
-            all_hyp,
-            collar=self._diarizer_params.collar,
-            ignore_overlap=self._diarizer_params.ignore_overlap,
-            verbose=self.verbose,
-        )      
+                # self._diarizer_params.ignore_overlap,
+        for ignore_overlap in [False, True]:
+            score_labels(
+                self.AUDIO_RTTM_MAP,
+                all_ref,
+                all_hyp,
+                collar=self._diarizer_params.collar,
+                ignore_overlap=ignore_overlap,
+                verbose=self.verbose,
+            )      
         return uniq_clus_embs
 
 

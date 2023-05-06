@@ -35,6 +35,7 @@ from typing import Dict, List, Tuple
 
 import torch
 from torch.linalg import eigh, eigvalsh
+import logging
 
 
 def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
@@ -99,8 +100,6 @@ def drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda, drop_thres=
     spk_aff_collapsed = torch.sum(spk_aff.fill_diagonal_(0), dim=0)/(spk_aff.shape[0]-1)
     sorted_spk_affs = spk_aff_collapsed.sort()[0]
     diffs = sorted_spk_affs[1:] - sorted_spk_affs[:-1] 
-    print("spk_aff_collapsed", spk_aff_collapsed)
-    print("diffs:", diffs)
     if spk_aff.shape[0] > min_num_speakers:
         # if spk_aff_collapsed.min() < drop_thres:
         if diffs.max().item() > drop_thres:
@@ -460,6 +459,104 @@ def get_argmin_mat(timestamps_in_scales: List[torch.Tensor]) -> List[torch.Tenso
         session_scale_mapping_list.append(argmin_mat)
     session_scale_mapping_list.reverse()
     return session_scale_mapping_list
+
+def get_scale_in_centi_sec(timestamps):
+    """ 
+    Infer the scale of the timestamps in centiseconds.
+    
+    Args:
+        timestamps (Tensor):
+            Start and end timestamps of the segments in centiseconds (10ms).
+            
+    Returns:
+        (Tensor[int]) Mode of the difference between the start and end timestamps.
+    """
+    diffs = timestamps[:, 1] - timestamps[:, 0]
+    return int(torch.mode(diffs)[0]) 
+
+def get_chunked_argmin_mat(
+    base_scale_in_cs, 
+    curr_scale_anchor, 
+    base_scale_anchor, 
+    timestamps_in_scales: List[torch.Tensor], 
+    base_len: int, 
+    window: int, 
+    ovl_len: int
+    ) -> List[torch.Tensor]:
+    """ 
+    Get the argmin matrix for the current scale by chunking the matrix.
+    
+    """
+    hop_len = window - 2*ovl_len
+    curr_scale_in_cs = get_scale_in_centi_sec(timestamps_in_scales)
+    ratio = round(curr_scale_in_cs/base_scale_in_cs, 2)
+    total_chunks = torch.ceil(torch.tensor(1 + (base_len - window - ovl_len)/hop_len)).int().item()
+    argmin_mat_list = []
+    # Due to memory constraints, we need to chunk the matrix
+    for idx in range(total_chunks):
+        offset = idx * hop_len
+        offset_cur = idx * int(hop_len/ratio)
+        window_cur = int(window/ratio)
+        csa = curr_scale_anchor[offset_cur:(offset_cur+window_cur)]
+        bsa = base_scale_anchor[offset:offset+window]
+        argmin_local = calculate_argmin_matrix(tgt_anchor=csa, ref_anchor=bsa)
+        if idx == 0:
+            argmin_mat_list.append(argmin_local[:-ovl_len])
+        elif idx == total_chunks - 1:
+            argmin_mat_list.append(argmin_local[ovl_len:] + offset_cur)
+        else:
+            argmin_mat_list.append(argmin_local[ovl_len:-ovl_len] + offset_cur)
+    argmin_mat = torch.cat(argmin_mat_list, dim=0)
+    return argmin_mat
+    
+
+def get_argmin_mat_large(timestamps_in_scales: List[torch.Tensor], window=2000, hop_len=1600) -> List[torch.Tensor]:
+    """
+    Calculate the mapping between the base scale and other scales. A segment from a longer scale is
+    repeatedly mapped to a segment from a shorter scale or the base scale.
+
+    Args:
+        timestamps_in_scales (list):
+            List containing timestamp tensors for each scale.
+            Each tensor has dimensions of (Number of base segments) x 2.
+
+    Returns:
+        session_scale_mapping_list (list):
+            List containing argmin arrays indexed by scale index.
+    """
+    ovl_len = int((window - hop_len)/2)
+    scale_list = list(range(len(timestamps_in_scales)))
+    base_scale_in_cs = get_scale_in_centi_sec(timestamps_in_scales[-1])
+    session_scale_mapping_list = []
+    for scale_idx in reversed(scale_list):
+        mean_interval = torch.mean(timestamps_in_scales[scale_idx], dim=1)
+        curr_scale_anchor = mean_interval[mean_interval != 0]
+        if scale_idx == max(scale_list): # base scale
+            base_scale_anchor = curr_scale_anchor
+        curr_len, base_len = curr_scale_anchor.shape[0], base_scale_anchor.shape[0]
+        if curr_len > window:
+            # If the current scale is longer than the window, we chunk the matrix
+            argmin_mat = get_chunked_argmin_mat(base_scale_in_cs, 
+                                                curr_scale_anchor,
+                                                base_scale_anchor,
+                                                timestamps_in_scales[scale_idx], 
+                                                base_len, 
+                                                window, 
+                                                ovl_len)
+        else:
+            argmin_mat = calculate_argmin_matrix(curr_scale_anchor, base_scale_anchor)
+        session_scale_mapping_list.append(argmin_mat)
+    session_scale_mapping_list.reverse()
+    return session_scale_mapping_list
+
+def calculate_argmin_matrix(tgt_anchor, ref_anchor):
+    tgt_mat = torch.tile(tgt_anchor, (ref_anchor.shape[0], 1))
+    ref_mat = torch.tile(ref_anchor, (tgt_anchor.shape[0], 1)).t()
+    try:
+        argmin_mat = torch.argmin(torch.abs(tgt_mat - ref_mat), dim=1)
+    except:
+        import ipdb; ipdb.set_trace()
+    return argmin_mat
 
 def get_argmin_mat_WRONG(timestamps_in_scales: List[torch.Tensor]) -> List[torch.Tensor]:
     """
@@ -1419,14 +1516,13 @@ class SpeakerClustering(torch.nn.Module):
         max_rp_threshold: float = 0.15,
         max_num_speakers: int = 8,
         min_num_speakers: int = 1,
-        enhanced_count_thres: int = 40,
         sparse_search_volume: int = 30,
         fixed_thres: float = -1.0,
         kmeans_random_trials: int = 1,
     ) -> torch.LongTensor:
 
-
         embs = ms_embs.mean(dim=1)
+        logging.info(f"Calculating cos sim mat for embs.shape: {embs.shape}")
         mat = getCosAffinityMatrix(embs)
         
         nmesc = NMESC(
@@ -1443,6 +1539,7 @@ class SpeakerClustering(torch.nn.Module):
             device=self.device,
         )
 
+        logging.info(f"Getting affiniy graph mat for mat.shape: {mat.shape}")
         # If there are less than `min_samples_for_nmesc` segments, est_num_of_spk is 1.
         if mat.shape[0] > self.min_samples_for_nmesc:
             est_num_of_spk, p_hat_value = nmesc.forward()
@@ -1461,6 +1558,7 @@ class SpeakerClustering(torch.nn.Module):
         else:
             n_clusters = int(est_num_of_spk.item())
 
+        logging.info(f"Running Spectral Clustering for n_clusters: {n_clusters}")
         spectral_model = SpectralClustering(
             n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=self.device
         )

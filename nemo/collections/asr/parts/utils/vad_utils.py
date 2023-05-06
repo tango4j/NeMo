@@ -1572,6 +1572,7 @@ class MultichannelVADProcessor:
         self.use_subset_for_chclus = True
         self.max_ch = 1
         self.max_clus = 1
+        self.mc_split_manifest = None
 
     def get_channel_cluster_mapping(self, json_dict):
         logging.info(f"Channel clustering for {json_dict['uniq_id']}")
@@ -1761,8 +1762,8 @@ class MultichannelVADProcessor:
             frame_mc_tensor_dict, avg_cal_mats = self.merge_channel_clustered_frames(frame_mc_tensor_dict, method)
         else:
             avg_cal_mats = None
-        frame_single_channel_dict, argmax_ch_idx_dict  = self.merge_mc_frames(frame_mc_tensor_dict, method)
+        self.frame_single_channel_dict, self.argmax_ch_idx_dict  = self.merge_mc_frames(frame_mc_tensor_dict, method)
         out_vad_dir = os.path.join(frame_vad_dir, 'frame_merged')
         Path.mkdir(Path(out_vad_dir), exist_ok=True, parents=True)
-        self.write_merged_frame_pred(frame_single_channel_dict, out_vad_dir)
-        return out_vad_dir, argmax_ch_idx_dict, avg_cal_mats
+        self.write_merged_frame_pred(self.frame_single_channel_dict, out_vad_dir)
+        return out_vad_dir, self.argmax_ch_idx_dict, avg_cal_mats
