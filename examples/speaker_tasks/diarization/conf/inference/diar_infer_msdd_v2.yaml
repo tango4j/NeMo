@@ -65,8 +65,8 @@ diarizer:
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
       # max_rp_threshold: 0.1 # Mixer6 optimal 0.1
       # max_rp_threshold: 0.03 # chime6 optimal 
-      max_rp_threshold: 0.25
-      sparse_search_volume: 15 # The higher the number, the more values will be examined with more time. 
+      max_rp_threshold: 0.3
+      sparse_search_volume: 10 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
       clustering_scale_index: 2 # The index of scale to be used for clustering. 
   
@@ -80,9 +80,9 @@ diarizer:
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
       diar_window_length: 50 # The length of split short sequence when split_infer is True.
       # global_average_mix_ratio: 0.85 # The ratio of the local average embedding to the global average embedding. 1.0 means only using local average embedding.
-      global_average_mix_ratio: 1.0 # The ratio of the local average embedding to the global average embedding. 1.0 means only using local average embedding.
+      global_average_mix_ratio: 0.7 # The ratio of the local average embedding to the global average embedding. 1.0 means only using local average embedding.
       global_average_window_count: 10 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
-      overlap_infer_spk_limit: 5 # If the estimated number of speakers are larger than this number, overlap speech is not estimated.
+      overlap_infer_spk_limit: 0.2 # If the proportion of speaking time is lower than this, ignore those speakers for overlap detection.
   
   asr:
     model_path: stt_en_conformer_ctc_large # Provide NGC cloud ASR model name. stt_en_conformer_ctc_* models are recommended for diarization purposes.

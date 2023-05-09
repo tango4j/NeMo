@@ -35,6 +35,7 @@ from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
 from tqdm import tqdm
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 
 # from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset
 from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset
@@ -178,7 +179,8 @@ class AffinityLoss(Loss, Typing):
         elem_affinity_loss = torch.abs(gt_affinity_margin - batch_affinity_mat_margin)
         positive_samples = gt_affinity * elem_affinity_loss
         negative_samples = (1-gt_affinity) * elem_affinity_loss
-        affinity_loss = (1-self.gamma) * positive_samples.sum() + self.gamma * negative_samples.sum()
+        # affinity_loss = (1-self.gamma) * positive_samples.sum() + self.gamma * negative_samples.sum()
+        affinity_loss = (1-self.gamma) * positive_samples.sum() 
         return affinity_loss
 
 
@@ -334,6 +336,9 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self._init_speaker_model()
             self.add_speaker_model_config(cfg)
             self.add_vad_model_config(cfg)
+            # self._init_diarizer_model(yaml_path=self.cfg_msdd_model.validation_ds.diarizer_yaml, 
+            #                           dev_manifest_path=self.cfg_msdd_model.validation_ds.manifest_filepath,
+            #                           emb_dir=self.cfg_msdd_model.validation_ds.emb_dir)
             self.loss = instantiate(self.cfg_msdd_model.loss)
             self.affinity_loss = AffinityLoss()
             self.alpha = self.cfg_msdd_model.loss.alpha
@@ -515,6 +520,14 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self.msdd._speaker_model.eval()
 
         self._speaker_params = self.cfg_msdd_model.diarizer.speaker_embeddings.parameters
+    
+    def _init_diarizer_model(self, yaml_path, dev_manifest_path, emb_dir):
+        """
+        """
+        self._diarizer_cfg = OmegaConf.load(yaml_path)
+        self._diarizer_cfg.diarizer.manifest_filepath = dev_manifest_path
+        self._diarizer_cfg.diarizer.out_dir = emb_dir
+        self._diarizer_model = NeuralDiarizer(cfg=self._diarizer_cfg, msdd_model=self).to(cfg.device)
 
     def __setup_dataloader_from_config(self, config):
         featurizer = WaveformFeaturizer(
@@ -667,7 +680,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             "clus_label_index": NeuralType(('B', 'T'), LengthsType()),
             "scale_mapping": NeuralType(('B', 'C', 'T'), LengthsType()),
             "ch_clus_mat": NeuralType(('B', 'C', 'C'), ProbsType()),
-            "targets": NeuralType(('B', 'T', 'C'), ProbsType()),
         }
 
     @property
@@ -1001,7 +1013,9 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             ms_seg_counts=ms_seg_counts,
             vad_probs_frame=vad_probs_frame,
         )
-        embs = embs.detach()
+        
+        if self._cfg.freeze_speaker_model:
+            embs = embs.detach()
 
         # Reshape the embedding vectors into multi-scale inputs
         ms_emb_seq, ms_ts_rep = self.get_ms_emb_fixed(embs=embs,    
@@ -1060,38 +1074,14 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         Forward pass for training.
         
         """        
-        
-        if self.multichannel_mixing and len(audio_signal.shape) > 2:
-            audio_signal = self._mix_to_mono(audio_signal_batch=audio_signal, 
-                                             audio_signal_len_batch=audio_signal_length, 
-                                             ch_clus_mat=ch_clus_mat, 
-                                             eval_mode=False)
-        
-        # Step 1: Multiscale Encoder 
-        processed_signal, processed_signal_length = self.msdd._speaker_model.preprocessor(
-            input_signal=audio_signal, length=audio_signal_length
+        ms_emb_seq, vad_probs, _ = self.forward_encoder(
+            audio_signal=audio_signal, 
+            audio_signal_length=audio_signal_length,
+            ms_seg_timestamps=ms_seg_timestamps,
+            ms_seg_counts=ms_seg_counts,
+            scale_mapping=scale_mapping,
+            ch_clus_mat=ch_clus_mat,
         )
-        
-        vad_probs_frame = self.forward_vad(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
-
-        embs, vad_probs = self.forward_multiscale(
-            processed_signal=processed_signal, 
-            processed_signal_len=processed_signal_length, 
-            ms_seg_timestamps=ms_seg_timestamps, 
-            ms_seg_counts=ms_seg_counts, 
-            vad_probs_frame=vad_probs_frame,
-        )
-        
-        if self._cfg.freeze_speaker_model:
-            embs = embs.detach()
-
-        # Reshape the embedding vectors into multi-scale inputs
-        ms_emb_seq, _ = self.get_ms_emb_fixed(embs=embs, 
-                                              scale_mapping=scale_mapping, 
-                                              ms_seg_counts=ms_seg_counts, 
-                                              ms_seg_timestamps=ms_seg_timestamps
-                                              )
-
 
         # Step 2: Clustering for initialization
         # Compute the cosine similarity between the input and the cluster average embeddings
@@ -1362,7 +1352,7 @@ class NeuralDiarizer(LightningModule):
     overlap detection in speaker diarization.
     """
 
-    def __init__(self, cfg: Union[DictConfig, NeuralDiarizerInferenceConfig]):
+    def __init__(self, cfg: Union[DictConfig, NeuralDiarizerInferenceConfig], msdd_model=None):
         super().__init__()
         self._cfg = cfg
         # Parameter settings for MSDD model
@@ -1376,7 +1366,11 @@ class NeuralDiarizer(LightningModule):
             'diar_eval_settings', [(0.25, False), (0.25, True)]
         )
             # 'diar_eval_settings', [(0.25, True), (0.25, False), (0.0, False)]
-        self.msdd_model = self._init_msdd_model(cfg)
+        if msdd_model is not None:
+            self.msdd_model = msdd_model
+            self._speaker_model = None
+        else:
+            self.msdd_model = self._init_msdd_model(cfg)
         # self.clus_diar_model = self._init_clus_diarizer(cfg)
         self.diar_window_length = cfg.diarizer.msdd_model.parameters.diar_window_length
         
@@ -1484,8 +1478,6 @@ class NeuralDiarizer(LightningModule):
         self.transfer_diar_params_to_model_params(self._cfg)
         self.msdd_model.emb_seq_test, self.msdd_model.ms_time_stamps, self.vad_probs_dict, self.msdd_model.clus_test_label_dict = self.clustering_embedding.prepare_cluster_embs_infer()
         self.msdd_model.pairwise_infer = True
-        # self.get_emb_clus_infer(self.clustering_embedding)
-        # preds_list, targets_list, signal_lengths_list 
         preds, targets, ms_ts = self.run_multiscale_decoder()
         thresholds = list(self._cfg.diarizer.msdd_model.parameters.sigmoid_threshold)
         for threshold in thresholds:

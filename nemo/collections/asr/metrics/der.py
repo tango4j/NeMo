@@ -163,6 +163,8 @@ def score_labels(
             _, hyp_labels = hypothesis
             if len(ref_labels.labels()) == len(hyp_labels.labels()):
                 correct_spk_count += 1
+            if verbose and len(ref_labels.labels()) != len(hyp_labels.labels()):
+                logging.info(f"Wrong Spk. Count with uniq_id:...{ref_key[-10:]}, Ref: {len(ref_labels.labels())}, Hyp: {len(hyp_labels.labels())}")
             uem = AUDIO_RTTM_MAP[ref_key].get('uem_filepath', None)
             if uem is not None:
                 uem = uem_timeline_from_file(uem_file=uem, uniq_name=ref_key)

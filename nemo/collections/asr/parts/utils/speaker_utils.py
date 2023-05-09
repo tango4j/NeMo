@@ -1615,21 +1615,24 @@ def generate_speaker_timestamps(
     # params['infer_mode'] ='only_logits'
     # params['infer_mode'] ='only_clus'
     # params['infer_mode'] ='vad_masked_logits'
-    params['infer_mode'] ='vad_masked_logits_force_1spk'
-    # params['infer_mode'] ='vad_masked_logits_force_1spk_clus_union'
+    # params['infer_mode'] ='vad_masked_logits_force_1spk'
+    # params['infer_mode'] ='vad_masked_logits_force_1spk_rel_thres'
+    params['infer_mode'] ='vad_masked_logits_force_1spk_clus_union'
     # params['infer_mode'] ='vad_masked_logits_force_1spk_clus_intersection'
     # params['infer_mode'] ='vad_masked_clus_logits_union'
     # params['infer_mode'] ='vad_masked_clus_logits_intersection'
-    
     # Disable the channels that are not active
     params['mask_spks_with_clus'] = True
     # params['mask_spks_with_clus'] = False
+    
+    spk_time_each = msdd_preds.sum(dim=0)/msdd_preds.sum()
     if params['mask_spks_with_clus']:
         active_spk_inds = np.unique(clus_labels[clus_labels >= 0])
         mask_ch_inds = torch.ones(msdd_preds.shape[1]).bool()
         mask_ch_inds[active_spk_inds] = False
         msdd_preds[:, mask_ch_inds] = 0.0
-    
+        
+
     if params['infer_mode'] == 'only_logits':
         msdd_preds_binary = (msdd_preds > threshold).int().cpu().numpy()
         speaker_assign_mat = msdd_preds_binary
@@ -1640,15 +1643,30 @@ def generate_speaker_timestamps(
         msdd_preds_masked = np.zeros_like(msdd_preds)
         if not params['infer_overlap']:
             max_overlap_count = 1
-        msdd_preds_topk_per_seg = get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num=model_spk_num)
-        msdd_preds_top1_per_seg = get_top_k_for_each_row(msdd_preds, max_overlap_count=1, model_spk_num=model_spk_num)
+        else:
+            max_overlap_count = min(active_spk_inds.shape[0], max_overlap_count) # If there is one speaker, then max_overlap_count = 1
+        msdd_preds_topk_per_seg, logit_gap = get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num=model_spk_num)
+        msdd_preds_top1_per_seg, _ = get_top_k_for_each_row(msdd_preds, max_overlap_count=1, model_spk_num=model_spk_num)
+        
         if not torch.all((msdd_preds_topk_per_seg > 0.0).sum(axis=1) == max_overlap_count):
             raise ValueError(f"Top-k per seg operation with max_overlap_count: {max_overlap_count} is not correct")
+        msdd_preds_topk_per_seg[:, spk_time_each < params['overlap_infer_spk_limit']] = 0.0
         msdd_preds_masked[msdd_preds_topk_per_seg >= threshold] = 1.0
         msdd_preds_masked[vad_mask == False, :] = 0 # Mask out non-vad frames
         
         msdd_preds_masked = msdd_preds_masked.astype(bool)
-        if 'force_1spk' in params['infer_mode']:
+        if 'rel_thres' in params['infer_mode']:
+            speaker_assign_mat = msdd_preds_masked
+            msdd_preds_masked_one = np.zeros_like(msdd_preds)
+            msdd_preds_topk_per_seg[logit_gap < threshold] = 0.0
+            msdd_preds_masked_ovl = msdd_preds_topk_per_seg.cpu().numpy()
+            msdd_preds_masked_one[msdd_preds_top1_per_seg > 0.0] = 1.0
+            if not np.all(msdd_preds_masked_one.sum(axis=1) == 1) == True:
+                raise ValueError(f"msdd_preds_masked_one is not correct")
+            speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
+            if params['infer_mode'] == 'vad_masked_logits_force_1spk_rel_thres':
+                speaker_assign_mat[vad_mask==False, :] = 0
+        elif 'force_1spk' in params['infer_mode']:
             speaker_assign_mat = msdd_preds_masked
             msdd_preds_masked_one = np.zeros_like(msdd_preds)
             msdd_preds_masked_ovl = np.zeros_like(msdd_preds)
@@ -1656,11 +1674,11 @@ def generate_speaker_timestamps(
             msdd_preds_masked_one[msdd_preds_top1_per_seg > 0.0] = 1.0
             if not np.all(msdd_preds_masked_one.sum(axis=1) == 1) == True:
                 raise ValueError(f"msdd_preds_masked_one is not correct")
-            speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
             if params['infer_mode'] == 'vad_masked_logits_force_1spk':
+                speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
                 speaker_assign_mat[vad_mask==False, :] = 0
             elif params['infer_mode'] == 'vad_masked_logits_force_1spk_clus_union':
-                speaker_assign_mat = np.logical_or(speaker_assign_mat, clustering_assign_mat).astype(int)
+                speaker_assign_mat = np.logical_or(clustering_assign_mat, msdd_preds_masked_ovl).astype(int)
                 speaker_assign_mat[vad_mask==False, :] = 0
             elif params['infer_mode'] == 'vad_masked_logits_force_1spk_clus_intersection':
                 speaker_assign_mat = np.logical_and(speaker_assign_mat, clustering_assign_mat).astype(int)
@@ -1682,12 +1700,15 @@ def generate_speaker_timestamps(
     return speaker_labels_total
 
 def get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num):
-    _, moc_inds = torch.topk(msdd_preds, k=max_overlap_count, dim=1)
+    topk_vals, moc_inds = torch.topk(msdd_preds, k=max_overlap_count, dim=1)
     top_k_mask = F.one_hot(moc_inds.t().flatten(), num_classes=model_spk_num)
     if max_overlap_count > 1:
         top_k_mask = top_k_mask.reshape(-1, msdd_preds.shape[0], model_spk_num).sum(dim=0)
+        logit_gap = topk_vals[:, 1]/topk_vals[:, 0]
+    else:
+        logit_gap = torch.zeros_like(topk_vals[:, 0])
     masked_msdd_preds = top_k_mask * msdd_preds
-    return masked_msdd_preds
+    return masked_msdd_preds, logit_gap
     
 def generate_speaker_assignment_intervals(speaker_assign_mat, timestamps):
     model_spk_num = speaker_assign_mat.shape[-1]

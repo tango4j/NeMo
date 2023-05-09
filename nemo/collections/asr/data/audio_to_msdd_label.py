@@ -601,10 +601,10 @@ class _AudioMSDDTrainDataset(Dataset):
                 offset = 0
         uniq_id = self.get_uniq_id_with_range(sample)
         ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(uniq_id=uniq_id, 
-                                                                      offset=offset,
-                                                                      duration=duration,
-                                                                      feat_per_sec=self.feat_per_sec, 
-                                                                      min_subsegment_duration=self.scale_dict[self.scale_n-1][0])
+                                                                    offset=offset,
+                                                                    duration=duration,
+                                                                    feat_per_sec=self.feat_per_sec, 
+                                                                    min_subsegment_duration=self.scale_dict[self.scale_n-1][0])
         
         scale_mapping = torch.stack(get_argmin_mat(ms_seg_timestamps))
         targets, clus_label_index = self.parse_rttm_for_ms_targets(uniq_id=uniq_id, 

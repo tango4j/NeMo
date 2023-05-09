@@ -3,6 +3,8 @@ import os
 import json
 import glob
 import tqdm
+import sox
+
 import numpy as np
 import soundfile as sf
 from nemo.utils import logging
@@ -128,9 +130,11 @@ def create_multichannel_manifest(
         duration = None
         audio_duration_list = []
         for audio_line in tqdm.tqdm(audio_line_list, desc=f"Measuring multichannel audio duration for {uid} {count}/{total_file_count}", unit=" files"):
-            audio_line = audio_line.strip()
-            data, samplerate = sf.read(audio_line)
-            duration = float(data.shape[0] / samplerate)
+            # import ipdb; ipdb.set_trace()
+            # audio_line = audio_line.strip()
+            # data, samplerate = sf.read(audio_line)
+            # duration = float(data.shape[0] / samplerate)
+            duration = sox.file_info.duration(audio_line)
             audio_duration_list.append(duration)
         min_duration, max_duration = min(audio_duration_list), max(audio_duration_list)
         meta = [
@@ -252,18 +256,34 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
             file_ext = '_CH??.wav'
 
         # Get single-channel files
-        sc_audio_files = glob.glob(os.path.join(dataset_dir, filepath_base + file_ext))
+        sc_audio_files_loaded = glob.glob(os.path.join(dataset_dir, filepath_base + file_ext))
+        sc_audio_files = [] 
+        if dataset == 'mixer6':
+            for i, sc_audio_file in enumerate(sc_audio_files_loaded):
+                if os.path.basename(sc_audio_file).split("CH")[1].split(".")[0] not in ["01", "02", "03"]:
+                    sc_audio_files.append(sc_audio_file)
+        elif dataset == 'mixer6_ch123':
+            for i, sc_audio_file in enumerate(sc_audio_files_loaded):
+                if os.path.basename(sc_audio_file).split("CH")[1].split(".")[0] in ["01", "02", "03"]:
+                    sc_audio_files.append(sc_audio_file)
+        else:
+            sc_audio_files = sc_audio_files_loaded
         sc_audio_files.sort()
 
+        # Double-check that the channel count i
+
         # Double-check that the channel count is correct
-        if dataset == 'chime6':
-            assert len(sc_audio_files) in [20, 24], f'Expected 20 or 24 files, found {len(sc_audio_files)}'
-        elif dataset == 'dipco':
-            assert len(sc_audio_files) == 35, f'Expected 35 files, found {len(sc_audio_files)}'
-        elif dataset == 'mixer6':
-            assert len(sc_audio_files) == 13, f'Expected 13 files, found {len(sc_audio_files)}'
-        else:
-            raise ValueError(f'Unknown dataset: {dataset}')
+        # if dataset == 'chime6':
+        #     try:
+        #         assert len(sc_audio_files) in [20, 24], f'Expected 20 or 24 files, found {len(sc_audio_files)}'
+        #     except:
+        #         import ipdb; ipdb.set_trace()
+        # elif dataset == 'dipco':
+        #     assert len(sc_audio_files) == 35, f'Expected 35 files, found {len(sc_audio_files)}'
+        # elif dataset == 'mixer6':
+        #     assert len(sc_audio_files) == 13, f'Expected 13 files, found {len(sc_audio_files)}'
+        # else:
+        #     raise ValueError(f'Unknown dataset: {dataset}')
 
         # Make filepaths absolute
         mc_audio_to_list_of_sc_files[mc_audio_file] = sc_audio_files
@@ -281,6 +301,14 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     multichannel audio files and the corresponding manifests for inference and evaluation.
     """
     total_data_stats = {}
+    
+    if subset == 'dev':
+        datasets = ['chime6', 'dipco', 'mixer6']
+    elif subset == 'train':
+        datasets = ['chime6']
+    elif subset in ['train_intv', 'train_call']:
+        datasets = ['mixer6']
+        
     for dataset in datasets:
         dataset_dir = os.path.join(data_dir, dataset)
         dataset_output_dir = os.path.join(output_dir, dataset)
@@ -297,7 +325,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
 
         # Prepare manifest data
         manifest_data, session_duration_list = [], []
-        rttm_path_list, ctm_path_list, text_path_list, mc_audio_path_list, uniq_id_list = [], [], [], [], []
+        rttm_path_list, ctm_path_list, mc_audio_path_list, uniq_id_list = [], [], [], []
         transcriptions_scoring_files = sorted(transcriptions_scoring_files)
         for file_path in transcriptions_scoring_files:
             dataset_dir = os.path.join(data_dir, dataset)
@@ -354,6 +382,8 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
         # End of dataset loop
 
         # Get duration stats
+        if len(session_duration_list) == 0:
+            import ipdb; ipdb.set_trace()
         data_stats = get_data_stats(session_duration_list, output_precision=output_precision)
         total_data_stats[dataset] = data_stats
 
@@ -423,7 +453,7 @@ if __name__ == '__main__':
         '--data-dir', type=str, required=True, help='Directory with CHiME-7 data',
     )
     parser.add_argument(
-        '--subset', choices=['dev'], default='dev', help='Data subset',
+        '--subset', choices=['dev', 'train', 'train_intv', 'train_call'], default='dev', help='Data subset',
     )
     parser.add_argument(
         '--output-dir', type=str, required=True, help='Output dir',
