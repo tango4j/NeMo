@@ -15,6 +15,7 @@ from gss.core.enhancer import get_enhancer
 from lhotse import Recording, SupervisionSet, load_manifest_lazy
 from lhotse.audio import set_audio_duration_mismatch_tolerance
 from lhotse.cut import CutSet
+from lhotse.utils import fastcopy
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
