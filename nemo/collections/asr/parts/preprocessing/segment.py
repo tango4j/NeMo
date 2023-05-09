@@ -353,9 +353,14 @@ class AudioSegment(object):
                 # Check the dimensions match
                 if len(a_samples) != len(samples):
                     # import ipdb; ipdb.set_trace()
-                    raise RuntimeError(
-                        f'Loaded samples need to have identical length: {a_samples.shape} != {sample.shape}'
+                    logging.warning(
+                        f'Loaded samples have different lengths: {a_samples.shape} != {samples.shape}, using zero-padding to match the shorter one.'
                     )
+                    # Zero-pad the shorter signal
+                    if len(a_samples) < len(samples):
+                        a_samples = np.pad(a_samples, ((0, len(samples) - len(a_samples)), (0, 0)), 'constant')
+                    else:
+                        samples = np.pad(samples, ((0, len(a_samples) - len(samples)), (0, 0)), 'constant')
 
                 # Concatenate along channel dimension
                 samples = np.concatenate([samples, a_samples], axis=1)

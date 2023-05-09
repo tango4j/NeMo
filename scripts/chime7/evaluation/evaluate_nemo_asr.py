@@ -1,4 +1,4 @@
-# script from https://github.com/espnet/espnet/blob/master/egs2/chime7_task1/asr1/local/da_wer_scoring.py
+# script adapted from https://github.com/espnet/espnet/blob/master/egs2/chime7_task1/asr1/local/da_wer_scoring.py
 import argparse
 import glob
 import json
@@ -412,7 +412,7 @@ def score(
 
     h_sess2segs = get_sess2segs(hyps)
     r_sess2segs = get_sess2segs(refs)
-
+    
     if not (h_sess2segs.keys() == r_sess2segs.keys()):
         print(
             "Hypothesis JSON does not have all sessions as in the reference JSONs."
@@ -521,11 +521,11 @@ def parse_nemo_json(json_file):
             line = line.strip()
             if not line:
                 continue
-            entry = json.load(f)
+            entry = json.loads(line)
             audio_file = entry["audio_filepath"]
             if isinstance(audio_file, list):
                 audio_file = audio_file[0]
-            session_id = audio_file.split("_")[0]
+            session_id = Path(audio_file).stem.split("_")[0]
             hyp_segs.append(
                 {
                     "speaker": entry["speaker"],
@@ -551,7 +551,7 @@ if __name__ == "__main__":
         usage="%(prog)s [options]",
     )
     parser.add_argument(
-        "-s,--hyp_folder",
+        "-s", "--hyp_folder",
         type=str,
         help="Folder containing the JSON files relative to the system output. "
         "One file for each scenario: chime6.json, dipco.json and mixer6.json. "
@@ -561,7 +561,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-r,--dasr_root",
+        "-r", "--dasr_root",
         type=str,
         default="dev",
         help="Folder containing the main folder of CHiME-7 DASR dataset.",
@@ -570,7 +570,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-p,--partition",
+        "-p", "--partition",
         type=str,
         default="dev",
         help="Which dataset partition is being evaluated, dev or eval.",
@@ -579,7 +579,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-o,--output_folder",
+        "-o", "--output_folder",
         type=str,
         metavar="STR",
         dest="output_folder",
@@ -588,7 +588,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-d,--diarization",
+        "-d", "--diarization",
         type=int,
         default=1,
         required=False,
@@ -600,7 +600,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-f,--falign",
+        "-f", "--falign",
         type=str,
         default="",
         required=False,
@@ -610,7 +610,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-c,--collar",
+        "-c", "--collar",
         type=int,
         default=500,
         required=False,
@@ -621,9 +621,9 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-i,--ignore_missing",
+        "-i", "--ignore_missing",
         type=int,
-        default=0,
+        default=1,
         metavar="INT",
         required=False,
         dest="ignore_missing",
@@ -643,7 +643,7 @@ if __name__ == "__main__":
     scenarios = ["chime6", "dipco", "mixer6"]
     Path(args.output_folder).mkdir(exist_ok=True)
     for indx, scenario in enumerate(scenarios):
-        hyp_json = os.path.join(args.hyp_folder, scenario + ".json")
+        # hyp_json = os.path.join(args.hyp_folder, scenario + ".json")
         hyp_json = glob.glob(
             os.path.join(
                 args.hyp_folder,
