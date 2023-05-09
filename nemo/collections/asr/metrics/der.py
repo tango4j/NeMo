@@ -171,6 +171,8 @@ def score_labels(
 
         spk_count_acc = correct_spk_count / len(all_reference)
         DER = abs(metric)
+        if metric['total'] == 0:
+            raise ValueError(f"Total evaluation time is 0. Abort.")
         CER = metric['confusion'] / metric['total']
         FA = metric['false alarm'] / metric['total']
         MISS = metric['missed detection'] / metric['total']

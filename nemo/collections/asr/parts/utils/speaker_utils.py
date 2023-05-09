@@ -493,7 +493,6 @@ def perform_clustering_embs(
         scale_map = scale_mapping[uniq_id]
         base_seg_inds = torch.where((scale_map[base_scale_idx][1:] ==  scale_map[base_scale_idx][:-1] ) == False)[0]
 
-        logging.info(f"Starting clustering for {uniq_id}")
         ms_silsp_embs = embeddings[uniq_id][:, :(base_scale_idx+1), :][base_seg_inds, :, :]
         ms_ts = time_stamps[uniq_id][base_scale_idx][base_seg_inds]/100
         vad_prob_mat = vad_probs[uniq_id][base_seg_inds]
@@ -507,7 +506,6 @@ def perform_clustering_embs(
         else:
             num_speakers = -1
         
-        logging.info(f"Launching clustering for {uniq_id}")
         cluster_labels = speaker_clustering.forward_embs(
                 ms_embs=ms_embs,
                 oracle_num_speakers=int(num_speakers),
@@ -516,9 +514,7 @@ def perform_clustering_embs(
                 max_rp_threshold=float(clustering_params.max_rp_threshold),
                 sparse_search_volume=int(clustering_params.sparse_search_volume),
             )
-        logging.info(f"uniq_id:{uniq_id} Estimated number of speakers: {cluster_labels.max()+1}")
 
-        logging.info(f"Converting clustering to the finest scale for {uniq_id}")
         # Convert cluster labels to the finest scale
         clus_labels_infer_org_scale = torch.zeros(scale_map[base_scale_idx].max()+1) 
         clus_labels_infer_org_scale[:vad_decision.shape[0]][vad_decision] = (cluster_labels + 1).float().to(ms_embs.device)
@@ -1614,15 +1610,20 @@ def generate_speaker_timestamps(
     vad_mask = (clus_labels > -1)
     speaker_assign_mat = np.zeros_like(msdd_preds)
     clustering_assign_mat = np.zeros_like(msdd_preds)
-    
+   
+    params['infer_overlap'] = True
     # params['infer_mode'] ='only_logits'
     # params['infer_mode'] ='only_clus'
     # params['infer_mode'] ='vad_masked_logits'
-    params['infer_mode'] ='vad_masked_clus_logits_union'
+    params['infer_mode'] ='vad_masked_logits_force_1spk'
+    # params['infer_mode'] ='vad_masked_logits_force_1spk_clus_union'
+    # params['infer_mode'] ='vad_masked_logits_force_1spk_clus_intersection'
+    # params['infer_mode'] ='vad_masked_clus_logits_union'
     # params['infer_mode'] ='vad_masked_clus_logits_intersection'
     
     # Disable the channels that are not active
     params['mask_spks_with_clus'] = True
+    # params['mask_spks_with_clus'] = False
     if params['mask_spks_with_clus']:
         active_spk_inds = np.unique(clus_labels[clus_labels >= 0])
         mask_ch_inds = torch.ones(msdd_preds.shape[1]).bool()
@@ -1637,20 +1638,43 @@ def generate_speaker_timestamps(
     elif params['infer_mode'].startswith('vad_masked'):
         clustering_assign_mat[vad_mask, clus_labels[vad_mask]] = 1
         msdd_preds_masked = np.zeros_like(msdd_preds)
-        msdd_preds[msdd_preds < threshold] = 0.0
         if not params['infer_overlap']:
             max_overlap_count = 1
-        msdd_preds = get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num)
+        msdd_preds_topk_per_seg = get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num=model_spk_num)
+        msdd_preds_top1_per_seg = get_top_k_for_each_row(msdd_preds, max_overlap_count=1, model_spk_num=model_spk_num)
+        if not torch.all((msdd_preds_topk_per_seg > 0.0).sum(axis=1) == max_overlap_count):
+            raise ValueError(f"Top-k per seg operation with max_overlap_count: {max_overlap_count} is not correct")
+        msdd_preds_masked[msdd_preds_topk_per_seg >= threshold] = 1.0
         msdd_preds_masked[vad_mask == False, :] = 0 # Mask out non-vad frames
         
-        msdd_preds_masked[msdd_preds > threshold] = 1.0
         msdd_preds_masked = msdd_preds_masked.astype(bool)
-        if params['infer_mode'] == 'vad_masked_logits':
+        if 'force_1spk' in params['infer_mode']:
             speaker_assign_mat = msdd_preds_masked
-        elif params['infer_mode'] == 'vad_masked_clus_logits_union':
-            speaker_assign_mat = np.logical_or(clustering_assign_mat, msdd_preds_masked).astype(int)
-        elif params['infer_mode'] == 'vad_masked_clus_logits_intersection':
-            speaker_assign_mat = np.logical_and(clustering_assign_mat, msdd_preds_masked).astype(int)
+            msdd_preds_masked_one = np.zeros_like(msdd_preds)
+            msdd_preds_masked_ovl = np.zeros_like(msdd_preds)
+            msdd_preds_masked_ovl[msdd_preds_topk_per_seg >= threshold] = 1.0
+            msdd_preds_masked_one[msdd_preds_top1_per_seg > 0.0] = 1.0
+            if not np.all(msdd_preds_masked_one.sum(axis=1) == 1) == True:
+                raise ValueError(f"msdd_preds_masked_one is not correct")
+            speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
+            if params['infer_mode'] == 'vad_masked_logits_force_1spk':
+                speaker_assign_mat[vad_mask==False, :] = 0
+            elif params['infer_mode'] == 'vad_masked_logits_force_1spk_clus_union':
+                speaker_assign_mat = np.logical_or(speaker_assign_mat, clustering_assign_mat).astype(int)
+                speaker_assign_mat[vad_mask==False, :] = 0
+            elif params['infer_mode'] == 'vad_masked_logits_force_1spk_clus_intersection':
+                speaker_assign_mat = np.logical_and(speaker_assign_mat, clustering_assign_mat).astype(int)
+                speaker_assign_mat[vad_mask==False, :] = 0
+            
+        elif params['infer_mode'] == 'vad_masked_logits':
+            speaker_assign_mat = msdd_preds_masked
+        elif 'clus_logits' in params['infer_mode']:
+            if params['infer_mode'] == 'vad_masked_clus_logits_union':
+                speaker_assign_mat = np.logical_or(clustering_assign_mat, msdd_preds_masked).astype(int)
+            elif params['infer_mode'] == 'vad_masked_clus_logits_intersection':
+                speaker_assign_mat = np.logical_and(clustering_assign_mat, msdd_preds_masked).astype(int)
+        else:
+            raise ValueError(f"Unknown infer_mode: {params['infer_mode']}")
     
     timestamps = timestamps.cpu().numpy()/100.0
     spk_ts = generate_speaker_assignment_intervals(speaker_assign_mat=speaker_assign_mat, timestamps=timestamps)

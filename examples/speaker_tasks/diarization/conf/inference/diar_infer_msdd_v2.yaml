@@ -21,16 +21,24 @@ diarizer:
   ignore_overlap: True # Consider or ignore overlap segments while scoring
   channel_selector: ${channel_selector}
   # multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-  # multi_channel_mode: 'mc_vad_cc_mixer' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-  multi_channel_mode: null 
+  multi_channel_mode: 'mc_vad_cc_mixer' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
+  # multi_channel_mode: null 
   # 'mc_vad_cc_mixer'
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
     external_vad_manifest: null # This option is provided to use external vad and provide its speech activity labels for speaker embeddings extraction. Only one of model_path or external_vad_manifest should be set
 
     parameters: # Tuned parameters for CH109 (using the 11 multi-speaker sessions as dev set) 
-      window_length_in_sec: 0.15  # Window length in sec for VAD context input 
       shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
+      top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
+      use_external_vad: True
+      frame_vad_threshold: 0.07
+      # frame_vad_threshold: 0.03
+      # frame_vad_threshold: 0.5
+      # frame_vad_threshold: 0.1
+      # use_external_vad: False
+      # frame_vad_threshold: 0.01
+      window_length_in_sec: 0.15  # Window length in sec for VAD context input 
       smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
       onset: 0.1 # Onset threshold for detecting the beginning and end of a speech 
@@ -40,13 +48,12 @@ diarizer:
       min_duration_on: 0 # Threshold for small non_speech deletion
       min_duration_off: 0.2 # Threshold for short speech segment deletion
       filter_speech_first: True 
-      top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
 
   speaker_embeddings:
     model_path: titanet_large # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
     parameters:
-      window_length_in_sec: [1.5,0.75,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
-      shift_length_in_sec: [0.75,0.375,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
+      window_length_in_sec: [3.0,1.5,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
+      shift_length_in_sec: [1.5,0.75,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
       multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
       interpolate_scale: 0.1
       save_embeddings: True # If True, save speaker embeddings in pickle format. This should be True if clustering result is used for other models, such as `msdd_model`.
@@ -56,9 +63,12 @@ diarizer:
       oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
       max_num_speakers: 4 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
-      max_rp_threshold: 0.05 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
-      sparse_search_volume: 60 # The higher the number, the more values will be examined with more time. 
+      # max_rp_threshold: 0.1 # Mixer6 optimal 0.1
+      # max_rp_threshold: 0.03 # chime6 optimal 
+      max_rp_threshold: 0.25
+      sparse_search_volume: 15 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
+      clustering_scale_index: 2 # The index of scale to be used for clustering. 
   
   msdd_model:
     model_path: diar_msdd_telephonic # .nemo local model path or pretrained model name for multiscale diarization decoder (MSDD)
@@ -69,6 +79,9 @@ diarizer:
       seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
       diar_window_length: 50 # The length of split short sequence when split_infer is True.
+      # global_average_mix_ratio: 0.85 # The ratio of the local average embedding to the global average embedding. 1.0 means only using local average embedding.
+      global_average_mix_ratio: 1.0 # The ratio of the local average embedding to the global average embedding. 1.0 means only using local average embedding.
+      global_average_window_count: 10 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
       overlap_infer_spk_limit: 5 # If the estimated number of speakers are larger than this number, overlap speech is not estimated.
   
   asr:

@@ -1522,7 +1522,6 @@ class SpeakerClustering(torch.nn.Module):
     ) -> torch.LongTensor:
 
         embs = ms_embs.mean(dim=1)
-        logging.info(f"Calculating cos sim mat for embs.shape: {embs.shape}")
         mat = getCosAffinityMatrix(embs)
         
         nmesc = NMESC(
@@ -1539,7 +1538,6 @@ class SpeakerClustering(torch.nn.Module):
             device=self.device,
         )
 
-        logging.info(f"Getting affiniy graph mat for mat.shape: {mat.shape}")
         # If there are less than `min_samples_for_nmesc` segments, est_num_of_spk is 1.
         if mat.shape[0] > self.min_samples_for_nmesc:
             est_num_of_spk, p_hat_value = nmesc.forward()
@@ -1558,7 +1556,6 @@ class SpeakerClustering(torch.nn.Module):
         else:
             n_clusters = int(est_num_of_spk.item())
 
-        logging.info(f"Running Spectral Clustering for n_clusters: {n_clusters}")
         spectral_model = SpectralClustering(
             n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=self.device
         )

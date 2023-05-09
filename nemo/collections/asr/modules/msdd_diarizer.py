@@ -127,6 +127,7 @@ class MSDD_module(NeuralModule, Exportable):
     ):
         super().__init__()
         self._speaker_model = None
+        self._vad_model = None
         self.batch_size: int = 1
         self.length: int = 50
         self.emb_dim: int = emb_dim

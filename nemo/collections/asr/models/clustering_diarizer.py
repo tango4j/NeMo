@@ -668,11 +668,9 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             if global_scale_mapping is not None:
                 self.scale_mapping[uniq_id] = global_scale_mapping
             timestamps_in_scales = []
-            logging.info(f"Calculating unique timestamps in scales for {uniq_id}")
             for scale_idx in range(ms_ts.shape[0]):
                 unique_ts = torch.vstack((torch.unique(ms_ts[scale_idx][:, 0]), torch.unique(ms_ts[scale_idx][:, 1]))).t()
                 timestamps_in_scales.append(unique_ts)
-            logging.info(f"Launching argmin_mat_large for {uniq_id}")
             global_scale_mapping = get_argmin_mat_large(timestamps_in_scales)
             self.scale_mapping[uniq_id] = global_scale_mapping
         

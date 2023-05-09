@@ -1758,7 +1758,6 @@ class MultichannelVADProcessor:
         frame_dict = self.load_frame_dict_from_files(frame_vad_dir, audio_rttm_map)
         frame_mc_tensor_dict = self.stack_list_frames(frame_dict)
         if self.channel_cluster:
-            print("Merge frames using channel clustering...")
             frame_mc_tensor_dict, avg_cal_mats = self.merge_channel_clustered_frames(frame_mc_tensor_dict, method)
         else:
             avg_cal_mats = None
