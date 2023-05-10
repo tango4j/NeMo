@@ -429,6 +429,9 @@ def transcribe_partial_audio(
                     logits, logits_len, return_hypotheses=return_hypotheses,
                 )
                 
+                if isinstance(current_hypotheses, tuple) and len(current_hypotheses) == 2:
+                    current_hypotheses = current_hypotheses[0]
+
                 if return_hypotheses:
                     # dump log probs per file
                     for idx in range(logits.shape[0]):
@@ -436,8 +439,6 @@ def transcribe_partial_audio(
                         if current_hypotheses[idx].alignments is None:
                             current_hypotheses[idx].alignments = current_hypotheses[idx].y_sequence
                 
-                if isinstance(current_hypotheses, tuple) and len(current_hypotheses) == 2:
-                    current_hypotheses = current_hypotheses[0]
                 hypotheses += current_hypotheses
 
             del logits

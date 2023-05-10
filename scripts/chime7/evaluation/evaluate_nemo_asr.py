@@ -392,14 +392,20 @@ def score(
     refs = []
     for j in reference_jsons:
         with open(j, "r") as f:
-            refs.extend(json.load(f))
+            segments = json.load(f)
+            if scenario_tag == "mixer6":
+                for i in range(len(segments)):
+                    if "session_id" not in segments[i]:
+                        segments[i]["session_id"] = Path(j).stem # add session id if not exists
+            refs.extend(segments)
 
     # with open(hyp_json, "r") as f:
     #     hyps = json.load(f)
 
+    split_tag = "_" if scenario_tag == "chime6" else None
     hyps = []
     for j in hyp_json:
-        hyps.extend(parse_nemo_json(j))
+        hyps.extend(parse_nemo_json(j, split_tag=split_tag))
 
     def get_sess2segs(segments):
         out = {}
@@ -412,7 +418,9 @@ def score(
 
     h_sess2segs = get_sess2segs(hyps)
     r_sess2segs = get_sess2segs(refs)
-    
+    if "S34" in r_sess2segs and scenario_tag == "dipco":
+        r_sess2segs.pop("S34")  # this session is not used since broken audio
+
     if not (h_sess2segs.keys() == r_sess2segs.keys()):
         print(
             "Hypothesis JSON does not have all sessions as in the reference JSONs."
@@ -420,6 +428,9 @@ def score(
                 set(h_sess2segs.keys()).difference(set(r_sess2segs.keys()))
             )
         )
+        print(h_sess2segs.keys())
+        print(r_sess2segs.keys())
+        import ipdb; ipdb.set_trace()
         raise RuntimeError
 
     all_sess_stats = []
@@ -514,7 +525,7 @@ def score(
 
     return scenario_wise_df, all_sess_stats, all_spk_stats
 
-def parse_nemo_json(json_file):
+def parse_nemo_json(json_file, split_tag=None):
     hyp_segs = []
     with open(json_file, "r") as f:
         for line in f.readlines():
@@ -522,17 +533,23 @@ def parse_nemo_json(json_file):
             if not line:
                 continue
             entry = json.loads(line)
-            audio_file = entry["audio_filepath"]
-            if isinstance(audio_file, list):
-                audio_file = audio_file[0]
-            session_id = Path(audio_file).stem.split("_")[0]
+            if "session_id" not in entry:
+                audio_file = entry["audio_filepath"]
+                if isinstance(audio_file, list):
+                    audio_file = audio_file[0]
+                session_id = Path(audio_file).stem
+                if "_CH" in session_id:
+                    session_id = session_id.split("_CH")[0]
+                if split_tag:
+                    session_id = session_id.split(split_tag)[0]
+                entry["session_id"] = session_id
             hyp_segs.append(
                 {
                     "speaker": entry["speaker"],
                     "start_time": entry["start_time"],
                     "end_time": entry["end_time"],
                     "words": entry["pred_text"],
-                    "session_id": session_id,
+                    "session_id": entry["session_id"],
                 }
             )
     return hyp_segs
@@ -640,7 +657,7 @@ if __name__ == "__main__":
     spk_wise_df = []
     sess_wise_df = []
     scenario_wise_df = []
-    scenarios = ["chime6", "dipco", "mixer6"]
+    scenarios = [ "chime6", "dipco", "mixer6"]
     Path(args.output_folder).mkdir(exist_ok=True)
     for indx, scenario in enumerate(scenarios):
         # hyp_json = os.path.join(args.hyp_folder, scenario + ".json")
