@@ -402,7 +402,7 @@ def score(
     # with open(hyp_json, "r") as f:
     #     hyps = json.load(f)
 
-    split_tag = "_" if scenario_tag == "chime6" else None
+    split_tag = "_" if scenario_tag != "mixer6" else None
     hyps = []
     for j in hyp_json:
         hyps.extend(parse_nemo_json(j, split_tag=split_tag))
