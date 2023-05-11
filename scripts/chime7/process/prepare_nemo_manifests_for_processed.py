@@ -16,7 +16,9 @@ def main(data_dir: str, audio_type: str = 'flac'):
         raise ValueError(f'Unknown setup: {data_dir}')
 
     # Make sure we know subset
-    if 'dev' in data_dir:
+    if 'dev' in data_dir and 'eval' in data_dir:
+        raise ValueError(f'Unknown subset: both dev and eval are in {data_dir}')
+    elif 'dev' in data_dir:
         subset = 'dev'
     elif 'eval' in data_dir:
         subset = 'eval'
@@ -35,7 +37,7 @@ def main(data_dir: str, audio_type: str = 'flac'):
         if scenario == 'mixer6':
             # session_id has '-' in it
             parts = filename.replace(f'.{audio_type}', '').split('-')
-            session_id = '-'.join(parts[0:-2])
+            session_id = parts[0] # keep only session, drop dev and mdm
             speaker_id = parts[-2]
             start_end_time = parts[-1]
         else:
