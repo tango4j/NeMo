@@ -38,8 +38,7 @@ Run the following
 SCENARIOS="chime6" # run only on chime6
 GPU_ID=1 # use only GPU 1
 DIARIZATION_CONFIG=system_vA01
-DIARIZATION_BASE_DIR=/home/ajukic/scratch/chime7/chime7_diar_results
-/path/to/diarization_outputs
+DIARIZATION_BASE_DIR=/path/to/diarization_outputs
 
 bash run_processing.sh $SCENARIOS $GPU_ID $DIARIZATION_CONFIG $DIARIZATION_BASE_DIR
 ```
