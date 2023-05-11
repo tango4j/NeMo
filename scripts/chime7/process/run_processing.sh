@@ -24,9 +24,6 @@ echo "************************************************************"
 espnet_root= # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
 chime7_root= # For example, /data/chime7/chime7_official_cleaned
 
-espnet_root=${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
-chime7_root=/data/chime7/chime7_official_cleaned
-
 if [ -z "$espnet_root" ]
 then
     echo "ERROR: espnet_root variable is not set"
