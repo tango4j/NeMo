@@ -156,7 +156,7 @@ if __name__ == '__main__':
         '--enhancer-impl',
         type=str,
         choices=ENHANCER_IMPL_CHOICES,
-        default='nemo',
+        default='nemo_v1',
         help='Implementation of the enhancer, e.g., gss',
     )
     parser.add_argument(
@@ -179,9 +179,8 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--use-garbage-class',
-        default=True,
-        action=argparse.BooleanOptionalAction,
-        help='Use garbage class. Default: True',
+        action='store_true',
+        help='Use garbage class. Default: False',
     )
     parser.add_argument(
         '--min-segment-length', type=float, default=0.0,
