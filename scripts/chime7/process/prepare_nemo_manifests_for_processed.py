@@ -16,7 +16,9 @@ def main(data_dir: str, audio_type: str = 'flac'):
         raise ValueError(f'Unknown setup: {data_dir}')
 
     # Make sure we know subset
-    if 'dev' in data_dir:
+    if 'dev' in data_dir and 'eval' in data_dir:
+        raise ValueError(f'Unknown subset: both dev and eval are in {data_dir}')
+    elif 'dev' in data_dir:
         subset = 'dev'
     elif 'eval' in data_dir:
         subset = 'eval'
@@ -32,7 +34,14 @@ def main(data_dir: str, audio_type: str = 'flac'):
         # Each audio files is named session_id-speaker_id-start_time-end_time.{audio_type}
         # with start and end times in 1/100 seconds
         filename = os.path.basename(audio_file)
-        session_id, speaker_id, start_end_time = filename.replace(f'.{audio_type}', '').split('-')
+        if scenario == 'mixer6':
+            # session_id has '-' in it
+            parts = filename.replace(f'.{audio_type}', '').split('-')
+            session_id = parts[0] # keep only session, drop dev and mdm
+            speaker_id = parts[-2]
+            start_end_time = parts[-1]
+        else:
+            session_id, speaker_id, start_end_time = filename.replace(f'.{audio_type}', '').split('-')
         start_time, end_time = start_end_time.split('_')
         start_time = int(start_time) / 100
         end_time = int(end_time) / 100
