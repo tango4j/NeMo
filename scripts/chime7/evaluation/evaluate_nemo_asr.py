@@ -418,8 +418,6 @@ def score(
 
     h_sess2segs = get_sess2segs(hyps)
     r_sess2segs = get_sess2segs(refs)
-    if "S34" in r_sess2segs and scenario_tag == "dipco":
-        r_sess2segs.pop("S34")  # this session is not used since broken audio
 
     if not (h_sess2segs.keys() == r_sess2segs.keys()):
         print(
