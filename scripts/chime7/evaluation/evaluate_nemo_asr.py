@@ -418,20 +418,17 @@ def score(
 
     h_sess2segs = get_sess2segs(hyps)
     r_sess2segs = get_sess2segs(refs)
-    if "S34" in r_sess2segs and scenario_tag == "dipco":
+    if "S34" in r_sess2segs and "S34" not in h_sess2segs and scenario_tag == "dipco":
         r_sess2segs.pop("S34")  # this session is not used since broken audio
+        print("Dropping S34 from reference since it's not in hypothesis.")
 
     if not (h_sess2segs.keys() == r_sess2segs.keys()):
-        print(
+        raise RuntimeError(
             "Hypothesis JSON does not have all sessions as in the reference JSONs."
             "The sessions that are missing: {}".format(
                 set(h_sess2segs.keys()).difference(set(r_sess2segs.keys()))
             )
         )
-        print(h_sess2segs.keys())
-        print(r_sess2segs.keys())
-        import ipdb; ipdb.set_trace()
-        raise RuntimeError
 
     all_sess_stats = []
     all_spk_stats = []
