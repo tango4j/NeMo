@@ -38,7 +38,6 @@ import os
 import random
 
 import librosa
-import concurrent.futures
 import numpy as np
 import soundfile as sf
 
@@ -79,8 +78,6 @@ class AudioSegment(object):
         trim_hop_length=512,
         orig_sr=None,
         channel_selector=None,
-        normalize=False,
-        normalize_target=-20,
     ):
         """Create audio segment from samples.
         Samples are convert float32 internally, with int scaled to [-1, 1].
@@ -115,8 +112,6 @@ class AudioSegment(object):
         self._samples = samples
         self._sample_rate = sample_rate
         self._orig_sr = orig_sr if orig_sr is not None else sample_rate
-        if normalize:
-            self.normalize(normalize_target)
 
     def __eq__(self, other):
         """Return whether two objects are equal."""
@@ -186,8 +181,6 @@ class AudioSegment(object):
         trim_hop_length=512,
         orig_sr=None,
         channel_selector=None,
-        normalize=False,
-        normalize_target=-20,
     ):
         """
         Load a file supported by librosa and return as an AudioSegment.
@@ -208,8 +201,6 @@ class AudioSegment(object):
         :param channel selector: string denoting the downmix mode, an integer denoting the channel to be selected, or an iterable
                                  of integers denoting a subset of channels. Channel selector is using zero-based indexing.
                                  If set to `None`, the original signal will be used.
-        :param normalize: if true, normalize the audio signal to a target RMS value
-        :param normalize_target: the target RMS value in decibels
         :return: AudioSegment instance
         """
         samples = None
@@ -246,49 +237,31 @@ class AudioSegment(object):
                     f"NeMo will fallback to loading via pydub."
                 )
 
-        else:
-            if not isinstance(audio_file, str) or os.path.splitext(audio_file)[-1] in sf_supported_formats:
-                try:
-                    with sf.SoundFile(audio_file, 'r') as f:
-                        dtype = 'int32' if int_values else 'float32'
-                        sample_rate = f.samplerate
-                        if offset > 0:
-                            f.seek(int(offset * sample_rate))
-                        if duration > 0:
-                            samples = f.read(int(duration * sample_rate), dtype=dtype)
-                        else:
-                            samples = f.read(dtype=dtype)
-                except RuntimeError as e:
-                    logging.error(
-                        f"Loading {audio_file} via SoundFile raised RuntimeError: `{e}`. "
-                        f"NeMo will fallback to loading via pydub."
-                    )
+                if hasattr(audio_file, "seek"):
+                    audio_file.seek(0)
 
-                    if hasattr(audio_file, "seek"):
-                        audio_file.seek(0)
+        if HAVE_PYDUB and samples is None:
+            try:
+                samples = Audio.from_file(audio_file)
+                sample_rate = samples.frame_rate
+                num_channels = samples.channels
+                if offset > 0:
+                    # pydub does things in milliseconds
+                    seconds = offset * 1000
+                    samples = samples[int(seconds) :]
+                if duration > 0:
+                    seconds = duration * 1000
+                    samples = samples[: int(seconds)]
+                samples = np.array(samples.get_array_of_samples())
+                # For multi-channel signals, channels are stacked in a one-dimensional vector
+                if num_channels > 1:
+                    samples = np.reshape(samples, (-1, num_channels))
+            except CouldntDecodeError as err:
+                logging.error(f"Loading {audio_file} via pydub raised CouldntDecodeError: `{err}`.")
 
-            if HAVE_PYDUB and samples is None:
-                try:
-                    samples = Audio.from_file(audio_file)
-                    sample_rate = samples.frame_rate
-                    num_channels = samples.channels
-                    if offset > 0:
-                        # pydub does things in milliseconds
-                        seconds = offset * 1000
-                        samples = samples[int(seconds) :]
-                    if duration > 0:
-                        seconds = duration * 1000
-                        samples = samples[: int(seconds)]
-                    samples = np.array(samples.get_array_of_samples())
-                    # For multi-channel signals, channels are stacked in a one-dimensional vector
-                    if num_channels > 1:
-                        samples = np.reshape(samples, (-1, num_channels))
-                except CouldntDecodeError as err:
-                    logging.error(f"Loading {audio_file} via pydub raised CouldntDecodeError: `{err}`.")
-
-            if samples is None:
-                libs = "soundfile, and pydub" if HAVE_PYDUB else "soundfile"
-                raise Exception(f"Your audio file {audio_file} could not be decoded. We tried using {libs}.")
+        if samples is None:
+            libs = "soundfile, and pydub" if HAVE_PYDUB else "soundfile"
+            raise Exception(f"Your audio file {audio_file} could not be decoded. We tried using {libs}.")
 
         return cls(
             samples,
@@ -301,71 +274,7 @@ class AudioSegment(object):
             trim_hop_length=trim_hop_length,
             orig_sr=orig_sr,
             channel_selector=channel_selector,
-            normalize=normalize,
-            normalize_target=normalize_target,
         )
-    @classmethod
-    def from_file_list(
-        cls,
-        audio_file_list,
-        target_sr=None,
-        int_values=False,
-        offset=0,
-        duration=0,
-        trim=False,
-        trim_ref=np.max,
-        trim_top_db=60,
-        trim_frame_length=2048,
-        trim_hop_length=512,
-        orig_sr=None,
-        channel_selector=None,
-    ):
-        samples = None
-        tp = concurrent.futures.ProcessPoolExecutor(max_workers=64)
-        futures = []
-        for a_file in audio_file_list:
-            # Load audio from the current file
-            a_segment = cls.from_file(
-                a_file,
-                target_sr=target_sr,
-                int_values=int_values,
-                offset=offset,
-                duration=duration,
-                trim=trim,
-                trim_ref=trim_ref,
-                trim_top_db=trim_top_db,
-                trim_frame_length=trim_frame_length,
-                trim_hop_length=trim_hop_length,
-                orig_sr=orig_sr,
-                channel_selector=channel_selector,
-            )
-            # Only single-channel individual files are supported for now
-            if a_segment.num_channels != 1:
-                raise RuntimeError(
-                    f'Expecting a single-channel audio signal, but loaded {a_segment.num_channels} channels from file {a_file}'
-                )
-
-            if target_sr is None:
-                # All files need to be loaded with the same sample rate
-                target_sr = a_segment.sample_rate
-
-            # Concatenate samples
-            a_samples = a_segment.samples[:, None]
-
-            if samples is None:
-                samples = a_samples
-            else:
-                # Check the dimensions match
-                if len(a_samples) != len(samples):
-                    # import ipdb; ipdb.set_trace()
-                    raise RuntimeError(
-                        f'Loaded samples need to have identical length: {a_samples.shape} != {sample.shape}'
-                    )
-
-                # Concatenate along channel dimension
-                samples = np.concatenate([samples, a_samples], axis=1)
-        samples = np.squeeze(samples)
-        return samples
 
     @classmethod
     def from_file_list(
@@ -545,13 +454,6 @@ class AudioSegment(object):
 
     def gain_db(self, gain):
         self._samples *= 10.0 ** (gain / 20.0)
-
-    def normalize(self, target_db=-20):
-        """Normalize the signal to a target RMS value in decibels.
-        """
-        rms_db = self.rms_db
-        gain = target_db - rms_db
-        self.gain_db(gain)
 
     def pad(self, pad_size, symmetric=False):
         """Add zero padding to the sample. The pad size is given in number

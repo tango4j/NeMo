@@ -30,7 +30,15 @@ import torch.nn.functional as F
 
 from nemo.collections.asr.data.audio_to_label import repeat_signal
 from nemo.collections.asr.metrics.der import get_partial_ref_labels
-from nemo.collections.asr.parts.utils.offline_clustering import SpeakerClustering, get_argmin_mat, split_input_data
+from nemo.collections.asr.parts.utils.online_clustering import (
+    get_minimal_indices,
+    stitch_cluster_labels
+)
+from nemo.collections.asr.parts.utils.offline_clustering import (
+SpeakerClustering, 
+get_argmin_mat, 
+split_input_data
+)
 from nemo.utils import logging
 
 
@@ -464,6 +472,91 @@ def generate_cluster_labels(segment_ranges: List[str], cluster_labels: List[int]
 #         frame_logit_mean_dict[spk_idx] = torch.tensor(frame_logit_mean_dict[spk_idx]).mean().item()
 #     return timestamps, cluster_labels
 
+        # targets_vad = targets[sample_id][vad_mask] 
+        # target_inds_0 = torch.argmax(torch.flip(targets_vad, [0,1]), dim=1)
+        # target_inds_1 = torch.argmax(targets_vad, dim=1)
+        # target_inds_0 = stitch_cluster_labels(Y_old=clus_label_vad, Y_new=target_inds_0.long())
+        # target_inds_1 = stitch_cluster_labels(Y_old=clus_label_vad, Y_new=target_inds_1.long())
+        
+        # new_one_hot = F.one_hot(new_label_index, num_classes=num_speakers)
+        # clus_one_hot = F.one_hot(clus_label_vad, num_classes=num_speakers)
+        # clus_label_vad = clus_label_vad
+        
+        # # new_count = (new_one_hot == targets_vad[:, :num_speakers]).sum()
+        # # clus_count = (clus_one_hot == targets_vad[:, :num_speakers]).sum()
+        # new_count = 0.5*( (new_label_index == target_inds_0).sum() + (new_label_index == target_inds_1).sum() )
+        # clus_count = 0.5*( (clus_label_vad == target_inds_0).sum() + (clus_label_vad == target_inds_1).sum() )
+        
+        # # total_count = targets_vad.shape[0]*targets_vad.shape[1]
+        # total_count = targets_vad.shape[0]
+        # total_new += new_count
+        # total_glb_clus += clus_count
+        # total_target_size += total_count
+        
+        # local_clus_label_index = torch.ones_like(clus_label_index[sample_id]) * -1
+        # local_clus_label_index[vad_mask] = new_label_index.type(clus_label_index.dtype)
+        # clus_label_index[sample_id] = local_clus_label_index
+                
+def divide_and_conquer_clustering(ms_silsp_embs, cluster_labels_infer, unit_clus_len, base_scale_idx, sync_score_thres=0.85):
+    fine_grained_scale_idx = min(ms_silsp_embs.shape[1]-1, base_scale_idx+1)
+    cluster_labels_infer  = cluster_labels_infer.cuda()
+    ms_silsp_embs = ms_silsp_embs[:, :(fine_grained_scale_idx+1)].cuda()
+    vad_ms_emb_seq =  ms_silsp_embs[cluster_labels_infer > -1]
+    ms_emb_seq = torch.split(vad_ms_emb_seq, unit_clus_len, dim=0)
+    vad_cluster_labels_infer = cluster_labels_infer[cluster_labels_infer > -1]
+    clus_label_index = torch.split(vad_cluster_labels_infer, unit_clus_len, dim=0)
+    # Local fine-grained clustering
+    batch_size = len(ms_emb_seq)
+    total_fine_grained_labels = []
+    for sample_id in tqdm(range(batch_size), desc='Fine-grained clustering'):
+        sample_ms_emb_seq = ms_emb_seq[sample_id]
+        vad_mask = clus_label_index[sample_id] > -1
+        num_speakers = int(clus_label_index[sample_id].max().item() + 1)
+        speaker_clustering = SpeakerClustering(cuda=True)
+        _cluster_labels = speaker_clustering.forward_embs(
+            embs=sample_ms_emb_seq[vad_mask].mean(dim=1),
+            oracle_num_speakers=int(num_speakers),
+            max_rp_threshold= 0.05,
+            use_drop_and_recluster=False,
+        )
+        
+        # Resolve permuations
+        offset = clus_label_index[sample_id][vad_mask].long().min()
+        clus_label_vad = get_minimal_indices(clus_label_index[sample_id][vad_mask].long())
+        new_label_index = stitch_cluster_labels(Y_old=clus_label_vad, Y_new=_cluster_labels.long())
+        new_label_index = new_label_index.type(clus_label_vad.dtype).to(clus_label_vad.device)
+        sync_score =  ((clus_label_vad == new_label_index).sum() / clus_label_vad.shape[0]).item()
+        logging.info(f"----->    || Fine grained label sync score|| :  [  {sync_score:.4f} , offset: {offset}]")
+        if sync_score < sync_score_thres:
+            new_label_index = clus_label_vad + offset
+        # total_fine_grained_labels.append(clus_label_index[sample_id][vad_mask].long())
+        total_fine_grained_labels.append(new_label_index)
+    
+    vad_fine_grained_labels = torch.cat(total_fine_grained_labels, dim=0).to(cluster_labels_infer.device)
+    fine_grained_labels = (torch.ones_like(cluster_labels_infer) * -1).to(cluster_labels_infer.device)
+    fine_grained_labels[cluster_labels_infer > -1] = vad_fine_grained_labels.type(cluster_labels_infer.dtype)
+    return fine_grained_labels
+               
+# def get_cluster_labels_infer(ms_silsp_embs, cluster_labels, vad_decision, scale_map, base_scale_idx):
+#     # Convert cluster labels to the finest scale
+#     # clus_labels_infer_org_scale = torch.zeros(scale_map[base_scale_idx].max()+1) 
+#     clus_labels_infer_org_scale = torch.zeros(ms_silsp_embs.shape[0]+1)
+#     clus_labels_infer_org_scale[:vad_decision.shape[0]][vad_decision] = (cluster_labels + 1).float().to(ms_embs.device)
+#     clus_labels_infer_org_scale -= 1
+
+#     # Convert clustering to the finest scale 
+#     cluster_labels_infer = -1 * torch.ones(scale_map[0].shape[0]) # Finest scale thus, the longest vector
+    
+#     ### Method 1 (original)
+#     # cluster_labels_infer[scale_map[len(scale_map)-1]] = clus_labels_infer_org_scale[scale_map[base_scale_idx]]
+#     ### Method 2 (new)
+#     try:
+#         max_scm = scale_map[base_scale_idx].shape[0]
+#         cluster_labels_infer[scale_map[-1][vad_prob_mat_base[:max_scm] > vad_threshold]]= clus_labels_infer_org_scale[scale_map[base_scale_idx][vad_prob_mat_base[:max_scm]> vad_threshold]]
+#     except:
+#         import ipdb; ipdb.set_trace()             
+#     return cluster_labels_infer
+ 
 def perform_clustering_embs(
     embeddings, 
     time_stamps,
@@ -472,17 +565,23 @@ def perform_clustering_embs(
     AUDIO_RTTM_MAP, 
     out_rttm_dir,
     clustering_params, 
+    multiscale_weights,
     device, 
     vad_threshold: float,
+    multiscale_dict: dict, 
+    unit_clus_len: int = 30000,
+    drop_length_thres=4400,
     verbose: bool = True,
+    feat_per_sec: int = 100,
+    long_audio_thres: int = 100000,
 ):
-    # vad_threshold = 0.5 works the best, base_seg_idx = 2
     uniq_clus_labels = {}
     cuda = True
     all_hypothesis, all_reference = [], []
     no_references = False
     lines_cluster_labels = []
     base_scale_idx = clustering_params.clustering_scale_index
+    
     if device.type != 'cuda':
         logging.warning("cuda=False, using CPU for eigen decomposition. This might slow down the clustering process.")
         cuda = False
@@ -491,13 +590,39 @@ def perform_clustering_embs(
     # If True, export torch script module and save it to the base folder.
     for uniq_id, audio_rttm_values in tqdm(AUDIO_RTTM_MAP.items(), desc='clustering', leave=True, disable=not verbose):
         scale_map = scale_mapping[uniq_id]
-        base_seg_inds = torch.where((scale_map[base_scale_idx][1:] ==  scale_map[base_scale_idx][:-1] ) == False)[0]
+        if scale_map.shape[1] > long_audio_thres:
+            logging.info(f"---------> Long audio detected: Segment Count - {scale_map.shape[1]}")
+            base_scale_idx = max(0, base_scale_idx - 1)
+            use_fine_grained_clustering = True
+        else:
+            logging.info(f"---------> Short audio detected: Segment Count - {scale_map.shape[1]}")
+            use_fine_grained_clustering = False
+         
+        # max_seg_id = scale_map[base_scale_idx].max()
+        rep_counts = torch.unique(scale_map[base_scale_idx], return_counts=True)[1]
+        base_seg_inds = torch.cumsum(rep_counts, dim=0) - 1 # Pick the last index of each repeating index
+
+        # old method (misses the last segment)
+        # base_seg_inds = torch.where((scale_map[base_scale_idx][1:] ==  scale_map[base_scale_idx][:-1] ) == False)[0]
 
         ms_silsp_embs = embeddings[uniq_id][:, :(base_scale_idx+1), :][base_seg_inds, :, :]
         ms_ts = time_stamps[uniq_id][base_scale_idx][base_seg_inds]/100
-        vad_prob_mat = vad_probs[uniq_id][base_seg_inds]
+        feat_len_in_scale = torch.mode( torch.round((ms_ts[:, 1] - ms_ts[:, 0])*feat_per_sec).long() )[0]
+        try:
+            vad_prob_mat_seg = vad_probs[uniq_id][base_seg_inds, base_scale_idx, :feat_len_in_scale] # [T, feat_len]
+        except:
+            # This happens when you load old vad prob pickle files.
+            import ipdb; ipdb.set_trace()
+        vad_prob_mat = vad_prob_mat_seg.mean(dim=1)
+        base_feat_len_in_scale = torch.mode( torch.round( time_stamps[uniq_id][-1][:,1]- time_stamps[uniq_id][-1][:,0] ).long() )[0]
+        vad_prob_mat_base_seg = vad_probs[uniq_id][:, -1, :base_feat_len_in_scale] # [T, feat_len]
+        vad_prob_mat_base = vad_prob_mat_base_seg.mean(dim=1)
+        # vad_prob_mat = vad_probs[uniq_id][base_seg_inds]
+            
         vad_decision = vad_prob_mat > vad_threshold
         ms_embs = ms_silsp_embs[vad_decision, : , :]
+        # single_scale_embs = torch.sum( ms_embs.permute(0, 2, 1) * torch.tensor(multiscale_weights)[:(base_scale_idx+1)], dim=2)
+        single_scale_embs = ms_embs.mean(dim=1)
 
         if clustering_params.oracle_num_speakers:
             num_speakers = audio_rttm_values.get('num_speakers', None)
@@ -505,25 +630,45 @@ def perform_clustering_embs(
                 raise ValueError("Provided option as oracle num of speakers but num_speakers in manifest is null")
         else:
             num_speakers = -1
-        
+            
+        drop_length_thres = int((multiscale_dict[clustering_params.clustering_scale_index][0]/multiscale_dict[base_scale_idx][0]) * drop_length_thres)
+         
         cluster_labels = speaker_clustering.forward_embs(
-                ms_embs=ms_embs,
+                embs=single_scale_embs,
                 oracle_num_speakers=int(num_speakers),
                 max_num_speakers=int(clustering_params.max_num_speakers),
                 min_num_speakers=int(clustering_params.get('min_num_speakers', 1)),
                 max_rp_threshold=float(clustering_params.max_rp_threshold),
                 sparse_search_volume=int(clustering_params.sparse_search_volume),
+                drop_length_thres=drop_length_thres,
             )
-
-        # Convert cluster labels to the finest scale
-        clus_labels_infer_org_scale = torch.zeros(scale_map[base_scale_idx].max()+1) 
+        # cluster_labels_infer = get_cluster_labels_infer(ms_silsp_embs, cluster_labels, vad_decision, scale_map, base_scale_idx)
+        clus_labels_infer_org_scale = torch.zeros(ms_silsp_embs.shape[0]+1)
         clus_labels_infer_org_scale[:vad_decision.shape[0]][vad_decision] = (cluster_labels + 1).float().to(ms_embs.device)
         clus_labels_infer_org_scale -= 1
 
         # Convert clustering to the finest scale 
-        cluster_labels_infer = torch.zeros(scale_map[0].shape[0])
-        cluster_labels_infer[scale_map[len(scale_map)-1]] = clus_labels_infer_org_scale[scale_map[base_scale_idx]]
-
+        cluster_labels_infer = -1 * torch.ones(scale_map[0].shape[0]) # Finest scale thus, the longest vector
+        
+        ### Method 1 (original)
+        # cluster_labels_infer[scale_map[len(scale_map)-1]] = clus_labels_infer_org_scale[scale_map[base_scale_idx]]
+        ### Method 2 (new)
+        try:
+            max_scm = scale_map[base_scale_idx].shape[0]
+            cluster_labels_infer[scale_map[-1][vad_prob_mat_base[:max_scm] > vad_threshold]]= clus_labels_infer_org_scale[scale_map[base_scale_idx][vad_prob_mat_base[:max_scm]> vad_threshold]]
+        except:
+            import ipdb; ipdb.set_trace()             
+            
+        # Mask non-speech again with the finest scale resolution.
+        # cluster_labels_infer[vad_probs[uniq_id] < vad_threshold] = -1
+        # use_fine_grained_clustering = False
+        # use_fine_grained_clustering = True
+        if use_fine_grained_clustering:
+            logging.info(f"Using fine grained clustering on embedding shape : {embeddings[uniq_id].shape} and unit_clus_len: {unit_clus_len}")
+            cluster_base_labels = divide_and_conquer_clustering(embeddings[uniq_id], cluster_labels_infer, unit_clus_len=unit_clus_len, base_scale_idx=base_scale_idx)
+            cluster_labels_infer = cluster_base_labels.cpu()
+        
+        
         del ms_embs
         if cuda:
             torch.cuda.empty_cache()
@@ -532,12 +677,15 @@ def perform_clustering_embs(
         
         uniq_clus_labels[uniq_id] = cluster_labels_infer
         
-        timestamps = ms_ts[vad_decision, :] 
-        cluster_labels = cluster_labels.cpu().numpy()
+        # timestamps = ms_ts[vad_decision, :] 
+        # cluster_labels = cluster_labels.cpu().numpy()
         
         ### TEST with finest scale trainsition
-        # timestamps = time_stamps[uniq_id][-1][cluster_labels_infer != -1]/100.0
-        # cluster_labels = cluster_labels_infer[cluster_labels_infer != -1].cpu().numpy()
+        try:
+            timestamps = time_stamps[uniq_id][-1][:max_scm][cluster_labels_infer != -1]/100.0
+        except:
+            import ipdb; ipdb.set_trace()
+        cluster_labels = cluster_labels_infer[cluster_labels_infer != -1].cpu().numpy()
         ##### 
         if len(cluster_labels) != timestamps.shape[0]:
             raise ValueError("Mismatch of length between cluster_labels and timestamps.")
@@ -557,9 +705,6 @@ def perform_clustering_embs(
         else:
             no_references = True
             all_reference = []
-
-    if out_rttm_dir:
-        write_cluster_labels(base_scale_idx, lines_cluster_labels, out_rttm_dir)    
     return all_reference, all_hypothesis, uniq_clus_labels
     
 def perform_clustering(
@@ -1073,7 +1218,8 @@ def get_subsegments(
     window: float, 
     shift: float, 
     duration: float, 
-    min_subsegment_duration: float = 0.03
+    min_subsegment_duration: float = 0.03,
+    decimals: int = 2,
     ) -> List[List[float]]:
     """
     Return subsegments from a segment of audio file.
@@ -1094,8 +1240,12 @@ def get_subsegments(
     subsegments:  List[List[float]] = []
     start = offset
     slice_end = start + duration
-    base = math.ceil((duration - window) / shift)
-    slices = 1 if base < 0 else base + 1
+    # base = math.ceil((duration - window) / shift)
+    # slices = 1 if base < 0 else base + 1
+    if min_subsegment_duration <= duration < shift:
+        slices = 1
+    else:
+        slices = int(np.ceil((duration-window)/shift) + 1)
     if slices == 1:
         if min(duration, window) >= min_subsegment_duration:
             subsegments.append([start, min(duration, window)])
@@ -1103,6 +1253,7 @@ def get_subsegments(
         start_col = torch.arange(offset, slice_end, shift)[:slices]
         dur_col = window * torch.ones(slices)
         dur_col[-1] = min(slice_end - start_col[-1], window)
+        dur_col = torch.round(dur_col, decimals=decimals)
         ss_tensor = torch.stack([start_col, dur_col], dim=1)
         for k in range(ss_tensor.shape[0]):
             if dur_col[k] >= min_subsegment_duration:
@@ -1614,10 +1765,12 @@ def generate_speaker_timestamps(
     params['infer_overlap'] = True
     # params['infer_mode'] ='only_logits'
     # params['infer_mode'] ='only_clus'
+    # params['infer_mode'] ='bypass_clus'
     # params['infer_mode'] ='vad_masked_logits'
     # params['infer_mode'] ='vad_masked_logits_force_1spk'
     # params['infer_mode'] ='vad_masked_logits_force_1spk_rel_thres'
-    params['infer_mode'] ='vad_masked_logits_force_1spk_clus_union'
+    params['infer_mode'] ='vad_masked_logits_force_1spk_rel_thres_clus_union'
+    # params['infer_mode'] ='vad_masked_logits_force_1spk_clus_union'
     # params['infer_mode'] ='vad_masked_logits_force_1spk_clus_intersection'
     # params['infer_mode'] ='vad_masked_clus_logits_union'
     # params['infer_mode'] ='vad_masked_clus_logits_intersection'
@@ -1631,8 +1784,6 @@ def generate_speaker_timestamps(
         mask_ch_inds = torch.ones(msdd_preds.shape[1]).bool()
         mask_ch_inds[active_spk_inds] = False
         msdd_preds[:, mask_ch_inds] = 0.0
-        
-
     if params['infer_mode'] == 'only_logits':
         msdd_preds_binary = (msdd_preds > threshold).int().cpu().numpy()
         speaker_assign_mat = msdd_preds_binary
@@ -1645,8 +1796,8 @@ def generate_speaker_timestamps(
             max_overlap_count = 1
         else:
             max_overlap_count = min(active_spk_inds.shape[0], max_overlap_count) # If there is one speaker, then max_overlap_count = 1
-        msdd_preds_topk_per_seg, logit_gap = get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num=model_spk_num)
-        msdd_preds_top1_per_seg, _ = get_top_k_for_each_row(msdd_preds, max_overlap_count=1, model_spk_num=model_spk_num)
+        msdd_preds_topk_per_seg, logit_gap = get_top_k_for_each_row(msdd_preds, k_count=max_overlap_count, orig_dim=model_spk_num)
+        msdd_preds_top1_per_seg, _ = get_top_k_for_each_row(msdd_preds, k_count=1, orig_dim=model_spk_num)
         
         if not torch.all((msdd_preds_topk_per_seg > 0.0).sum(axis=1) == max_overlap_count):
             raise ValueError(f"Top-k per seg operation with max_overlap_count: {max_overlap_count} is not correct")
@@ -1663,8 +1814,11 @@ def generate_speaker_timestamps(
             msdd_preds_masked_one[msdd_preds_top1_per_seg > 0.0] = 1.0
             if not np.all(msdd_preds_masked_one.sum(axis=1) == 1) == True:
                 raise ValueError(f"msdd_preds_masked_one is not correct")
-            speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
-            if params['infer_mode'] == 'vad_masked_logits_force_1spk_rel_thres':
+            if params['infer_mode'] == 'vad_masked_logits_force_1spk_rel_thres_clus_union':
+                speaker_assign_mat = np.logical_or(clustering_assign_mat, msdd_preds_masked_ovl).astype(int)
+                speaker_assign_mat[vad_mask==False, :] = 0
+            elif params['infer_mode'] == 'vad_masked_logits_force_1spk_rel_thres':
+                speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
                 speaker_assign_mat[vad_mask==False, :] = 0
         elif 'force_1spk' in params['infer_mode']:
             speaker_assign_mat = msdd_preds_masked
@@ -1699,16 +1853,16 @@ def generate_speaker_timestamps(
     speaker_labels_total = generate_diarization_output_lines(speaker_timestamps=spk_ts, model_spk_num=model_spk_num)
     return speaker_labels_total
 
-def get_top_k_for_each_row(msdd_preds, max_overlap_count, model_spk_num):
-    topk_vals, moc_inds = torch.topk(msdd_preds, k=max_overlap_count, dim=1)
-    top_k_mask = F.one_hot(moc_inds.t().flatten(), num_classes=model_spk_num)
-    if max_overlap_count > 1:
-        top_k_mask = top_k_mask.reshape(-1, msdd_preds.shape[0], model_spk_num).sum(dim=0)
+def get_top_k_for_each_row(logit_mat, k_count, orig_dim):
+    topk_vals, moc_inds = torch.topk(logit_mat, k=k_count, dim=1)
+    top_k_mask = F.one_hot(moc_inds.t().flatten(), num_classes=orig_dim)
+    if k_count > 1:
+        top_k_mask = top_k_mask.reshape(-1, logit_mat.shape[0], orig_dim).sum(dim=0)
         logit_gap = topk_vals[:, 1]/topk_vals[:, 0]
     else:
         logit_gap = torch.zeros_like(topk_vals[:, 0])
-    masked_msdd_preds = top_k_mask * msdd_preds
-    return masked_msdd_preds, logit_gap
+    masked_logit_mat = top_k_mask * logit_mat
+    return masked_logit_mat, logit_gap
     
 def generate_speaker_assignment_intervals(speaker_assign_mat, timestamps):
     model_spk_num = speaker_assign_mat.shape[-1]

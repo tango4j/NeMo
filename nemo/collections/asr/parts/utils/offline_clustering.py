@@ -36,7 +36,7 @@ from typing import Dict, List, Tuple
 import torch
 from torch.linalg import eigh, eigvalsh
 import logging
-
+from sklearn.cluster import AgglomerativeClustering as AHC
 
 def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
     """
@@ -84,31 +84,90 @@ def cos_similarity_batch(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.ten
     res = torch.bmm(a_norm, b_norm.transpose(1, 2))
     return res
 
-def drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda, drop_thres=0.1):
-    if cuda:
-        embs = emb.cuda()
-        Y = Y.cuda()
-
-    emb_means= []
-    for spk in set(Y.cpu().numpy()):
-        emb_means.append(torch.mean(embs[Y==spk], dim=0))
-    if len(emb_means) == 1:
-        return Y
-    stacked = torch.stack(emb_means)
-    spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
-    spk_aff.fill_diagonal_(0)
-    spk_aff_collapsed = torch.sum(spk_aff.fill_diagonal_(0), dim=0)/(spk_aff.shape[0]-1)
-    sorted_spk_affs = spk_aff_collapsed.sort()[0]
-    diffs = sorted_spk_affs[1:] - sorted_spk_affs[:-1] 
-    if spk_aff.shape[0] > min_num_speakers:
-        # if spk_aff_collapsed.min() < drop_thres:
-        if diffs.max().item() > drop_thres:
-            n_clusters = int(spk_aff.shape[0]-1)
+def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, drop_length_thres, n_clusters, cuda, reclus_thres=0.85, method='spectral'):
+    max_aff = 1.0
+    running_num_of_spks = max_num_speakers 
+    
+    print(f"drop_and_cluster: argument - n_clusters {n_clusters} embs.shape : {embs.shape}")
+    if embs.shape[0] < drop_length_thres:
+        spectral_model = SpectralClustering(
+            n_clusters=n_clusters, n_random_trials=30, cuda=cuda, device=embs.device
+        )
+        Y = spectral_model.forward(affinity_mat)
+        return Y, n_clusters 
+    
+    # Run re-clustering if the max affinity is too high
+    while max_aff > reclus_thres and running_num_of_spks >= min_num_speakers and embs.shape[0] >= drop_length_thres:
+        if method == 'spectral':
             spectral_model = SpectralClustering(
-                n_clusters=n_clusters, n_random_trials=1, cuda=cuda, device=emb.device
+                n_clusters=running_num_of_spks, n_random_trials=30, cuda=cuda, device=embs.device
             )
             Y = spectral_model.forward(affinity_mat)
-    return Y
+        elif method.startswith('ahc'):
+            ahc_model = AHC(distance_threshold=None, 
+                            n_clusters=running_num_of_spks, 
+                            affinity='cosine', 
+                            linkage='average')
+            ahc_model.fit(embs)
+            Y = ahc_model.labels_
+            Y = torch.tensor(Y)
+            embs = torch.tensor(embs)
+        
+        embs = embs.float()
+        emb_means= []
+        for spk in set(Y.cpu().numpy()):
+            emb_means.append(torch.mean(embs[Y==spk], dim=0))
+        if len(emb_means) == 1:
+            return Y
+        stacked = torch.stack(emb_means)
+        spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
+        spk_aff_org = spk_aff.clone()
+        spk_aff_org.fill_diagonal_(0)
+        spk_aff_org_flat = spk_aff_org.flatten()
+        
+        non_diag_spk_aff = spk_aff_org_flat[spk_aff_org_flat > 0.0]
+        sorted_aff, sorted_idx = non_diag_spk_aff.flatten().sort()
+        try:
+            max_aff = sorted_aff[-1].item()
+        except:
+            import ipdb; ipdb.set_trace()
+        print(f"sorted aff: {sorted_aff}")
+        print(f"Max affinity: {max_aff}, reclus_thres: {reclus_thres},  running_num_of_spks: {torch.max(Y)+1}")
+        running_num_of_spks -= 1
+    n_clusters = Y.cpu().numpy().max() + 1
+    return Y, n_clusters
+
+# def drop_and_recluster_(emb, min_num_speakers, max_num_speakers, affinity_mat, cuda, drop_thres=0.1):
+#     spectral_model = SpectralClustering(
+#         n_clusters=max_num_speakers, n_random_trials=1, cuda=cuda, device=emb.device
+#     )
+#     Y = spectral_model.forward(affinity_mat)
+    
+#     if cuda:
+#         embs = emb.cuda()
+#         Y = Y.cuda()
+
+#     emb_means= []
+#     for spk in set(Y.cpu().numpy()):
+#         emb_means.append(torch.mean(embs[Y==spk], dim=0))
+#     if len(emb_means) == 1:
+#         return Y
+#     stacked = torch.stack(emb_means)
+#     spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
+#     spk_aff.fill_diagonal_(0)
+#     spk_aff_collapsed = torch.sum(spk_aff.fill_diagonal_(0), dim=0)/(spk_aff.shape[0]-1)
+#     sorted_spk_affs = spk_aff_collapsed.sort()[0]
+#     diffs = sorted_spk_affs[1:] - sorted_spk_affs[:-1] 
+#     import ipdb; ipdb.set_trace()
+#     if spk_aff.shape[0] > min_num_speakers:
+#         # if spk_aff_collapsed.min() < drop_thres:
+#         if diffs.max().item() > drop_thres:
+#             n_clusters = int(spk_aff.shape[0]-1)
+#             spectral_model = SpectralClustering(
+#                 n_clusters=n_clusters, n_random_trials=1, cuda=cuda, device=emb.device
+#             )
+#             Y = spectral_model.forward(affinity_mat)
+#     return Y
 
 
 def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
@@ -397,7 +456,9 @@ def getAffinityGraphMat(affinity_mat_raw: torch.Tensor, p_value: int) -> torch.T
     Calculate a binarized graph matrix and
     symmetrize the binarized graph matrix.
     """
-    X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value)
+    # X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value)
+    # X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value, mask_method='drop')
+    X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value, mask_method='sigmoid')
     symm_affinity_mat = 0.5 * (X + X.T)
     return symm_affinity_mat
 
@@ -490,7 +551,8 @@ def get_chunked_argmin_mat(
     hop_len = window - 2*ovl_len
     curr_scale_in_cs = get_scale_in_centi_sec(timestamps_in_scales)
     ratio = round(curr_scale_in_cs/base_scale_in_cs, 2)
-    total_chunks = torch.ceil(torch.tensor(1 + (base_len - window - ovl_len)/hop_len)).int().item()
+    # total_chunks = torch.ceil(torch.tensor(1 + (base_len - window - ovl_len)/hop_len)).int().item()
+    total_chunks = torch.ceil(torch.tensor(1 + (base_len - hop_len - ovl_len)/hop_len)).int().item()
     argmin_mat_list = []
     # Due to memory constraints, we need to chunk the matrix
     for idx in range(total_chunks):
@@ -507,10 +569,13 @@ def get_chunked_argmin_mat(
         else:
             argmin_mat_list.append(argmin_local[ovl_len:-ovl_len] + offset_cur)
     argmin_mat = torch.cat(argmin_mat_list, dim=0)
+    if argmin_mat.shape[0] != base_len:
+        import ipdb; ipdb.set_trace()
+        raise ValueError(f"Arg. Min matrix length mismatch: argmin_mat.shape[0] = {argmin_mat.shape[0]} base_len = {base_len}")
     return argmin_mat
     
 
-def get_argmin_mat_large(timestamps_in_scales: List[torch.Tensor], window=2000, hop_len=1600) -> List[torch.Tensor]:
+def get_argmin_mat_large(timestamps_in_scales: List[torch.Tensor], window=20000, hop_len=16000) -> List[torch.Tensor]:
     """
     Calculate the mapping between the base scale and other scales. A segment from a longer scale is
     repeatedly mapped to a segment from a shorter scale or the base scale.
@@ -552,10 +617,7 @@ def get_argmin_mat_large(timestamps_in_scales: List[torch.Tensor], window=2000, 
 def calculate_argmin_matrix(tgt_anchor, ref_anchor):
     tgt_mat = torch.tile(tgt_anchor, (ref_anchor.shape[0], 1))
     ref_mat = torch.tile(ref_anchor, (tgt_anchor.shape[0], 1)).t()
-    try:
-        argmin_mat = torch.argmin(torch.abs(tgt_mat - ref_mat), dim=1)
-    except:
-        import ipdb; ipdb.set_trace()
+    argmin_mat = torch.argmin(torch.abs(tgt_mat - ref_mat), dim=1)
     return argmin_mat
 
 def get_argmin_mat_WRONG(timestamps_in_scales: List[torch.Tensor]) -> List[torch.Tensor]:
@@ -880,7 +942,13 @@ def split_input_data(
 
 
 def estimateNumofSpeakers(
-    affinity_mat: torch.Tensor, max_num_speakers: int, cuda: bool = False, 
+    affinity_mat: torch.Tensor, 
+    min_num_speakers: int, 
+    max_num_speakers: int, 
+    limit_lambda_gap: bool = False,
+    lambda_gap_max: int = 4,
+    mask_spk_inds: int = [3],
+    cuda: bool = False, 
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Estimate the number of speakers using eigendecomposition on the Laplacian Matrix.
@@ -905,7 +973,12 @@ def estimateNumofSpeakers(
     lambdas = eigValueSh(laplacian, cuda=cuda, device=affinity_mat.device)
     lambdas = torch.sort(lambdas)[0]
     lambda_gap = getLamdaGaplist(lambdas)
-    num_of_spk = torch.argmax(lambda_gap[: min(max_num_speakers, lambda_gap.shape[0])]) + 1
+    if limit_lambda_gap:
+        num_of_spk = torch.argmax(lambda_gap[(min_num_speakers-1): min(max_num_speakers, lambda_gap.shape[0])]) + 1 + (min_num_speakers-1)
+    else:
+        for mask_spk_idx in mask_spk_inds:
+            lambda_gap[mask_spk_idx-1] = 0.0
+        num_of_spk = torch.argmax(lambda_gap[(min_num_speakers-1):lambda_gap_max]) + 1 + (min_num_speakers-1)
     return num_of_spk, lambdas, lambda_gap
 
 
@@ -1063,6 +1136,7 @@ class NMESC:
         self,
         mat: torch.Tensor,
         max_num_speakers: int = 10,
+        min_num_speakers: int = 1,
         max_rp_threshold: float = 0.15,
         sparse_search: bool = True,
         sparse_search_volume: int = 30,
@@ -1116,6 +1190,7 @@ class NMESC:
 
         """
         self.max_num_speakers: int = max_num_speakers
+        self.min_num_speakers: int = min_num_speakers
         self.max_rp_threshold: float = max_rp_threshold
         self.use_subsampling_for_nme: bool = use_subsampling_for_nme
         self.nme_mat_size: int = nme_mat_size
@@ -1133,7 +1208,7 @@ class NMESC:
         self.force_fully_connected: bool = force_fully_connected
         self.parallelism: bool = parallelism
 
-    def forward(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, limit_lambda_gap: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Subsample the input matrix to reduce the computational load.
 
@@ -1159,13 +1234,13 @@ class NMESC:
         if self.parallelism:
             futures: List[torch.jit.Future[torch.Tensor]] = []
             for p_idx, p_value in enumerate(self.p_value_list):
-                futures.append(torch.jit.fork(self.getEigRatio, p_value))
+                futures.append(torch.jit.fork(self.getEigRatio, p_value, limit_lambda_gap))
             for future in futures:
                 results.append(torch.jit.wait(future))
 
         else:
             for p_idx, p_value in enumerate(self.p_value_list):
-                results.append(self.getEigRatio(p_value))
+                results.append(self.getEigRatio(p_value, limit_lambda_gap))
 
         # Retrieve the eigen analysis results
         for p_idx, p_value in enumerate(self.p_value_list):
@@ -1188,9 +1263,12 @@ class NMESC:
 
         p_hat_value = (subsample_ratio * rp_p_value).type(torch.int)
         if self.maj_vote_spk_count:
-            est_num_of_spk = torch.mode(torch.tensor(est_num_of_spk_list))[0]
+            # est_num_of_spk = torch.mode(torch.tensor(est_num_of_spk_list))[0]
+            est_num_of_spk = torch.mode(est_num_of_spk_list)[0]
         else:
             est_num_of_spk = est_spk_n_dict[rp_p_value.item()]
+        # if not limit_lambda_gap:
+        #     logging.info(f"List of estimated number of speakers: {est_num_of_spk_list}")
         return est_num_of_spk, p_hat_value
 
     def subsampleAffinityMat(self, nme_mat_size: int) -> torch.Tensor:
@@ -1218,7 +1296,7 @@ class NMESC:
         self.mat = self.mat[:: subsample_ratio.item(), :: subsample_ratio.item()]
         return subsample_ratio
 
-    def getEigRatio(self, p_neighbors: int) -> torch.Tensor:
+    def getEigRatio(self, p_neighbors: int, limit_lambda_gap: bool = True, mask_spk_idx=3) -> torch.Tensor:
         """
         For a given p_neighbors value, calculate g_p, which is a ratio between p_neighbors and the
         maximum eigengap values.
@@ -1239,7 +1317,11 @@ class NMESC:
         """
         affinity_mat = getAffinityGraphMat(self.mat, p_neighbors)
         est_num_of_spk, lambdas, lambda_gap_list = estimateNumofSpeakers(
-            affinity_mat, self.max_num_speakers, self.cuda, 
+            affinity_mat=affinity_mat, 
+            min_num_speakers=self.min_num_speakers, 
+            max_num_speakers=self.max_num_speakers, 
+            limit_lambda_gap=limit_lambda_gap, 
+            cuda=self.cuda, 
         )
         arg_sorted_idx = torch.argsort(lambda_gap_list[: self.max_num_speakers], descending=True)
         max_key = arg_sorted_idx[0]
@@ -1506,33 +1588,40 @@ class SpeakerClustering(torch.nn.Module):
             n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=self.device
         )
         Y = spectral_model.forward(affinity_mat)
-        Y = drop_and_recluster(emb, Y, min_num_speakers, affinity_mat, cuda=self.cuda)
         return Y
     
     def forward_embs(
         self,
-        ms_embs: torch.Tensor,
+        embs: torch.Tensor,
         oracle_num_speakers: int = -1,
-        max_rp_threshold: float = 0.15,
-        max_num_speakers: int = 8,
+        max_rp_threshold: float = 0.05,
+        max_num_speakers: int = 4,
         min_num_speakers: int = 1,
-        sparse_search_volume: int = 30,
-        fixed_thres: float = -1.0,
+        sparse_search_volume: int = 15,
+        fixed_thres: float = -1,
         kmeans_random_trials: int = 1,
+        nme_mat_size: int = 1024,
+        drop_length_thres: int = 4400,
+        base_scale_idx: int = 2,
+        # drop_length_thres: int = 5000,
+        maj_vote_spk_count: bool = True,
+        use_drop_and_recluster: bool = True,
     ) -> torch.LongTensor:
 
-        embs = ms_embs.mean(dim=1)
+        # embs = ms_embs.mean(dim=1)
+        embs = embs.cuda()
         mat = getCosAffinityMatrix(embs)
         
         nmesc = NMESC(
             mat,
             max_num_speakers=max_num_speakers,
+            min_num_speakers=min_num_speakers,
             max_rp_threshold=max_rp_threshold,
             sparse_search=self.sparse_search,
             sparse_search_volume=sparse_search_volume,
             fixed_thres=fixed_thres,
-            nme_mat_size=self.nme_mat_size,
-            maj_vote_spk_count=self.maj_vote_spk_count,
+            nme_mat_size=nme_mat_size,
+            maj_vote_spk_count=maj_vote_spk_count,
             parallelism=self.parallelism,
             cuda=self.cuda,
             device=self.device,
@@ -1540,7 +1629,7 @@ class SpeakerClustering(torch.nn.Module):
 
         # If there are less than `min_samples_for_nmesc` segments, est_num_of_spk is 1.
         if mat.shape[0] > self.min_samples_for_nmesc:
-            est_num_of_spk, p_hat_value = nmesc.forward()
+            est_num_of_spk, p_hat_value = nmesc.forward(limit_lambda_gap=False)
             affinity_mat = getAffinityGraphMat(mat, p_hat_value)
         else:
             nmesc.fixed_thres = max_rp_threshold
@@ -1555,11 +1644,20 @@ class SpeakerClustering(torch.nn.Module):
             n_clusters = int(oracle_num_speakers)
         else:
             n_clusters = int(est_num_of_spk.item())
-
-        spectral_model = SpectralClustering(
-            n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=self.device
-        )
-        Y = spectral_model.forward(affinity_mat)
-        # Y = drop_and_recluster(embs, Y, min_num_speakers, affinity_mat, cuda=self.cuda)
+            
+        if use_drop_and_recluster:
+            Y, n_clusters = drop_and_recluster(embs, 
+                                            affinity_mat, 
+                                            min_num_speakers, 
+                                            max_num_speakers, 
+                                            drop_length_thres, 
+                                            n_clusters, 
+                                            cuda=self.cuda, 
+                                            method='spectral')
+        else:
+            spectral_model = SpectralClustering(
+                n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=embs.device
+            )
+            Y = spectral_model.forward(affinity_mat)
         return Y
     

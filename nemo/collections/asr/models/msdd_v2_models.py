@@ -27,6 +27,7 @@ from operator import attrgetter
 import numpy as np
 import time
 import torch
+import torch.nn.functional as F
 from hydra.utils import instantiate
 from omegaconf import DictConfig, open_dict
 from pyannote.core import Annotation
@@ -37,8 +38,9 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-# from nemo.collections.asr.data.audio_to_diar_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset
-from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset
+from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
+
+from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDInferDataset, AudioToSpeechMSDDTrainDataset, get_ms_seg_timestamps
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
@@ -55,11 +57,16 @@ from nemo.collections.asr.models.clustering_diarizer import (
 from nemo.collections.asr.models.configs.diarizer_config import NeuralDiarizerInferenceConfig
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
+from nemo.collections.asr.parts.utils.online_clustering import (
+    get_minimal_indices,
+    stitch_cluster_labels
+)
 from nemo.collections.asr.parts.utils.offline_clustering import (
     getCosAffinityMatrix,
     cos_similarity,
     get_argmin_mat_large,
     cos_similarity_batch,
+    SpeakerClustering,
 )
 
 from nemo.collections.asr.parts.utils.vad_utils import (
@@ -68,6 +75,7 @@ from nemo.collections.asr.parts.utils.vad_utils import (
 from nemo.collections.asr.parts.utils.channel_clustering import channel_cluster_from_coherence
 from nemo.collections.asr.parts.utils.speaker_utils import (
     audio_rttm_map,
+    get_top_k_for_each_row,
     get_id_tup_dict,
     get_scale_mapping_argmat,
     get_uniq_id_list_from_manifest,
@@ -308,14 +316,25 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self._init_segmentation_info()
         if self._trainer:
             self.world_size = trainer.num_nodes * trainer.num_devices
-            # self.emb_batch_size = self.cfg_msdd_model.emb_batch_size
             self.pairwise_infer = False
         else:
             self.world_size = 1
             self.pairwise_infer = True
 
-        self._init_msdd_scales() 
+        # This is a temporary patch: Make sure that the session length is a multiple of the window length
+        if self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec[0] in [1.6, 3.2]:
+            self.cfg_msdd_model.session_len_sec = 16
+        elif self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec[0] in [1.5, 3.0]:
+            self.cfg_msdd_model.session_len_sec = 15
+        else:
+            raise ValueError(f"Unknown window length {self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec[0]}")
 
+
+        self._init_msdd_scales() 
+        if self._trainer is not None and self.cfg_msdd_model.get('augmentor', None) is not None:
+            self.augmentor = process_augmentations(self.cfg_msdd_model.augmentor)
+        else:
+            self.augmentor = None
         super().__init__(cfg=self.cfg_msdd_model, trainer=trainer)
         window_length_in_sec = self.cfg_msdd_model.diarizer.speaker_embeddings.parameters.window_length_in_sec
         if isinstance(window_length_in_sec, int) or len(window_length_in_sec) <= 1:
@@ -329,6 +348,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self.max_feat_frame_count = int(self.msdd_multiscale_args_dict["scale_dict"][0][0] * self.frame_per_sec) # 0-th scale, window length
         self.msdd = EncDecDiarLabelModel.from_config_dict(self.cfg_msdd_model.msdd_module)
         self.msdd_classifier = EncDecDiarLabelModel.from_config_dict(self.cfg_msdd_model.msdd_classifier)
+        self.global_loss_ratio = self.cfg_msdd_model.get('global_loss_ratio', 300)
+
         self.encoder_infer_mode = False
 
         if trainer is not None:
@@ -336,10 +357,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self._init_speaker_model()
             self.add_speaker_model_config(cfg)
             self.add_vad_model_config(cfg)
-            # self._init_diarizer_model(yaml_path=self.cfg_msdd_model.validation_ds.diarizer_yaml, 
-            #                           dev_manifest_path=self.cfg_msdd_model.validation_ds.manifest_filepath,
-            #                           emb_dir=self.cfg_msdd_model.validation_ds.emb_dir)
             self.loss = instantiate(self.cfg_msdd_model.loss)
+            self.global_loss = instantiate(self.cfg_msdd_model.global_loss)
             self.affinity_loss = AffinityLoss()
             self.alpha = self.cfg_msdd_model.loss.alpha
             self.mu =  self.cfg_msdd_model.diarizer.vad.parameters.mu 
@@ -349,6 +368,14 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self.msdd._vad_model = EncDecMultiClassificationModel.from_config_dict(cfg.vad_model_cfg)
             self.subsample_vad = int(self.cfg_msdd_model.diarizer.vad.parameters.shift_length_in_sec / 0.01) 
         self.multichannel_mixing = self.cfg_msdd_model.get('multichannel_mixing', True)
+        
+        if self.cfg_msdd_model.get("multichannel", None) is not None:
+            self.power_p=self.cfg_msdd_model.multichannel.parameters.get("power_p", 4)
+            self.mix_count=self.cfg_msdd_model.multichannel.parameters.get("mix_count", 2) 
+        else:
+            self.power_p=4
+            self.mix_count=2
+        
         # Call `self.save_hyperparameters` in modelPT.py again since cfg should contain speaker model's config.
         self.save_hyperparameters("cfg")
 
@@ -392,7 +419,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self._optimizer_param_groups = None
             return
 
-        known_groups = []
         param_groups = []
         if "optim_param_groups" in self.cfg:
             param_groups_cfg = self.cfg.optim_param_groups
@@ -516,22 +542,20 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self.msdd._speaker_model = EncDecSpeakerLabelModel.from_pretrained(
                 model_name=model_path, map_location=rank_id
             )
+        
+        if self.cfg_msdd_model.speaker_decoder is not None:
+            self.msdd._speaker_model_decoder = EncDecSpeakerLabelModel.from_config_dict(self.cfg_msdd_model.speaker_decoder)
+            self.msdd._speaker_model.decoder.angular = True
+            self.msdd._speaker_model.decoder.final = self.msdd._speaker_model_decoder.final
+            
         if self._cfg.freeze_speaker_model:
             self.msdd._speaker_model.eval()
 
         self._speaker_params = self.cfg_msdd_model.diarizer.speaker_embeddings.parameters
     
-    def _init_diarizer_model(self, yaml_path, dev_manifest_path, emb_dir):
-        """
-        """
-        self._diarizer_cfg = OmegaConf.load(yaml_path)
-        self._diarizer_cfg.diarizer.manifest_filepath = dev_manifest_path
-        self._diarizer_cfg.diarizer.out_dir = emb_dir
-        self._diarizer_model = NeuralDiarizer(cfg=self._diarizer_cfg, msdd_model=self).to(cfg.device)
-
     def __setup_dataloader_from_config(self, config):
         featurizer = WaveformFeaturizer(
-            sample_rate=config['sample_rate'], int_values=config.get('int_values', False), augmentor=None
+            sample_rate=config['sample_rate'], int_values=config.get('int_values', False), augmentor=self.augmentor
         )
 
         if 'manifest_filepath' in config and config['manifest_filepath'] is None:
@@ -618,32 +642,92 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self._validation_dl = self.__setup_dataloader_from_config(config=val_data_layer_config,)
 
     def segment_diar_window_test_dataset(self, test_data_config: Optional[Union[DictConfig, Dict]],longest_scale_idx=0):
+
         test_manifest_jsons = read_manifest(test_data_config['manifest_filepath'])
-        self.segmented_manifest_list = []
-        self.diar_window = self.cfg.session_len_sec
-        self.diar_window_shift = self.cfg.session_len_sec - self.multiscale_args_dict['scale_dict'][longest_scale_idx][1]
+        self.segmented_manifest_list, self.uniq_id_segment_counts = [], {}
+        # self.diar_window = self.cfg.session_len_sec # v1 setting
+        # self.diar_window_shift = self.cfg.session_len_sec - self.msdd_multiscale_args_dict['scale_dict'][longest_scale_idx][1] # v1 setting
+        self.multiscale_args_dict = self.msdd_multiscale_args_dict # Use interpolated scale from MSDD model
+        ovl_len = self.msdd_multiscale_args_dict['scale_dict'][longest_scale_idx][0]
+
+        shift = self.cfg.session_len_sec - 2 * ovl_len
+
+        self.diar_window = self.cfg.session_len_sec # v2 setting
+        self.diar_window_shift = self.cfg.session_len_sec - ovl_len # v2 setting
+        self.diar_ovl_len = ovl_len # v2 setting
+        session_durations_list = [] 
         for manifest_json in test_manifest_jsons:
             if manifest_json['duration'] is None:
                 manifest_json['duration'] = sox.file_info.duration(manifest_json['audio_filepath'])
             total_offset, total_duration = manifest_json['offset'], manifest_json['duration']
-            subsegments = get_subsegments(offset=total_offset, 
-                                          window=self.diar_window, 
-                                          shift=self.diar_window_shift, 
-                                          duration=total_duration)
+            double_ovl = True 
+            if double_ovl:
+                subsegments = []
+                total_chunks = int(np.ceil((total_duration - shift - ovl_len) / shift) + 1)
+                for idx in range(total_chunks):
+                    if idx == 0:
+                        subsegments.append((0, self.diar_window))
+                        cursor = self.diar_window
+                    elif idx == total_chunks - 1:
+                        dur = total_duration - (cursor - 2*ovl_len)
+                        subsegments.append((cursor - 2*ovl_len, min(self.diar_window, total_duration - (cursor - 2*ovl_len))))
+                    else:
+                        subsegments.append((cursor - 2*ovl_len, self.diar_window))
+                        cursor = cursor - 2*ovl_len + self.diar_window
                 
+                if (subsegments[-1][0] + subsegments[-1][1]) != total_duration:
+                    raise ValueError("Last subsegment end time is not equal to total duration")
+            else:
+                subsegments = get_subsegments(offset=total_offset, 
+                                            window=self.diar_window, 
+                                            shift=self.diar_window_shift, 
+                                            duration=total_duration)
+            session_durations_list.append(manifest_json['duration'])
+            if isinstance(manifest_json['audio_filepath'], list):
+                uniq_id = manifest_json['uniq_id'] # Multi-channel 
+            else:
+                uniq_id = get_uniqname_from_filepath(manifest_json['audio_filepath']) # single-channel
+            self.uniq_id_segment_counts[uniq_id] = 0
             for (stt, dur) in subsegments:
+                if dur < 0:
+                    raise ValueError(f"Subsegment duration is negative: {dur}")
                 segment_manifest_json = copy.deepcopy(manifest_json)
                 segment_manifest_json['offset'], segment_manifest_json['duration'] = stt, dur
                 self.segmented_manifest_list.append(segment_manifest_json)
-
+                self.uniq_id_segment_counts[uniq_id] += 1
+        max_dur = max(session_durations_list)
+        max_duration_json = test_manifest_jsons[session_durations_list.index(max_dur)]
+        scale_n = len(self.multiscale_args_dict['scale_dict'])
+        max_len_ms_ts, ms_seg_counts = get_ms_seg_timestamps(uniq_id='[max_len]', 
+                                                            offset=0, 
+                                                            duration=max_dur, 
+                                                            feat_per_sec=100, 
+                                                            scale_n=scale_n,
+                                                            multiscale_args_dict=self.multiscale_args_dict,
+                                                            dtype=torch.float,
+                                                            min_subsegment_duration=self.multiscale_args_dict['scale_dict'][scale_n-1][0],
+                                                            )
+        timestamps_in_scales = [] 
+        for scale_idx in range(max_len_ms_ts.shape[0]):
+            timestamps_in_scales.append(max_len_ms_ts[scale_idx][:ms_seg_counts[scale_idx]])
+        max_len_scale_mapping_list = get_argmin_mat_large(timestamps_in_scales=timestamps_in_scales)
+        try:
+            max_len_scale_mapping = torch.stack(max_len_scale_mapping_list)
+        except:
+            import ipdb; ipdb.set_trace()
+        max_len_ms_ts_rep = self.repeat_and_align(ms_seg_timestamps=max_len_ms_ts.unsqueeze(0), 
+                                                  scale_mapping=max_len_scale_mapping.unsqueeze(0),
+                                                  all_seq_len = ms_seg_counts[-1],
+                                                  batch_size=1)
         segmented_manifest_path = test_data_config.manifest_filepath.replace('.json', '.segmented.json') 
         self.segmented_manifest_path = segmented_manifest_path
         write_manifest(output_path=segmented_manifest_path, target_manifest=self.segmented_manifest_list)
         test_data_config.manifest_filepath = segmented_manifest_path
-        return test_data_config
+        return test_data_config, max_len_ms_ts_rep, max_len_scale_mapping
 
-    def setup_test_data(self, test_data_config: Optional[Union[DictConfig, Dict]]):
-        test_data_config = self.segment_diar_window_test_dataset(test_data_config)
+    def setup_test_data(self, test_data_config: Optional[Union[DictConfig, Dict]], global_input_segmentation=True):
+        if global_input_segmentation:
+            test_data_config, self.max_len_ms_ts, self.max_len_scale_map = self.segment_diar_window_test_dataset(test_data_config)
         self._test_dl = self.__setup_dataloader_from_config_infer(
             config=test_data_config,
             emb_seq=self.emb_seq_test,
@@ -652,9 +736,10 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         )
     
     def setup_encoder_infer_data(self, val_data_config: Optional[Union[DictConfig, Dict]]):
-        val_data_config = self.segment_diar_window_test_dataset(val_data_config)
+        val_data_config, max_len_ms_ts, max_len_scale_map = self.segment_diar_window_test_dataset(val_data_config)
         self.encoder_infer_mode = True
         self._validation_dl = self.__setup_dataloader_from_config(config=val_data_config,)
+        return max_len_ms_ts, max_len_scale_map 
 
     def setup_multiple_test_data(self, test_data_config):
         """
@@ -680,6 +765,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             "clus_label_index": NeuralType(('B', 'T'), LengthsType()),
             "scale_mapping": NeuralType(('B', 'C', 'T'), LengthsType()),
             "ch_clus_mat": NeuralType(('B', 'C', 'C'), ProbsType()),
+            "global_spk_labels": NeuralType(('B', 'T'), LengthsType()),
         }
 
     @property
@@ -743,7 +829,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         device = ms_seg_timestamps.device
         repeat_mats_all = scale_mapping[0].to(device)
         ms_ts = ms_seg_timestamps.reshape(batch_size, -1, 2)
-        repeat_mats_all = repeat_mats_all + (all_seq_len * torch.arange(self.msdd_scale_n).to(device)).unsqueeze(1).repeat(1, all_seq_len).to(device)
+        offsets_for_batch = (all_seq_len * torch.arange(self.msdd_scale_n).to(device)).unsqueeze(1).repeat(1, all_seq_len).to(device)
+        repeat_mats_all = repeat_mats_all + offsets_for_batch
         ms_ts_rep = ms_ts[:, repeat_mats_all.flatten(), :].reshape(batch_size, self.msdd_scale_n, -1, 2)
         return ms_ts_rep
 
@@ -850,9 +937,9 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         
         # Pre-compute feature indices for faster assigning:
         feature_frame_length_range, feature_frame_interval_range= self.get_feat_range_matirx(max_feat_len=processed_signal.shape[2], 
-                                                                                            feature_count_range=feature_count_range, 
-                                                                                            target_timestamps=target_timestamps, 
-                                                                                            device=processed_signal.device)
+                                                                                             feature_count_range=feature_count_range, 
+                                                                                             target_timestamps=target_timestamps, 
+                                                                                             device=processed_signal.device)
         # Assign frame-by-frame indices for one-pass assignment without nested for-loops
         ms_seg_count_frame_range = torch.repeat_interleave(torch.arange(total_seg_count).to(device), feature_count_range)       
         batch_frame_range = torch.repeat_interleave(batch_index_range, feature_count_range)
@@ -874,8 +961,26 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         encoded, _ = self.msdd._speaker_model.encoder(audio_signal=processed_signal, length=processed_signal_len)
         encoded_segments = torch.zeros(total_seg_count, encoded.shape[1], self.max_feat_frame_count).to(torch.float32).to(device)
         encoded_segments[ms_seg_count_frame_range, :, feature_frame_length_range] = encoded[batch_frame_range, :, feature_frame_interval_range]
-        _, embs = self.msdd._speaker_model.decoder(encoder_output=encoded_segments, length=feature_count_range) 
-        return embs
+        pools, embs = self.msdd._speaker_model.decoder(encoder_output=encoded_segments, length=feature_count_range) 
+        return embs, pools
+
+    def forward_multiscale_vad(
+        self,
+        vad_probs_frame, 
+        total_seg_count,
+        ms_seg_count_frame_range, 
+        feature_frame_length_range, 
+        batch_frame_range, 
+        feature_frame_interval_range,
+        feature_count_range,
+        device,
+        ):
+        # Assign the acoustic feature values in processed_signal at once
+        # encoded, _ = self.msdd._speaker_model.encoder(audio_signal=processed_signal, length=processed_signal_len)
+        # encoded_segments = torch.zeros(total_seg_count, encoded.shape[1], self.max_feat_frame_count).to(torch.float32).to(device)
+        vad_prob_segments = torch.zeros(total_seg_count, self.max_feat_frame_count).to(torch.float32).to(device)
+        vad_prob_segments[ms_seg_count_frame_range, feature_frame_length_range] = vad_probs_frame[batch_frame_range, feature_frame_interval_range]
+        return vad_prob_segments
 
     def forward_multiscale(
         self, 
@@ -892,30 +997,43 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                                                         ms_seg_counts=ms_seg_counts, 
                                                         device=processed_signal.device)
 
-        embs = self.forward_multi_decoder(processed_signal=processed_signal, 
-                                        processed_signal_len=processed_signal_len, 
-                                        total_seg_count=tsc,
-                                        ms_seg_count_frame_range=mscfr, 
-                                        feature_frame_length_range=fflr, 
-                                        batch_frame_range=bfr, 
-                                        feature_frame_interval_range=ffir,
-                                        feature_count_range=fcr,
-                                        device=processed_signal.device,
-                                        )
+        embs, pools = self.forward_multi_decoder(processed_signal=processed_signal, 
+                                            processed_signal_len=processed_signal_len, 
+                                            total_seg_count=tsc,
+                                            ms_seg_count_frame_range=mscfr, 
+                                            feature_frame_length_range=fflr, 
+                                            batch_frame_range=bfr, 
+                                            feature_frame_interval_range=ffir,
+                                            feature_count_range=fcr,
+                                            device=processed_signal.device,
+                                            )
         if vad_probs_frame is not None:
             vad_probs_steps = self.reshape_vad_frames(vad_probs_frame=vad_probs_frame, 
                                                       max_feat_len=processed_signal.shape[2], 
                                                       ms_seg_timestamps=ms_seg_timestamps, 
                                                       max_seq_len=ms_seg_counts.max())
+            
+            vad_prob_segments = self.forward_multiscale_vad(vad_probs_frame=vad_probs_frame,
+                                                    total_seg_count=tsc,
+                                                    ms_seg_count_frame_range=mscfr, 
+                                                    feature_frame_length_range=fflr, 
+                                                    batch_frame_range=bfr, 
+                                                    feature_frame_interval_range=ffir,
+                                                    feature_count_range=fcr,
+                                                    device=processed_signal.device,
+                                                    )
         else:
             vad_probs_steps = None 
-        return embs, vad_probs_steps
+        return embs, pools, vad_probs_steps, vad_prob_segments
     
     def get_feat_range_matirx(self, max_feat_len, feature_count_range, target_timestamps, device):
         feat_index_range = torch.arange(0, max_feat_len).to(device) 
         feature_frame_offsets = torch.repeat_interleave(target_timestamps[:, 0], feature_count_range)
         feature_frame_interval_range = torch.concat([feat_index_range[stt:end] for (stt, end) in target_timestamps]).to(device)
-        feature_frame_length_range = feature_frame_interval_range - feature_frame_offsets
+        try:
+            feature_frame_length_range = feature_frame_interval_range - feature_frame_offsets
+        except:
+            import ipdb; ipdb.set_trace()
         return feature_frame_length_range, feature_frame_interval_range
     
     def reshape_vad_frames(self, vad_probs_frame, max_feat_len, ms_seg_timestamps, max_seq_len):
@@ -994,7 +1112,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         Encoder part for end-to-end diarizaiton model.
 
         """
-        if self.multichannel_mixing and len(audio_signal.shape) > 2:
+        if self.multichannel_mixing and len(audio_signal.shape) > 2: # Check if audio_signal is multichannel
             audio_signal = self._mix_to_mono(audio_signal_batch=audio_signal, 
                                              audio_signal_len_batch=audio_signal_length, 
                                              ch_clus_mat=ch_clus_mat, 
@@ -1006,7 +1124,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         
         vad_probs_frame = self.forward_vad(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
         
-        embs, vad_probs = self.forward_multiscale(
+        embs, pools, vad_probs, vad_probs_segments = self.forward_multiscale(
             processed_signal=processed_signal, 
             processed_signal_len=processed_signal_length, 
             ms_seg_timestamps=ms_seg_timestamps, 
@@ -1016,15 +1134,23 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         
         if self._cfg.freeze_speaker_model:
             embs = embs.detach()
-
+        
         # Reshape the embedding vectors into multi-scale inputs
         ms_emb_seq, ms_ts_rep = self.get_ms_emb_fixed(embs=embs,    
                                                       scale_mapping=scale_mapping, 
                                                       ms_seg_counts=ms_seg_counts, 
                                                       ms_seg_timestamps=ms_seg_timestamps)
-        return ms_emb_seq, vad_probs, ms_ts_rep
+        ms_pools_seq, _ = self.get_ms_emb_fixed(embs=pools,    
+                                                scale_mapping=scale_mapping, 
+                                                ms_seg_counts=ms_seg_counts, 
+                                                ms_seg_timestamps=ms_seg_timestamps)
+        ms_vad_probs, _ = self.get_ms_emb_fixed(embs=vad_probs_segments,    
+                                                scale_mapping=scale_mapping, 
+                                                ms_seg_counts=ms_seg_counts, 
+                                                ms_seg_timestamps=ms_seg_timestamps)
+        return ms_emb_seq, ms_pools_seq, ms_vad_probs, vad_probs, ms_ts_rep,
     
-    def _get_ch_merger_mat(self, audio_signal, audio_signal_len, ch_clus_mat, eval_mode=False):
+    def _get_ch_merger_mat(self, audio_signal, audio_signal_len, ch_clus_mat, eval_mode=False, power_p = 4, mix_count=3):
         """
         This method returns the weights for each channel for the current batch
 
@@ -1043,7 +1169,12 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         log_probs = self.msdd._vad_model(input_signal=audio_signal_batch, 
                                          input_signal_length=audio_signal_len_batch)
         probs = torch.softmax(log_probs, dim=-1)[:, :, 1].mean(dim=1).reshape(-1, max_ch)
-        batch_weights = probs**0.5 / (probs**0.5).sum(dim=1).unsqueeze(1)
+        batch_weights = probs**power_p / (probs**power_p).sum(dim=1).unsqueeze(1)
+        try:
+            batch_weights, _ = get_top_k_for_each_row(batch_weights, k_count=mix_count, orig_dim=batch_weights.shape[1])
+        except:
+            import ipdb; ipdb.set_trace()
+        batch_weights = batch_weights / torch.sum(batch_weights, dim=1, keepdim=True) 
         batch_weights = batch_weights.unsqueeze(1)
         return batch_weights
 
@@ -1055,11 +1186,18 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         eval_mode=False
         ):
         audio_signal_clus = torch.bmm(ch_clus_mat, audio_signal_batch.transpose(2,1)).squeeze(1)
-        ch_merger_mat = self._get_ch_merger_mat(audio_signal_batch, audio_signal_len_batch, ch_clus_mat, eval_mode)
+        ch_merger_mat = self._get_ch_merger_mat(
+            audio_signal_batch, 
+            audio_signal_len_batch, 
+            ch_clus_mat, 
+            eval_mode,
+            power_p=self.power_p,
+            mix_count=self.mix_count,
+            )
         audio_signal = torch.bmm(ch_merger_mat, audio_signal_clus).squeeze(1)
         return audio_signal
             
-    @typecheck()
+    # @typecheck()
     def forward(
         self, 
         audio_signal, 
@@ -1074,7 +1212,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         Forward pass for training.
         
         """        
-        ms_emb_seq, vad_probs, _ = self.forward_encoder(
+        ms_emb_seq, ms_pools_seq, ms_vad_probs, vad_probs, _ = self.forward_encoder(
             audio_signal=audio_signal, 
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -1082,7 +1220,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
             ch_clus_mat=ch_clus_mat,
         )
-
+        ms_pools_seq = ms_pools_seq.mean(dim=2)
         # Step 2: Clustering for initialization
         # Compute the cosine similarity between the input and the cluster average embeddings
         batch_cos_sim = get_batch_cosine_sim(ms_emb_seq)
@@ -1094,12 +1232,12 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
 
         # Step 3: MSDD Inference
         preds, scale_weights = self.forward_infer(ms_emb_seq=ms_emb_seq, seq_lengths=ms_seg_counts[:, -1], ms_avg_embs=ms_avg_embs)
-        return preds, vad_probs, scale_weights, batch_cos_sim
+        return preds, vad_probs, scale_weights, batch_cos_sim, ms_pools_seq
 
     def training_step(self, batch: list, batch_idx: int):
-        audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets = batch
+        audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts.detach()])
-        preds, vad_probs, _, batch_affinity_mat = self.forward(
+        preds, vad_probs, _, batch_affinity_mat, ms_pools_seq = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -1110,15 +1248,18 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         )
         spk_loss = self.loss(probs=preds, labels=targets) 
         vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2))
+        loss_glb = self.global_loss(logits=ms_pools_seq.reshape(-1, ms_pools_seq.shape[-1]), labels=global_spk_labels.view(-1))
         loss_1 = (1 - self.mu) * spk_loss + self.mu * vad_loss
         loss_2 = self.affinity_loss.forward(batch_affinity_mat=batch_affinity_mat, targets=targets)
-        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
+        # loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
+        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2 + self.global_loss_ratio*loss_glb
         self._accuracy_train(preds, targets, sequence_lengths)
         self._accuracy_vad_train(vad_probs.unsqueeze(2), targets.max(dim=2)[0].unsqueeze(2), sequence_lengths)
         torch.cuda.empty_cache()
         f1_acc = self._accuracy_train.compute()
         f1_vad_acc = self._accuracy_vad_train.compute()
         self.log('loss', loss, sync_dist=True)
+        self.log('loss_glb', self.global_loss_ratio * loss_glb, sync_dist=True)
         self.log('loss_bce', (1-self.alpha) * loss_1, sync_dist=True)
         self.log('loss_aff', self.alpha * loss_2, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
@@ -1128,10 +1269,9 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         return {'loss': loss}
 
     def validation_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
-        audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets = batch
+        audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
-
-        preds, vad_probs, _, batch_affinity_mat = self.forward(
+        preds, vad_probs, _, batch_affinity_mat, ms_pools_seq = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -1140,17 +1280,19 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
             ch_clus_mat=ch_clus_mat,
         )
-
+        # batch_global_spk_labels = clus_label_index.unsqueeze(2).repeat(1,1,ms_emb_seq.shape[2]).reshape(clus_label_index.shape[0], -1)
+        loss_glb = self.global_loss(logits=ms_pools_seq.reshape(-1, ms_pools_seq.shape[-1]), labels=global_spk_labels.view(-1))
         spk_loss = self.loss(probs=preds, labels=targets) 
         vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2))
         loss_1 = (1 - self.mu) * spk_loss + self.mu * vad_loss
         loss_2 = self.affinity_loss.forward(batch_affinity_mat=batch_affinity_mat, targets=targets)
-        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
+        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2 + self.global_loss_ratio*loss_glb
         self._accuracy_valid(preds, targets, sequence_lengths)
         self._accuracy_vad_valid(vad_probs.unsqueeze(2), targets.max(dim=2)[0].unsqueeze(2), sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
         f1_vad_acc = self._accuracy_vad_valid.compute()
         self.log('val_loss', loss, sync_dist=True)
+        self.log('val_loss_glb', self.global_loss_ratio * loss_glb, sync_dist=True)
         self.log('val_f1_acc', f1_acc, sync_dist=True)
         self.log('val_f1_vad_acc', f1_vad_acc, sync_dist=True)
         self.log('val_loss_bce', (1-self.alpha) * loss_1, sync_dist=True)
@@ -1241,6 +1383,8 @@ class ClusterEmbedding(torch.nn.Module):
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.msdd_model = self._init_msdd_model(cfg=cfg_diar_infer, device=cfg_diar_infer.device)
         self.transfer_diar_params_to_model_params(cfg_diar_infer)
+        # Use multi-scale settings from MSDD model config
+        self.cfg_diar_infer.diarizer.speaker_embeddings.parameters = self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters
         self.clus_diar_model = ClusteringDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model, is_modular=False)
 
     def prepare_cluster_embs_infer(self):
@@ -1248,7 +1392,6 @@ class ClusterEmbedding(torch.nn.Module):
         Launch clustering diarizer to prepare embedding vectors and clustering results.
         """
         self.max_num_speakers = self.cfg_diar_infer.diarizer.clustering.parameters.max_num_speakers
-        self.msdd_model._cfg.diarizer.speaker_embeddings.parameters = self.cfg_diar_infer.diarizer.speaker_embeddings.parameters
         emb_seq_test, ms_time_stamps, vad_probs, clus_test_label_dict = self.run_clustering_diarizer(
             self._cfg_msdd.test_ds.manifest_filepath, self._cfg_msdd.test_ds.emb_dir
         )
@@ -1342,9 +1485,13 @@ class ClusterEmbedding(torch.nn.Module):
         self.msdd_model.cfg_msdd_model.validation_ds.batch_size = cfg.diarizer.msdd_model.parameters.infer_batch_size
 
         self.msdd_model.cfg_msdd_model.max_num_of_spks = cfg.diarizer.clustering.parameters.max_num_speakers
-        self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters = cfg.diarizer.speaker_embeddings.parameters
-        self.msdd_model.interpolated_scale = cfg.diarizer.speaker_embeddings.parameters.interpolate_scale
-        
+
+        # self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters = cfg.diarizer.speaker_embeddings.parameters
+        # self.msdd_model.interpolated_scale = cfg.diarizer.speaker_embeddings.parameters.interpolate_scale
+       
+        self.msdd_model.power_p = cfg.diarizer.multichannel.parameters.power_p
+        self.msdd_model.mix_count = cfg.diarizer.multichannel.parameters.mix_count
+ 
 class NeuralDiarizer(LightningModule):
     """
     Class for inference based on multiscale diarization decoder (MSDD). MSDD requires initializing clustering results from
@@ -1410,8 +1557,9 @@ class NeuralDiarizer(LightningModule):
         self.msdd_model.cfg_msdd_model.validation_ds.batch_size = cfg.batch_size
 
         self.msdd_model.cfg_msdd_model.max_num_of_spks = cfg.diarizer.clustering.parameters.max_num_speakers
-        self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters = cfg.diarizer.speaker_embeddings.parameters
-        self.msdd_model.interpolated_scale = cfg.diarizer.speaker_embeddings.parameters.interpolate_scale
+
+        self.msdd_model.power_p = cfg.diarizer.multichannel.parameters.power_p
+        self.msdd_model.mix_count = cfg.diarizer.multichannel.parameters.mix_count
 
     @rank_zero_only
     def save_to(self, save_path: str):
@@ -1476,14 +1624,20 @@ class NeuralDiarizer(LightningModule):
         `self.run_overlap_aware_eval()` function performs DER evaluation.
         """
         self.transfer_diar_params_to_model_params(self._cfg)
+        # Use MSDD Multi-scale params for clustering diarizer
+        self._cfg.diarizer.speaker_embeddings.parameters = self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters
+        # self._cfg.diarizer.speaker_embeddings.parameters.interpolate_scale = self.msdd_model.interpolated_scale
+        
         self.msdd_model.emb_seq_test, self.msdd_model.ms_time_stamps, self.vad_probs_dict, self.msdd_model.clus_test_label_dict = self.clustering_embedding.prepare_cluster_embs_infer()
         self.msdd_model.pairwise_infer = True
         preds, targets, ms_ts = self.run_multiscale_decoder()
         thresholds = list(self._cfg.diarizer.msdd_model.parameters.sigmoid_threshold)
         for threshold in thresholds:
             self.run_overlap_aware_eval(preds, ms_ts, threshold) 
-        logging.info(f"MSDD v2 model: {self._cfg.diarizer.msdd_model.model_path}")
-        logging.info(f"global_average_mix_ratio: {self._cfg.diarizer.msdd_model.parameters.global_average_mix_ratio}")
+        print(f"MSDD v2 model: {self._cfg.diarizer.msdd_model.model_path}")
+        print(f"global_average_mix_ratio: {self._cfg.diarizer.msdd_model.parameters.global_average_mix_ratio}")
+        print(f"diarizer.multichannel.parameters: {self._cfg.diarizer.multichannel.parameters}")
+        print(f"diarizer.clustering.parameters {self._cfg.diarizer.clustering.parameters}")
     
     def collect_ms_avg_embs(self, ms_avg_embs_current, batch_uniq_ids):
         for sample_idx, uniq_id in enumerate(batch_uniq_ids):
@@ -1530,7 +1684,7 @@ class NeuralDiarizer(LightningModule):
         os.makedirs(self.out_rttm_dir, exist_ok=True)
         self.out_json_dir = os.path.join(self.clustering_embedding.clus_diar_model._out_dir, 'pred_jsons_with_overlap')
         os.makedirs(self.out_json_dir, exist_ok=True)
-        self.msdd_model.setup_test_data(self.msdd_model.cfg.test_ds)
+        self.msdd_model.setup_test_data(self.msdd_model.cfg.test_ds, global_input_segmentation=True)
         self.msdd_model.eval()
         self.ms_avg_embs_cache = {}
         batch_size = self.msdd_model.cfg.test_ds.batch_size
@@ -1541,15 +1695,20 @@ class NeuralDiarizer(LightningModule):
         all_manifest_uniq_ids = get_uniq_id_list_from_manifest(self.msdd_model.segmented_manifest_path)
         
         # Get the average embeddings for each session
-        logging.info("Computing average embeddings for each session.")
+        # logging.info("Computing average embeddings for each session.")
+        
+        total_new, total_glb_clus, total_target_size = 0, 0, 0
         for test_batch_idx, test_batch in enumerate(tqdm(self.msdd_model.test_dataloader(), desc="Computing average embeddings")):
             ms_emb_seq, _, seq_lengths, clus_label_index, targets = test_batch
+            
+
+            
             batch_uniq_ids = all_manifest_uniq_ids[test_batch_idx * batch_size: (test_batch_idx+1) * batch_size]
             ms_avg_embs_current = self.msdd_model.get_cluster_avg_embs_model(ms_emb_seq, clus_label_index, seq_lengths, add_sil_embs=False).to(self.msdd_model.device)
             self.collect_ms_avg_embs(ms_avg_embs_current, batch_uniq_ids)
-            
-        # self.get_average_embeddings(all_manifest_uniq_ids)
         
+        # logging.info(f"Local Clus. Vs global Clus. fine new_clus {total_new/total_target_size:.4f}, clus {total_glb_clus/total_target_size:.4f}")
+            
         # Run the multiscale decoder using the average embeddings (speaker profiles)
         logging.info("Running MSDD classifier part for each session.")
         for test_batch_idx, test_batch in enumerate(tqdm(self.msdd_model.test_dataloader(), desc="Running multiscale decoder")):
@@ -1563,8 +1722,8 @@ class NeuralDiarizer(LightningModule):
             
             ms_avg_embs = self.update_and_retrieve_avg_embs(ms_avg_embs_current, batch_uniq_ids)
             preds, _ = self.msdd_model.forward_infer(ms_emb_seq=ms_emb_seq, 
-                                                    seq_lengths=seq_lengths, 
-                                                    ms_avg_embs=ms_avg_embs)
+                                                     seq_lengths=seq_lengths, 
+                                                     ms_avg_embs=ms_avg_embs)
 
             if self._cfg.diarizer.msdd_model.parameters.seq_eval_mode:
                 self.msdd_model._accuracy_test(preds.type(torch.float), _targets.type(torch.float), signal_lengths)
@@ -1585,47 +1744,68 @@ class NeuralDiarizer(LightningModule):
         ):
         batch_size = self.msdd_model.cfg.test_ds.batch_size
         base_shift = self.msdd_model.cfg.interpolated_scale/2 
+        base_window = self.msdd_model.cfg.interpolated_scale
+        self.msdd_uniq_id_segment_counts = {}
         self.preds, self.targets = {}, {}
         self.time_stamps = self.msdd_model.ms_time_stamps
         self.scale_mapping = {} 
         base_seg_per_longest_seg = int((self.msdd_model.diar_window - self.msdd_model.diar_window_shift) / (self.msdd_model.cfg.interpolated_scale/2))-1
         all_manifest_uniq_ids = get_uniq_id_list_from_manifest(self.msdd_model.segmented_manifest_path)
-        
+        # ovl = int(self._diarizer_model.diar_ovl_len / (self._diarizer_model.cfg.interpolated_scale/2))-1 
+        ovl = int(self.msdd_model.diar_ovl_len / (self.msdd_model.cfg.interpolated_scale/2))-1
+
         for batch_idx, (preds, targets) in enumerate(zip(all_preds_list, all_targets_list)):
             batch_uniq_ids = all_manifest_uniq_ids[batch_idx * batch_size: (batch_idx+1) * batch_size ]
             batch_manifest = self.msdd_model.segmented_manifest_list[batch_idx * batch_size: (batch_idx+1) * batch_size ]
-            
+            is_last_segment = False
             for sample_id, uniq_id in enumerate(batch_uniq_ids):
-                last_trunc_index = int(batch_manifest[sample_id]['duration']/base_shift) 
-                
                 if uniq_id in self.preds:
-                    preds_trunc = self.preds[uniq_id][:-base_seg_per_longest_seg, :]
-                    targets_trunc = self.targets[uniq_id][:-base_seg_per_longest_seg, :]
+                    preds_trunc = self.preds[uniq_id]
+                    targets_trunc = self.targets[uniq_id]
                     
                 if batch_manifest[sample_id]['duration'] < self.msdd_model.cfg.session_len_sec:
-                    preds_add = all_preds_list[batch_idx][sample_id][:last_trunc_index,:]
-                    targets_add = all_targets_list[batch_idx][sample_id][:last_trunc_index,:]
+                    is_last_segment = True
+                    last_trunc_index = int(np.ceil((batch_manifest[sample_id]['duration']-base_window)/base_shift))
+                    preds_add = all_preds_list[batch_idx][sample_id][(ovl+1):last_trunc_index]
+                    # print(f"last pred_add raw shape {all_preds_list[batch_idx][sample_id].shape}")
+                    # print(f"ovl+1 {ovl+1}, last_trunc_index {last_trunc_index}")
+                    targets_add = all_targets_list[batch_idx][sample_id][(ovl+1):last_trunc_index]
                 else:
-                    preds_add = all_preds_list[batch_idx][sample_id]
-                    targets_add = all_targets_list[batch_idx][sample_id]
+                    is_last_segment = False
+                    preds_add = all_preds_list[batch_idx][sample_id][ovl+1:-ovl]
+                    targets_add = all_targets_list[batch_idx][sample_id][ovl+1:-ovl]
                         
                 if uniq_id in self.preds:
-                    self.preds[uniq_id] = torch.cat((preds_trunc, preds_add), dim=0)
-                    self.targets[uniq_id] = torch.cat((targets_trunc, targets_add), dim=0)
+                    if preds_add.shape[0] > 0: # If ts_add has valid length
+                        self.msdd_uniq_id_segment_counts[uniq_id] += 1
+                        # print(f"MSDD, _stitch_and_save: Adding preds_add.shape : {preds_add.shape} to preds_trunc.shape : {preds_trunc.shape}")
+                        self.preds[uniq_id] = torch.cat((preds_trunc, preds_add), dim=0)
+                        self.targets[uniq_id] = torch.cat((targets_trunc, targets_add), dim=0)
+                        # if is_last_segment:
+                            # print(f"=== The last sample id {sample_id} Last trunc index: {last_trunc_index}")
+                            # print(f" self.msdd_uniq_id_segment_counts[uniq_id] {self.msdd_uniq_id_segment_counts[uniq_id]}")
+                    else:
+                        # print(f"Last trunc index: {last_trunc_index}")
+                        print(f"MSDD, _stitch_and_save: Skipping preds_add.shape : {preds_add.shape} to preds_trunc.shape : {preds_trunc.shape}")
                 else:
-                    self.preds[uniq_id] = preds_add
-                    self.targets[uniq_id] = targets_add
+                    self.msdd_uniq_id_segment_counts[uniq_id] = 1
+                    # print(f"The first preds_add.shape : {all_preds_list[batch_idx][sample_id].shape}")
+                    # print(f"NeuralDiarizer, _stitch_and_save: the first time stamps preds_add.shape {all_preds_list[batch_idx][sample_id][:-ovl].shape}")
+                    self.preds[uniq_id] = all_preds_list[batch_idx][sample_id][ :-ovl]
+                    self.targets[uniq_id] = all_targets_list[batch_idx][sample_id][ :-ovl]
                     
-        for uniq_id, ms_ts in self.time_stamps.items():
-            timestamps_in_scales = []
-            for scale_idx in range(ms_ts.shape[0]):
-                unique_ts = torch.vstack((
-                    torch.unique(ms_ts[scale_idx][:, 0]), 
-                    torch.unique(ms_ts[scale_idx][:, 1])
-                    )).t()
-                timestamps_in_scales.append(unique_ts)
-            scale_mapping = get_argmin_mat_large(timestamps_in_scales)
-            self.scale_mapping[uniq_id] = scale_mapping
+        # for uniq_id, ms_ts in self.time_stamps.items():
+        #     if self.msdd_model.uniq_id_segment_counts[uniq_id] != self.msdd_uniq_id_segment_counts[uniq_id]:
+        #         raise ValueError(f"Uniq_id {uniq_id} has different segment counts between clustering and MSDD infer.")
+            # timestamps_in_scales = []
+            # for scale_idx in range(ms_ts.shape[0]):
+            #     unique_ts = torch.vstack((
+            #         torch.unique(ms_ts[scale_idx][:, 0]), 
+            #         torch.unique(ms_ts[scale_idx][:, 1])
+            #         )).t()
+            #     timestamps_in_scales.append(unique_ts)
+            # scale_mapping = get_argmin_mat_large(timestamps_in_scales)
+            # self.scale_mapping[uniq_id] = scale_mapping
             
         return self.preds, self.targets, self.time_stamps
 

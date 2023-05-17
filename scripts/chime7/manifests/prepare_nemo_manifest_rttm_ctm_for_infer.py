@@ -3,6 +3,7 @@ import os
 import json
 import glob
 import tqdm
+import time
 import sox
 
 import numpy as np
@@ -117,6 +118,10 @@ def create_multichannel_manifest(
 
         if uem is not None:
             uem = uem.strip()
+            uem_lines = open(uem).readlines()
+            uem_abs_stt = float(uem_lines[0].split()[-2])
+            uem_abs_end = float(uem_lines[-1].split()[-1])
+                
 
         if text is not None:
             with open(text.strip()) as f:
@@ -130,18 +135,19 @@ def create_multichannel_manifest(
         duration = None
         audio_duration_list = []
         for audio_line in tqdm.tqdm(audio_line_list, desc=f"Measuring multichannel audio duration for {uid} {count}/{total_file_count}", unit=" files"):
-            # import ipdb; ipdb.set_trace()
-            # audio_line = audio_line.strip()
-            # data, samplerate = sf.read(audio_line)
-            # duration = float(data.shape[0] / samplerate)
             duration = sox.file_info.duration(audio_line)
             audio_duration_list.append(duration)
         min_duration, max_duration = min(audio_duration_list), max(audio_duration_list)
+        if min_duration < (uem_abs_end - uem_abs_stt):
+            print(f"WARNING: {uid} has shorter min duration {min_duration} than UEM file duraiton {uem_abs_end - uem_abs_stt}")
+            time.sleep(2)
+        # target_duration = min(min_duration-rttm_min, rttm_dur)
+        target_duration = min(uem_abs_end-uem_abs_stt, min_duration-uem_abs_stt)
         meta = [
             {
                 "audio_filepath": audio_line_list,
-                "offset": rttm_min,
-                "duration": rttm_dur,
+                "offset": uem_abs_stt,
+                "duration": target_duration,
                 "min_duration": min_duration,
                 "max_duration": max_duration,
                 "uniq_id": uid,
@@ -153,6 +159,7 @@ def create_multichannel_manifest(
                 "ctm_filepath": ctm,
             }
         ]
+        print(f"meta file: {meta}")
         lines.extend(meta)
 
     write_file(manifest_filepath, lines, range(len(lines)))
@@ -199,6 +206,16 @@ def create_word_dict_lines(data):
         word_dict_line['speaker'] = data['speaker']
         new_word_dict_lines.append(word_dict_line)
     return new_word_dict_lines
+
+def parse_uem_lines(uem_lines):
+    uem_dict = {}
+    for line in uem_lines:
+        line_str = line.strip()
+        uniq_id = line_str.split()[0]
+        uem_dict[uniq_id] = line_str
+    return uem_dict 
+    
+    
 
 def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str):
     """
@@ -304,6 +321,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     
     if subset == 'dev':
         datasets = ['chime6', 'dipco', 'mixer6']
+        # datasets = ['dipco']
     elif subset == 'train':
         datasets = ['chime6']
     elif subset in ['train_intv', 'train_call']:
@@ -318,14 +336,22 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
             os.makedirs(dataset_output_dir)
 
         transcriptions_scoring_dir = os.path.join(dataset_dir, 'transcriptions_scoring', subset)
+        uem_dir = os.path.join(dataset_dir, 'uem', subset)
         transcriptions_scoring_files = glob.glob(transcriptions_scoring_dir + '/*.json')
-
+        uem_files_paths = glob.glob(uem_dir + '/*.uem')
+        if len(uem_files_paths) == 1:
+            uem_lines = open(uem_files_paths[0]).readlines()
+            uem_dict = parse_uem_lines(uem_lines)
+        elif len(uem_files_paths) == 0:
+            raise ValueError(f'No uem files found in {uem_dir}')
+        else:
+            raise ValueError(f'Multiple uem files found in {uem_dir}')
         logging.info('transcriptions_scoring')
         logging.info('\tnum files: %s', len(transcriptions_scoring_files))
 
         # Prepare manifest data
         manifest_data, session_duration_list = [], []
-        rttm_path_list, ctm_path_list, mc_audio_path_list, uniq_id_list = [], [], [], []
+        rttm_path_list, ctm_path_list, uem_path_list, mc_audio_path_list, uniq_id_list = [], [], [], [], []
         transcriptions_scoring_files = sorted(transcriptions_scoring_files)
         for file_path in transcriptions_scoring_files:
             dataset_dir = os.path.join(data_dir, dataset)
@@ -373,10 +399,14 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
             # Write CTM file with the name convention: <dataset>-<subset>-<session_id>.ctm
             ctm_lines_list = convert_word_dict_seq_to_ctm(word_dict_seq_list=word_dict_list, uniq_id=uniq_id)
             out_ctm_path=os.path.join(os.path.join(dataset_output_dir, 'ctm'), f'{uniq_id}.ctm')
+            out_uem_path=os.path.join(os.path.join(dataset_output_dir, 'ctm'), f'{uniq_id}.uem')
             write_txt(w_path=out_ctm_path, val='\n'.join(ctm_lines_list))
+            uem_lines_list = [uem_dict[session_id]]
+            write_txt(w_path=out_uem_path, val='\n'.join(uem_lines_list))
             
             rttm_path_list.append(out_rttm_path)
             ctm_path_list.append(out_ctm_path)
+            uem_path_list.append(out_uem_path)
             uniq_id_list.append(uniq_id)
         
         # End of dataset loop
@@ -400,6 +430,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
         out_mc_audio_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.mc_audio.list')
         out_rttm_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.rttm.list')
         out_ctm_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.ctm.list')
+        out_uem_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.uem.list')
         out_uniqid_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.uniq_id.list')
         
         out_manifest_path = os.path.join(dataset_output_dir, 'mulspk_asr_manifest', f'{split_id}.json')
@@ -407,6 +438,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
         write_txt(w_path=out_mc_audio_file_list_path, val='\n'.join(mc_audio_path_list))
         write_txt(w_path=out_rttm_file_list_path, val='\n'.join(rttm_path_list))
         write_txt(w_path=out_ctm_file_list_path, val='\n'.join(ctm_path_list))
+        write_txt(w_path=out_uem_file_list_path, val='\n'.join(uem_path_list))
         write_txt(w_path=out_uniqid_list_path, val='\n'.join(uniq_id_list))
 
         create_multichannel_manifest(uniq_id_path=out_uniqid_list_path,
@@ -414,6 +446,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
                                      manifest_filepath=out_manifest_path,
                                      rttm_path=out_rttm_file_list_path,
                                      ctm_path=out_ctm_file_list_path,
+                                     uem_path=out_uem_file_list_path,
                                      add_duration = True
         )
 

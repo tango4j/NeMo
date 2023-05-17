@@ -122,6 +122,7 @@ class MSDD_module(NeuralModule, Exportable):
         scale_n: int = 5,
         clamp_max: float = 1.0,
         conv_repeat: int = 1,
+        use_amsl_layer: bool = False,
         weighting_scheme: str = 'conv_scale_weight',
         context_vector_type: str = 'cos_sim',
     ):
@@ -144,6 +145,7 @@ class MSDD_module(NeuralModule, Exportable):
         self.chan: int = 2
         self.eps: float = 1e-6
         self.num_lstm_layers: int = num_lstm_layers
+        self.use_amsl_layer: bool = use_amsl_layer
         self.weighting_scheme: str = weighting_scheme
         self.context_vector_type: bool = context_vector_type
 
@@ -157,7 +159,6 @@ class MSDD_module(NeuralModule, Exportable):
             bidirectional=True,
             dropout=dropout_rate,
         )
-
         if self.weighting_scheme == 'conv_scale_weight':
             self.conv = nn.ModuleList(
                 [
