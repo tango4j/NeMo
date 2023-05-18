@@ -597,20 +597,16 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         all_ts_list, 
         all_mapping_list,
         all_vad_probs_list,
+        feat_per_sec: int = 100,
+        decimals: int = 2,
         ):
-        diar_manifest = read_manifest(manifest_file)
         batch_size = self._diarizer_model.cfg.validation_ds.batch_size
-        longest_scale_idx = 0
-        decimals = 2
-        feat_per_sec = 100
-        feat_len = float(1/feat_per_sec)
 
         overlap_sec = self._diarizer_model.diar_window - self._diarizer_params.speaker_embeddings.parameters.window_length_in_sec[0]
         self.embeddings, self.time_stamps, self.scale_mapping, self.vad_probs = {}, {}, {}, {}
         self.uniq_id_segment_counts = {}
         base_shift = self._diarizer_model.cfg.interpolated_scale/2 
         base_window = self._diarizer_model.cfg.interpolated_scale
-        # ovl = int((self._diarizer_model.diar_window - self._diarizer_model.diar_window_shift) / (self._diarizer_model.cfg.interpolated_scale/2))-1
         ovl = int(self._diarizer_model.diar_ovl_len / (self._diarizer_model.cfg.interpolated_scale/2))-1
         all_manifest_uniq_ids = get_uniq_id_list_from_manifest(self._diarizer_model.segmented_manifest_path)
 
@@ -618,7 +614,6 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             batch_len = embs.shape[0]
             batch_uniq_ids = all_manifest_uniq_ids[batch_idx * batch_size: (batch_idx+1) * batch_size ]
             batch_manifest = self._diarizer_model.segmented_manifest_list[batch_idx * batch_size: (batch_idx+1) * batch_size ]
-            is_last_segment = False
             for sample_id, uniq_id in enumerate(batch_uniq_ids):
 
                 # offset_feat = int((batch_manifest[sample_id]['offset']+self._diarizer_model.diar_ovl_len)*feat_per_sec)
@@ -630,13 +625,11 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                     vadp_trunc = self.vad_probs[uniq_id][-1]
                 # Check if the last segment is truncated 
                 if batch_manifest[sample_id]['duration'] < self._diarizer_model.cfg.session_len_sec:
-                    is_last_segment = True
                     last_trunc_index = int(np.ceil((batch_manifest[sample_id]['duration']-base_window)/base_shift))
                     embs_add = embs[sample_id][(ovl+1):last_trunc_index]
                     ts_add = time_stamps[sample_id][:, (ovl+1):last_trunc_index] + offset_feat
                     vadp_add = vad_probs[sample_id][(ovl+1):last_trunc_index]
                 else:
-                    is_last_segment = False
                     embs_add = embs[sample_id][(ovl+1):-ovl, :, :]
                     ts_add = time_stamps[sample_id][:, (ovl+1):-ovl, :] + offset_feat
                     vadp_add = vad_probs[sample_id][(ovl+1):-ovl]

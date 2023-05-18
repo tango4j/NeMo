@@ -88,7 +88,7 @@ def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, d
     max_aff = 1.0
     running_num_of_spks = max_num_speakers 
     
-    print(f"drop_and_cluster: argument - n_clusters {n_clusters} embs.shape : {embs.shape}")
+    print(f"drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape}")
     if embs.shape[0] < drop_length_thres:
         spectral_model = SpectralClustering(
             n_clusters=n_clusters, n_random_trials=30, cuda=cuda, device=embs.device
@@ -118,7 +118,7 @@ def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, d
         for spk in set(Y.cpu().numpy()):
             emb_means.append(torch.mean(embs[Y==spk], dim=0))
         if len(emb_means) == 1:
-            return Y
+            return Y, n_clusters
         stacked = torch.stack(emb_means)
         spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
         spk_aff_org = spk_aff.clone()
@@ -127,48 +127,12 @@ def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, d
         
         non_diag_spk_aff = spk_aff_org_flat[spk_aff_org_flat > 0.0]
         sorted_aff, sorted_idx = non_diag_spk_aff.flatten().sort()
-        try:
-            max_aff = sorted_aff[-1].item()
-        except:
-            import ipdb; ipdb.set_trace()
+        max_aff = sorted_aff[-1].item()
         print(f"sorted aff: {sorted_aff}")
         print(f"Max affinity: {max_aff}, reclus_thres: {reclus_thres},  running_num_of_spks: {torch.max(Y)+1}")
         running_num_of_spks -= 1
     n_clusters = Y.cpu().numpy().max() + 1
     return Y, n_clusters
-
-# def drop_and_recluster_(emb, min_num_speakers, max_num_speakers, affinity_mat, cuda, drop_thres=0.1):
-#     spectral_model = SpectralClustering(
-#         n_clusters=max_num_speakers, n_random_trials=1, cuda=cuda, device=emb.device
-#     )
-#     Y = spectral_model.forward(affinity_mat)
-    
-#     if cuda:
-#         embs = emb.cuda()
-#         Y = Y.cuda()
-
-#     emb_means= []
-#     for spk in set(Y.cpu().numpy()):
-#         emb_means.append(torch.mean(embs[Y==spk], dim=0))
-#     if len(emb_means) == 1:
-#         return Y
-#     stacked = torch.stack(emb_means)
-#     spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
-#     spk_aff.fill_diagonal_(0)
-#     spk_aff_collapsed = torch.sum(spk_aff.fill_diagonal_(0), dim=0)/(spk_aff.shape[0]-1)
-#     sorted_spk_affs = spk_aff_collapsed.sort()[0]
-#     diffs = sorted_spk_affs[1:] - sorted_spk_affs[:-1] 
-#     import ipdb; ipdb.set_trace()
-#     if spk_aff.shape[0] > min_num_speakers:
-#         # if spk_aff_collapsed.min() < drop_thres:
-#         if diffs.max().item() > drop_thres:
-#             n_clusters = int(spk_aff.shape[0]-1)
-#             spectral_model = SpectralClustering(
-#                 n_clusters=n_clusters, n_random_trials=1, cuda=cuda, device=emb.device
-#             )
-#             Y = spectral_model.forward(affinity_mat)
-#     return Y
-
 
 def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
     """
@@ -1603,7 +1567,6 @@ class SpeakerClustering(torch.nn.Module):
         nme_mat_size: int = 1024,
         drop_length_thres: int = 4400,
         base_scale_idx: int = 2,
-        # drop_length_thres: int = 5000,
         maj_vote_spk_count: bool = True,
         use_drop_and_recluster: bool = True,
     ) -> torch.LongTensor:
