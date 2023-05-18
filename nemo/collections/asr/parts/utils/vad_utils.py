@@ -88,6 +88,14 @@ def align_labels_to_frames(probs, labels):
     else:
         return labels.long().tolist()
 
+def expand_multi_channel_manifest(item):
+    results = []
+    if isinstance(item['audio_filepath'], list):
+        for audio_path in item['audio_filepath']:
+            results.append({'audio_filepath': audio_path, 'duration': item.get('duration', None), 'offset': item.get('offset', 0.0), 'text': '-', 'label': 'infer'})
+        return results
+    else:
+        return [item]
 
 def prepare_manifest(config: dict) -> str:
     """
@@ -105,7 +113,8 @@ def prepare_manifest(config: dict) -> str:
         input_list = []
         with open(config['input'], 'r', encoding='utf-8') as manifest:
             for line in manifest.readlines():
-                input_list.append(json.loads(line.strip()))
+                item = json.loads(line.strip())
+                input_list.extend(expand_multi_channel_manifest(item))
     elif type(config['input']) == list:
         input_list = config['input']
     else:
@@ -808,8 +817,8 @@ def vad_construct_pyannote_object_per_file(
         hypothesis(pyannote.Annotation): prediction
     """
 
-    pred = pd.read_csv(vad_table_filepath, sep=" ", header=None)
-    label = pd.read_csv(groundtruth_RTTM_file, sep=" ", delimiter=None, header=None)
+    pred = pd.read_csv(vad_table_filepath, sep="s\+", header=None)
+    label = pd.read_csv(groundtruth_RTTM_file, sep="s\+", delimiter=None, header=None)
     label = label.rename(columns={3: "start", 4: "dur", 7: "speaker"})
 
     # construct reference
@@ -1081,7 +1090,7 @@ def extract_labels(path2ground_truth_label: str, time: list) -> list:
     time (list) : a list of array representing time period.
     """
 
-    data = pd.read_csv(path2ground_truth_label, sep=" ", delimiter=None, header=None)
+    data = pd.read_csv(path2ground_truth_label, sep="\s+", delimiter=None, header=None)
     data = data.rename(columns={3: "start", 4: "dur", 7: "speaker"})
     labels = []
     for pos in time:
@@ -1468,3 +1477,55 @@ def plot_sample_from_rttm(
     if save_path:
         plt.savefig(save_path)
     return ipd.Audio(audio, rate=16000)
+
+def read_rttm_as_pyannote_object(rttm_file: str, speaker_override: Optional[str] = None) -> Annotation:
+    """
+    Read rttm file and construct a Pyannote object.
+    Args:
+        rttm_file(str) : path of rttm file.
+        speaker_override(str) : if not None, all speakers will be replaced by this value.
+    Returns:
+        annotation(pyannote.Annotation): annotation object
+    """
+    annotation = Annotation()
+    data = pd.read_csv(rttm_file, sep="\s+", delimiter=None, header=None)
+    data = data.rename(columns={3: "start", 4: "dur", 7: "speaker"})
+    for index, row in data.iterrows():
+        if speaker_override is not None:
+            annotation[Segment(row['start'], row['start'] + row['dur'])] = speaker_override
+        else:
+            annotation[Segment(row['start'], row['start'] + row['dur'])] = row['speaker']
+    return annotation
+
+def vad_frame_construct_pyannote_object_per_file(
+    pred_table_path: str, gt_table_path: str
+) -> Tuple[Annotation, Annotation]:
+    """
+    Construct a Pyannote object for evaluation.
+    Args:
+        pred_table_path(str) : path of vad rttm-like table.
+        gt_table_path(str): path of groundtruth rttm file.
+    Returns:
+        reference(pyannote.Annotation): groundtruth
+        hypothesis(pyannote.Annotation): prediction
+    """
+
+    if pred_table_path.endswith(".rttm"):
+        hypothesis = read_rttm_as_pyannote_object(pred_table_path, speaker_override='Speech')
+    else:
+        pred = pd.read_csv(pred_table_path, sep="\s+", header=None)
+        # construct hypothsis
+        hypothesis = Annotation()
+        for index, row in pred.iterrows():
+            hypothesis[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
+
+    if gt_table_path.endswith(".rttm"):
+        reference = read_rttm_as_pyannote_object(gt_table_path, speaker_override='Speech')
+    else:
+        label = pd.read_csv(gt_table_path, sep="\s+", header=None)
+        # construct reference
+        reference = Annotation()
+        for index, row in label.iterrows():
+            reference[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
+
+    return reference, hypothesis
