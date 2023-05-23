@@ -38,6 +38,15 @@ from torch.linalg import eigh, eigvalsh
 import logging
 from sklearn.cluster import AgglomerativeClustering as AHC
 
+import importlib
+
+def ts_vad_post_processing(ts_vad_binary_vec, vad_params, hop_length):
+    vad_utils = importlib.import_module(f"nemo.collections.asr.parts.utils.vad_utils")
+    ts_vad_binary_frames = torch.repeat_interleave(torch.tensor(ts_vad_binary_vec),  hop_length)
+    ts_vad_processed = vad_utils.binarization(ts_vad_binary_frames, vad_params)
+    return ts_vad_processed
+
+
 def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
     """
     Calculate cosine similarities of the given two set of tensors. The output is an N by N
@@ -86,53 +95,55 @@ def cos_similarity_batch(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.ten
 
 def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, drop_length_thres, n_clusters, cuda, reclus_thres=0.85, method='spectral'):
     max_aff = 1.0
-    running_num_of_spks = max_num_speakers 
     
-    print(f"drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape}")
     if embs.shape[0] < drop_length_thres:
+        print(f"Short form drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
         spectral_model = SpectralClustering(
             n_clusters=n_clusters, n_random_trials=30, cuda=cuda, device=embs.device
         )
         Y = spectral_model.forward(affinity_mat)
         return Y, n_clusters 
-    
-    # Run re-clustering if the max affinity is too high
-    while max_aff > reclus_thres and running_num_of_spks >= min_num_speakers and embs.shape[0] >= drop_length_thres:
-        if method == 'spectral':
-            spectral_model = SpectralClustering(
-                n_clusters=running_num_of_spks, n_random_trials=30, cuda=cuda, device=embs.device
-            )
-            Y = spectral_model.forward(affinity_mat)
-        elif method.startswith('ahc'):
-            ahc_model = AHC(distance_threshold=None, 
-                            n_clusters=running_num_of_spks, 
-                            affinity='cosine', 
-                            linkage='average')
-            ahc_model.fit(embs)
-            Y = ahc_model.labels_
-            Y = torch.tensor(Y)
-            embs = torch.tensor(embs)
-        
-        embs = embs.float()
-        emb_means= []
-        for spk in set(Y.cpu().numpy()):
-            emb_means.append(torch.mean(embs[Y==spk], dim=0))
-        if len(emb_means) == 1:
-            return Y, n_clusters
-        stacked = torch.stack(emb_means)
-        spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
-        spk_aff_org = spk_aff.clone()
-        spk_aff_org.fill_diagonal_(0)
-        spk_aff_org_flat = spk_aff_org.flatten()
-        
-        non_diag_spk_aff = spk_aff_org_flat[spk_aff_org_flat > 0.0]
-        sorted_aff, sorted_idx = non_diag_spk_aff.flatten().sort()
-        max_aff = sorted_aff[-1].item()
-        print(f"sorted aff: {sorted_aff}")
-        print(f"Max affinity: {max_aff}, reclus_thres: {reclus_thres},  running_num_of_spks: {torch.max(Y)+1}")
-        running_num_of_spks -= 1
-    n_clusters = Y.cpu().numpy().max() + 1
-    return Y, n_clusters
+    else:
+        running_num_of_spks = max_num_speakers 
+        # Run re-clustering if the max affinity is too high
+        print(f"Long form drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
+        while max_aff > reclus_thres and running_num_of_spks >= min_num_speakers and embs.shape[0] >= drop_length_thres:
+            if method == 'spectral':
+                spectral_model = SpectralClustering(
+                    n_clusters=running_num_of_spks, n_random_trials=30, cuda=cuda, device=embs.device
+                )
+                Y = spectral_model.forward(affinity_mat)
+            elif method.startswith('ahc'):
+                ahc_model = AHC(distance_threshold=None, 
+                                n_clusters=running_num_of_spks, 
+                                affinity='cosine', 
+                                linkage='average')
+                ahc_model.fit(embs)
+                Y = ahc_model.labels_
+                Y = torch.tensor(Y)
+                embs = torch.tensor(embs)
+            
+            embs = embs.float()
+            emb_means= []
+            for spk in set(Y.cpu().numpy()):
+                emb_means.append(torch.mean(embs[Y==spk], dim=0))
+            if len(emb_means) == 1:
+                return Y, n_clusters
+            stacked = torch.stack(emb_means)
+            spk_aff = cos_similarity(emb_a=stacked, emb_b=stacked)
+            spk_aff_org = spk_aff.clone()
+            spk_aff_org.fill_diagonal_(0)
+            spk_aff_org_flat = spk_aff_org.flatten()
+            
+            non_diag_spk_aff = spk_aff_org_flat[spk_aff_org_flat > 0.0]
+            sorted_aff, sorted_idx = non_diag_spk_aff.flatten().sort()
+            max_aff = sorted_aff[-1].item()
+            print(f"sorted aff: {sorted_aff}")
+            print(f"Max affinity: {max_aff:.4f}, reclus_thres: {reclus_thres},  running_num_of_spks: {torch.max(Y)+1}")
+            running_num_of_spks -= 1
+        n_clusters = Y.cpu().numpy().max() + 1
+        print(f"Final n_clusters: {n_clusters}")
+        return Y, n_clusters
 
 def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
     """
@@ -534,7 +545,6 @@ def get_chunked_argmin_mat(
             argmin_mat_list.append(argmin_local[ovl_len:-ovl_len] + offset_cur)
     argmin_mat = torch.cat(argmin_mat_list, dim=0)
     if argmin_mat.shape[0] != base_len:
-        import ipdb; ipdb.set_trace()
         raise ValueError(f"Arg. Min matrix length mismatch: argmin_mat.shape[0] = {argmin_mat.shape[0]} base_len = {base_len}")
     return argmin_mat
     
@@ -1558,14 +1568,14 @@ class SpeakerClustering(torch.nn.Module):
         self,
         embs: torch.Tensor,
         oracle_num_speakers: int = -1,
-        max_rp_threshold: float = 0.05,
+        max_rp_threshold: float = 0.15,
         max_num_speakers: int = 4,
         min_num_speakers: int = 1,
-        sparse_search_volume: int = 15,
+        sparse_search_volume: int = 30,
         fixed_thres: float = -1,
         kmeans_random_trials: int = 1,
-        nme_mat_size: int = 1024,
-        drop_length_thres: int = 4400,
+        nme_mat_size: int = 512,
+        drop_length_thres: int = 4800,
         base_scale_idx: int = 2,
         maj_vote_spk_count: bool = True,
         use_drop_and_recluster: bool = True,

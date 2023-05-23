@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List, Tuple, Union
 import glob
 from collections import Counter
+import copy
 
 import pandas as pd
 import torch
@@ -37,7 +38,9 @@ from nemo.collections.asr.parts.utils.vad_utils import (
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
-
+from nemo.collections.asr.parts.utils.online_clustering import (
+    stitch_cluster_labels
+)
 ######
 
 import json
@@ -154,6 +157,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self._cluster_params = self._diarizer_params.clustering.parameters
         self._argmax_ch_idx_dict = {}
         self._ch_avg_mat = {}
+        self.clus_labels_by_session = {}
         self._init_clus_diarizer()
 
     @classmethod
@@ -546,6 +550,63 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         out_rttm_dir = os.path.join(self._out_dir, 'pred_rttms')
         os.makedirs(out_rttm_dir, exist_ok=True)
         return out_rttm_dir
+    
+    def _forward_speaker_encoder_multi_channel(self, manifest_file, batch_size=None):
+        """
+
+        ms_emb_seq has dimension: (batch_size, time_steps, scale_n, emb_dim)
+
+        """
+        # self._setup_diarizer_validation_data(manifest_file)
+        self._diarizer_model.msdd.eval()
+        self._diarizer_model.msdd._speaker_model.eval()
+        self._diarizer_model.msdd._vad_model.eval()
+        self._vad_model.eval()
+        self.feat_per_sec = 100
+        self._diarizer_model.cfg.interpolated_scale
+        all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list = [], [], [], []
+        
+        for mbi, val_batch in enumerate(tqdm(
+            self._diarizer_model.val_dataloader(),
+            desc=f'Encoding speaker embeddings',
+            leave=True,
+            disable=not self.verbose,
+        )):
+            val_batch = [x.to(self._diarizer_model.device) for x in val_batch]
+            audio_signal, audio_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = val_batch
+            embs_ch_list, ts_ch_list, mapping_ch_list, vad_probs_ch_list = [], [], [], []
+            for si in tqdm(range(audio_signal.shape[0]), desc="Ch-idp speaker encoding",leave=False, disable=not self.verbose):
+                audio_sig_clus = ch_clus_mat[si] @ audio_signal[si].transpose(1, 0)
+                with autocast():
+                    ch_ms_emb_seq, ch_ms_logits_seq, ch_ms_vad_probs, ch_vad_probs, ch_ms_ts_rep = self._diarizer_model.forward_encoder(audio_signal=audio_sig_clus,
+                                                                                                        audio_signal_length=audio_length[si].repeat(audio_sig_clus.shape[0]),
+                                                                                                        ms_seg_timestamps=ms_seg_timestamps[si].repeat(audio_sig_clus.shape[0],1,1,1),
+                                                                                                        ms_seg_counts=ms_seg_counts[si].repeat(audio_sig_clus.shape[0],1),
+                                                                                                        scale_mapping=scale_mapping[si].repeat(audio_sig_clus.shape[0],1,1),
+                                                                                                        ch_clus_mat=ch_clus_mat[si].repeat(audio_sig_clus.shape[0], 1, 1), 
+                                                                                                        )
+                ch_scale_mapping = scale_mapping[si].repeat(audio_sig_clus.shape[0],1,1) 
+                embs_ch_list.append(ch_ms_emb_seq.detach().cpu())
+                ts_ch_list.append(ch_ms_ts_rep.detach().cpu())
+                mapping_ch_list.append(ch_scale_mapping.detach().cpu())
+                vad_probs_ch_list.append(ch_ms_vad_probs.detach().cpu())
+            
+            # Put the channel dimension in the last dimension 
+            mc_ms_emb_seq = torch.stack(embs_ch_list, dim=0).permute(0, 2, 3, 4, 1)
+            mc_ms_ts_rep = torch.stack(ts_ch_list, dim=0).permute(0, 2, 3, 4, 1)
+            mc_scale_mapping = torch.stack(mapping_ch_list, dim=0).permute(0, 2, 3, 1)
+            mc_ms_vad_probs = torch.stack(vad_probs_ch_list, dim=0).permute(0, 2, 3, 4, 1)
+            
+            all_embs_list.append(mc_ms_emb_seq.detach().cpu())
+            all_ts_list.append(mc_ms_ts_rep.detach().cpu())
+            all_mapping_list.append(mc_scale_mapping.detach().cpu())
+            all_vad_probs_list.append(mc_ms_vad_probs.detach().cpu())
+            
+            del val_batch
+            torch.cuda.empty_cache()
+
+        embeddings, time_stamps, vad_probs, scale_mapping = self._stitch_and_save(manifest_file, all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list, is_multi_channel=True)
+        return embeddings, time_stamps, vad_probs, scale_mapping
 
     def _forward_speaker_encoder(self, manifest_file, batch_size=None):
         """
@@ -559,7 +620,6 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self._diarizer_model.msdd._vad_model.eval()
         self._vad_model.eval()
         self.feat_per_sec = 100
-        
         self._diarizer_model.cfg.interpolated_scale
         all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list = [], [], [], []
         
@@ -581,13 +641,12 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                 all_embs_list.append(ms_emb_seq.detach().cpu())
                 all_ts_list.append(ms_ts_rep.detach().cpu())
                 all_mapping_list.append(scale_mapping.detach().cpu())
-                # all_vad_probs_list.append(vad_probs.detach().cpu())
                 all_vad_probs_list.append(ms_vad_probs.detach().cpu())
             
             del val_batch
             torch.cuda.empty_cache()
 
-        embeddings, time_stamps, vad_probs, scale_mapping = self._stitch_and_save(manifest_file, all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list) 
+        embeddings, time_stamps, vad_probs, scale_mapping = self._stitch_and_save(manifest_file, all_embs_list, all_ts_list, all_mapping_list, all_vad_probs_list, is_multi_channel=False)
         return embeddings, time_stamps, vad_probs, scale_mapping
 
     def _stitch_and_save(
@@ -599,6 +658,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         all_vad_probs_list,
         feat_per_sec: int = 100,
         decimals: int = 2,
+        is_multi_channel: bool = False,
         ):
         batch_size = self._diarizer_model.cfg.validation_ds.batch_size
 
@@ -616,9 +676,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             batch_manifest = self._diarizer_model.segmented_manifest_list[batch_idx * batch_size: (batch_idx+1) * batch_size ]
             for sample_id, uniq_id in enumerate(batch_uniq_ids):
 
-                # offset_feat = int((batch_manifest[sample_id]['offset']+self._diarizer_model.diar_ovl_len)*feat_per_sec)
                 offset_feat = int(round(batch_manifest[sample_id]['offset']* feat_per_sec, decimals))
-                
                 if uniq_id in self.embeddings:
                     embs_trunc = self.embeddings[uniq_id][-1]
                     ts_trunc = self.time_stamps[uniq_id][-1]
@@ -637,6 +695,18 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                 if uniq_id in self.embeddings:
                     if ts_add.shape[1] > 0: # If ts_add has valid length
                         self.uniq_id_segment_counts[uniq_id] += 1
+                        
+                        if ts_trunc.shape[-1] != ts_add.shape[-1]: # Only happens with mutli-channel
+                            diff_dim = ts_trunc.shape[-1] - ts_add.shape[-1]
+                            # This is the case where some of the channels have shorter length than the others, so just repeat the last value
+                            if diff_dim > 0:
+                                ts_add = torch.cat((ts_add, ts_add[:,:,:,-1].unsqueeze(-1).repeat(1, 1, 1, diff_dim)), dim=-1)
+                                embs_add = torch.cat((embs_add, embs_add[:,:,:,-1].unsqueeze(-1).repeat(1, 1, 1, diff_dim)), dim=-1)
+                                vadp_add = torch.cat((vadp_add, vadp_add[:,:,:,-1].unsqueeze(-1).repeat(1, 1, 1, diff_dim)), dim=-1)
+                            elif diff_dim < 0:
+                                ts_add = ts_add[:,:,:,:ts_trunc.shape[-1]]
+                                embs_add = embs_add[:,:,:,:embs_trunc.shape[-1]]
+                                vadp_add = vadp_add[:,:,:,:vadp_trunc.shape[-1]]
                         cat_ts =  torch.cat((ts_trunc, ts_add), dim=1)
                         for scl_idx in range(cat_ts.shape[0]):
                             for kdx, ts_mat in enumerate([ts_trunc, ts_add, cat_ts]):
@@ -660,7 +730,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                     self.embeddings[uniq_id] = [embs[sample_id][:-(ovl), :, :]]
                     self.time_stamps[uniq_id] = [time_stamps[sample_id][:, :-ovl, :]]
                     self.vad_probs[uniq_id] = [vad_probs[sample_id][:-(ovl)]]
-                    
+            
         for uniq_id, ms_ts in tqdm(self.time_stamps.items(), desc="Calculating scale mapping"):
             self.embeddings[uniq_id] = torch.cat(self.embeddings[uniq_id], dim=0)
             self.time_stamps[uniq_id]= torch.cat(self.time_stamps[uniq_id], dim=1)
@@ -669,7 +739,6 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                 raise ValueError(f"uniq_id: {uniq_id} segment count mismatch")
             # Truncate the embeddings and time stamps to the length of the longest scale
             # global_time_stamps = self.maxlen_time_stamps.squeeze(0)[:, :self.embeddings[uniq_id].shape[0]]
-            # self.time_stamps[uniq_id] = global_time_stamps
             if self.embeddings[uniq_id].shape[0] != self.time_stamps[uniq_id].shape[1]:
                 raise ValueError(f"uniq_id {uniq_id} has a dimension mismatch between embeddings and time stamps")
             self.scale_mapping[uniq_id] = self.maxlen_scale_map.squeeze(0)[:, :self.embeddings[uniq_id].shape[0]]
@@ -678,7 +747,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         data_type_names = ['embeddings', 'time_stamps', 'vad_probs', 'scale_mapping']
         for idx, tensor_var in enumerate([self.embeddings, self.time_stamps, self.vad_probs, self.scale_mapping]):
             data_type_name = data_type_names[idx]
-            self._save_tensors(tensor_var, embedding_hash, dataset_hash, data_type_name)
+            self._save_tensors(tensor_var, embedding_hash, dataset_hash, data_type_name, is_multi_channel=is_multi_channel)
         
         logging.info(f"End of stitch_and_save: Saving embeddings to {self._speaker_dir}")
         return self.embeddings, self.time_stamps, self.vad_probs, self.scale_mapping
@@ -688,8 +757,9 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         dataset_hash = hashlib.md5(str(self._diarizer_model.segmented_manifest_list).encode()).hexdigest()
         return embedding_hash[:8], dataset_hash[:8]
      
-    def _save_tensors(self, tensor_var, embedding_hash, dataset_hash, data_type_name):
-        tensor_dir = os.path.join(self._speaker_dir, f"{embedding_hash}_{dataset_hash}")
+    def _save_tensors(self, tensor_var, embedding_hash, dataset_hash, data_type_name, is_multi_channel=False):
+        mc_str = '_mc' if is_multi_channel else ''
+        tensor_dir = os.path.join(self._speaker_dir, f"{embedding_hash}_{dataset_hash}{mc_str}")
         if not os.path.exists(tensor_dir):
             os.makedirs(tensor_dir, exist_ok=True)
         if not os.path.exists(os.path.join(tensor_dir, data_type_name)):
@@ -699,8 +769,9 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         pkl.dump(tensor_var, open(tensor_file, 'wb'))
         logging.info(f"Saved {data_type_name} pickle files to {tensor_dir}")
     
-    def _load_tensors(self, embedding_hash, dataset_hash, data_type_name):
-        tensor_dir = os.path.join(self._speaker_dir, f"{embedding_hash}_{dataset_hash}")
+    def _load_tensors(self, embedding_hash, dataset_hash, data_type_name, is_mc_late_fusion):
+        mc_str = '_mc' if is_mc_late_fusion else ''
+        tensor_dir = os.path.join(self._speaker_dir, f"{embedding_hash}_{dataset_hash}{mc_str}")
         if not os.path.exists(tensor_dir):
             os.makedirs(tensor_dir, exist_ok=True)
         if not os.path.exists(os.path.join(tensor_dir, data_type_name)):
@@ -709,9 +780,15 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         tensor_file = os.path.join(path_name, f'ext_{data_type_name}.pkl')
         # Load pickle file
         tensor_var = pkl.load(open(tensor_file, 'rb'))
-        logging.info(f"Loaded {data_type_name} pickle files from {path_name}")
         return tensor_var
         
+    def load_extracted_tensors(self, embedding_hash, dataset_hash, is_mc_late_fusion=False):
+        embeddings = self._load_tensors(embedding_hash, dataset_hash, 'embeddings', is_mc_late_fusion)
+        time_stamps = self._load_tensors(embedding_hash, dataset_hash, 'time_stamps', is_mc_late_fusion)
+        vad_probs = self._load_tensors(embedding_hash, dataset_hash, 'vad_probs', is_mc_late_fusion)
+        scale_mapping = self._load_tensors(embedding_hash, dataset_hash, 'scale_mapping', is_mc_late_fusion)
+        return embeddings, time_stamps, vad_probs, scale_mapping
+     
         
     def _save_embeddings(self, manifest_file):
         embedding_dir = os.path.join(self._speaker_dir, 'embeddings')
@@ -739,30 +816,78 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self.maxlen_time_stamps, self.maxlen_scale_map = self._setup_diarizer_validation_data(manifest_file=self._diarizer_params.manifest_filepath)
         embedding_hash, dataset_hash = self.get_hash_from_settings()     
         tensor_dir = os.path.join(self._speaker_dir, f"{embedding_hash}_{dataset_hash}")
-        if os.path.exists(tensor_dir):
+        if self._diarizer_params.use_saved_embeddings and os.path.exists(tensor_dir):
         # if False:
             logging.info(f"Pre-loaded embedding vectors exist: Loading embeddings from {tensor_dir}")
-            embeddings = self._load_tensors(embedding_hash, dataset_hash, 'embeddings')
-            time_stamps = self._load_tensors(embedding_hash, dataset_hash, 'time_stamps')
-            vad_probs = self._load_tensors(embedding_hash, dataset_hash, 'vad_probs')
-            scale_mapping = self._load_tensors(embedding_hash, dataset_hash, 'scale_mapping')
+            embeddings, time_stamps, vad_probs, scale_mapping = self.load_extracted_tensors(embedding_hash, dataset_hash, is_mc_late_fusion=False)
         else:
-        
             embeddings, time_stamps, vad_probs, scale_mapping = self._forward_speaker_encoder(manifest_file=self._diarizer_params.manifest_filepath,
                                                                                               batch_size=batch_size)
-        session_clus_labels = self._run_clustering(embeddings, time_stamps, vad_probs, scale_mapping)
+            
+        self.clus_labels_by_session = self._run_clustering(embeddings, time_stamps, vad_probs, scale_mapping)
+        session_clus_labels = deepcopy(self.clus_labels_by_session)
+        self._diarizer_model.mono_vad_probs = vad_probs
         return embeddings, time_stamps, vad_probs, session_clus_labels
     
-    def _run_clustering(self, embeddings, time_stamps, vad_probs, scale_mapping):
+    def forward_multi_channel(self, batch_size: int = None):
+        """
+        Forward pass for end-to-end (including end-to-end optimized models) diarization.
+        To deal with the long session audio inputs, we split the audio into smaller chunks and process.
+        Each session is saved in terms of `uniq_id` in dictionary format.
+
+        Args:
+            batch_size (int): batch size for speaker encoder
+
+        Returns:
+            clus_label_index (dict): dictionary containing uniq_id as key and list of cluster labels as value
+        """
+        self.maxlen_time_stamps, self.maxlen_scale_map = self._setup_diarizer_validation_data(manifest_file=self._diarizer_params.manifest_filepath)
+        embedding_hash, dataset_hash = self.get_hash_from_settings()     
+        mc_tensor_dir = os.path.join(self._speaker_dir, f"{embedding_hash}_{dataset_hash}_mc")
+        if self._diarizer_params.use_saved_embeddings and os.path.exists(mc_tensor_dir):
+            logging.info(f"Pre-loaded Multi-channel embedding vectors exist: Loading embeddings from {mc_tensor_dir}")
+            mc_embeddings, mc_time_stamps, mc_vad_probs, scale_mapping = self.load_extracted_tensors(embedding_hash, dataset_hash, is_mc_late_fusion=True)
+        else:
+            mc_embeddings, mc_time_stamps, mc_vad_probs, scale_mapping = self._forward_speaker_encoder_multi_channel(manifest_file=self._diarizer_params.manifest_filepath,
+                                                                                            batch_size=batch_size)
+        mc_session_clus_labels = {}
+        channel_n_list = []
+        for uniq_id in mc_embeddings.keys():
+            ch_n = mc_embeddings[uniq_id].shape[3]
+            channel_n_list.append(ch_n)
+        min_ch = min(channel_n_list)
+        mono_vad_probs = self._diarizer_model.mono_vad_probs
+        for ch_idx in range(min_ch):
+            clus_labels = self._run_clustering(mc_embeddings,
+                                                mc_time_stamps,
+                                                mono_vad_probs,
+                                                scale_mapping,
+                                                mc_late_fusion_ch_idx=ch_idx,
+                                                evaluate=True)
+            
+            for uniq_id, mc_embs in tqdm(mc_embeddings.items(), desc="Clustering Late-fusion multi-channel embeddings"):
+                # These clustering labels contain silence tokens -1, so we need to add 1 to the labels
+                clus_labels[uniq_id] = stitch_cluster_labels(Y_old=(self.clus_labels_by_session[uniq_id].long()+1), Y_new=(torch.tensor(clus_labels[uniq_id]).long()+1))
+                clus_labels[uniq_id] = clus_labels[uniq_id] - 1
+                if uniq_id not in mc_session_clus_labels:
+                    mc_session_clus_labels[uniq_id] = [clus_labels[uniq_id].unsqueeze(1)]
+                else:
+                    mc_session_clus_labels[uniq_id].append(clus_labels[uniq_id].unsqueeze(1))
+        
+        for uniq_id in mc_session_clus_labels.keys(): 
+            mc_session_clus_labels[uniq_id] = torch.cat(mc_session_clus_labels[uniq_id], dim=1)
+        return mc_embeddings, mc_time_stamps, mc_vad_probs, mc_session_clus_labels
+    
+    def _run_clustering(self, embeddings, time_stamps, vad_probs, scale_mapping, mc_late_fusion_ch_idx=-1, evaluate=True):
         """
         Run clustering algorithm on embeddings and time stamps
         """
         out_rttm_dir = self._init_clus_diarizer()
         all_ref, all_hyp, uniq_clus_embs = perform_clustering_embs(
-            embeddings=embeddings,
-            vad_probs=vad_probs,
-            time_stamps=time_stamps,
-            scale_mapping=scale_mapping,
+            embeddings_dict=embeddings,
+            vad_probs_dict=vad_probs,
+            time_stamps_dict=time_stamps,
+            scale_mapping_dict=scale_mapping,
             AUDIO_RTTM_MAP=self.AUDIO_RTTM_MAP,
             out_rttm_dir=out_rttm_dir,
             clustering_params=self._cluster_params,
@@ -770,8 +895,10 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             multiscale_dict=self.multiscale_args_dict['scale_dict'],
             verbose=self.verbose,
             vad_threshold=self._diarizer_params.vad.parameters.frame_vad_threshold,
+            mc_late_fusion_ch_idx=mc_late_fusion_ch_idx,
             device=self._diarizer_model.device,
         )
+        # if evaluate:
         for ignore_overlap in [False, True]:
             score_labels(
                 self.AUDIO_RTTM_MAP,

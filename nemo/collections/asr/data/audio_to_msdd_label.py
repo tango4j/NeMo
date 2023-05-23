@@ -442,6 +442,8 @@ class _AudioMSDDTrainDataset(Dataset):
         self.dtype = dtype
         self.encoder_infer_mode = encoder_infer_mode
         self.global_speaker_label_table = get_speaker_labels_from_diar_rttms(self.collection)
+        self.ch_clus_mat_dict = {}
+        self.channel_cluster_dict = {}
     
     def __len__(self):
         return len(self.collection)
@@ -668,10 +670,14 @@ class _AudioMSDDTrainDataset(Dataset):
             raise ValueError(f"ms_seg_counts: {ms_seg_counts}, clus_label_index.shape[0]: {clus_label_index.shape[0]}")
         
         if len(audio_signal.shape) > 1:
-            ch_clus_mat = self.channel_cluster(mc_audio_signal=audio_signal, sample_rate=self.featurizer.sample_rate)
+            if uniq_id in self.channel_cluster_dict:
+                # We need to use a hash-table for channel clustering to use the identical matrix throughout the session.
+                ch_clus_mat = self.channel_cluster_dict[uniq_id]
+            else:
+                ch_clus_mat = self.channel_cluster(mc_audio_signal=audio_signal, sample_rate=self.featurizer.sample_rate)
+                self.channel_cluster_dict[uniq_id] = ch_clus_mat
         else:
             ch_clus_mat = torch.zeros((2, 2)).to(audio_signal.device)
-
         return audio_signal, feature_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels
 
 
@@ -739,6 +745,7 @@ class _AudioMSDDInferDataset(Dataset):
         window_stride: float,
         use_single_scale_clus: bool,
         pairwise_infer: bool,
+        mc_late_fusion: bool = False,
     ):
         super().__init__()
         self.collection = DiarizationSpeechLabel(
@@ -774,6 +781,7 @@ class _AudioMSDDInferDataset(Dataset):
         self.min_subsegment_duration = 0.03
         self.dtype = torch.float32
         self.global_speaker_label_table = get_speaker_labels_from_diar_rttms(self.collection)
+        self.mc_late_fusion = mc_late_fusion
 
     def __len__(self):
         return len(self.collection)
@@ -886,7 +894,10 @@ class _AudioMSDDInferDataset(Dataset):
         offset_index = int(offset / self.scale_dict[ms_seg_counts.shape[0]-1][1])
         seq_length = ms_seg_counts[-1]
         ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
-        clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
+        if self.mc_late_fusion:
+            clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
+        else:
+            clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
         return ms_emb_seq, ms_seg_timestamps, seq_length, clus_label_index, targets
 
 
@@ -1021,11 +1032,17 @@ def _msdd_infer_collate_fn(self, batch):
         flen_list.append(lbl_len)
         # ms_avg_embs_list.append(ivector)
         # if feature.shape[0] < max_seq_len:
-        pad_a = (0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
+        if len(feature.shape) == 4: # Multichannel late-fusion mode
+            pad_feat = (0, 0, 0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
+            pad_lbl = (0, 0, 0, max_target_len - label.shape[0])
+        elif len(feature.shape) == 3:
+            pad_feat = (0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
+            pad_lbl = (0, max_target_len - label.shape[0])
+        else:
+            raise ValueError(f"feature shape {feature.shape} is not supported")
         pad_ts = (0, 0, 0, max_target_len - lbl_len)
-        pad_lbl = (0, max_target_len - label.shape[0])
         pad_t = (0, 0, 0, max_target_len - target.shape[0])
-        padded_feature = torch.nn.functional.pad(feature, pad_a)
+        padded_feature = torch.nn.functional.pad(feature, pad_feat)
         padded_target = torch.nn.functional.pad(target, pad_t)
         padded_label = torch.nn.functional.pad(label, pad_lbl)
         padded_ms_seg_ts = torch.nn.functional.pad(ms_seg_ts, pad_ts)
@@ -1038,7 +1055,10 @@ def _msdd_infer_collate_fn(self, batch):
         #     ms_ts_list.append(ms_seg_ts.clone().detach())
         #     targets_list.append(target.clone().detach())
         #     clus_label_list.append(label.clone().detach())
-    feats = torch.stack(feats_list)
+    try:
+        feats = torch.stack(feats_list)
+    except:
+        import ipdb; ipdb.set_trace()
     feats_len = torch.tensor(flen_list)
     ms_seg_ts = torch.stack(ms_ts_list)
     clus_label = torch.stack(clus_label_list)
@@ -1167,6 +1187,7 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
         seq_eval_mode: bool,
         window_stride: float,
         pairwise_infer: bool,
+        mc_late_fusion: bool,
     ):
         super().__init__(
             manifest_filepath=manifest_filepath,
@@ -1181,6 +1202,7 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
             window_stride=window_stride,
             seq_eval_mode=seq_eval_mode,
             pairwise_infer=pairwise_infer,
+            mc_late_fusion=mc_late_fusion,
         )
 
     def msdd_infer_collate_fn(self, batch):

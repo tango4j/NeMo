@@ -14,14 +14,12 @@ verbose: True # enable additional logging
 channel_selector: null
 
 diarizer:
+  use_saved_embeddings: True # True or False
   manifest_filepath: ???
   out_dir: ???
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
   collar: 0.25 # Collar value for scoring
   ignore_overlap: True # Consider or ignore overlap segments while scoring
-    # multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-    # multi_channel_mode: null 
-    # 'mc_vad_cc_mixer'
   
   multichannel:
     parameters:
@@ -29,6 +27,8 @@ diarizer:
       power_p: 2
       channel_selector: null
       multi_channel_mode: 'mc_vad_cc_mixer' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
+      mc_max_vad: False
+      mc_audio_normalize: True
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
     external_vad_manifest: null # This option is provided to use external vad and provide its speech activity labels for speaker embeddings extraction. Only one of model_path or external_vad_manifest should be set
@@ -37,17 +37,16 @@ diarizer:
       shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
       top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
       use_external_vad: True
-      # frame_vad_threshold: 0.003
-      frame_vad_threshold: 0.01
-      window_length_in_sec: 0.0  # Window length in sec for VAD context input 
+      frame_vad_threshold: 0.02
+      window_length_in_sec: 0.02  # Window length in sec for VAD context input 
       smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
       onset: 0.1 # Onset threshold for detecting the beginning and end of a speech 
       offset: 0.1 # Offset threshold for detecting the end of a speech
-      pad_onset: 0.1 # Adding durations before each speech segment 
-      pad_offset: 0 # Adding durations after each speech segment 
-      min_duration_on: 0 # Threshold for small non_speech deletion
-      min_duration_off: 0.2 # Threshold for short speech segment deletion
+      pad_onset: 0.05 # Adding durations before each speech segment 
+      pad_offset: 0.05 # Adding durations after each speech segment 
+      min_duration_on: 0.0 # Threshold for small non_speech deletion
+      min_duration_off: 0.5 # Threshold for short speech segment deletion
       filter_speech_first: True 
 
   speaker_embeddings:
@@ -64,10 +63,11 @@ diarizer:
       oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
       max_num_speakers: 4 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
-      max_rp_threshold: 0.05
+      max_rp_threshold: 0.15
       sparse_search_volume: 25 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
       clustering_scale_index: 2 # The index of scale to be used for clustering. 
+      sync_score_thres: 0.75 # Cascaed clustering threshold for deciding whether to proceed to the finer scale.
        
   msdd_model:
     model_path: diar_msdd_telephonic # .nemo local model path or pretrained model name for multiscale diarization decoder (MSDD)
@@ -78,12 +78,19 @@ diarizer:
       seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
       diar_window_length: 50 # The length of split short sequence when split_infer is True.
-      global_average_mix_ratio: 0.9 # mixer6 golden
-      # global_average_mix_ratio: 0.7 # mixer6 golden
+      # global_average_mix_ratio: 0.9 
+      global_average_mix_ratio: 0.75
       global_average_window_count: 25 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
       overlap_infer_spk_limit: 0.3 # If the proportion of speaking time is lower than this, ignore those speakers for overlap detection.
       mask_spks_with_clus: True
       infer_overlap: True
+      affinity_weighting: True
+      power_p_aff: 3
+      thres_aff: 0.5
+      use_ts_vad: True
+      multi_ch_late_fusion_mode: True # True or False
+      mc_late_fusion_mode: "mean" # "max", "mean", "mode" 
+
       # infer_mode: "only_clus"
       # infer_mode: "vad_masked_logits"
       # infer_mode: "vad_masked_logits_force_1spk"
