@@ -5,8 +5,8 @@ import tqdm
 import json
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 
-diarization_system = 'system_vA01'
-diarization_dir = os.path.expanduser(f'~/scratch/chime7/chime7_diar_results/{diarization_system}')
+diarization_system = 'system_vA04D'
+# diarization_dir = os.path.expanduser(f'~/scratch/chime7/chime7_diar_results/{diarization_system}')
 
 output_dir = f'./alignments/{diarization_system}'
 

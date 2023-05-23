@@ -13,7 +13,7 @@ dataset="/media/data2/chime7-challenge/datasets/manifests_task1/dipco/mulspk_asr
 CUDA_VISIBLE_DEVICES=0 python eval_frame_vad_mc.py \
     --config-path="./configs" --config-name="frame_vad_inference" \
     vad.model_path=$model_path \
-    vad.parameters.normalize_audio=True \
+    vad.parameters.normalize_audio=False \
     vad.parameters.normalize_audio_target=-25 \
-    frame_out_dir="./nemo_experiments/frame_vad_output" \
+    frame_out_dir="./nemo_experiments/frame_vad_output_nonorm" \
     dataset=${dataset}
