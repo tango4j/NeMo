@@ -817,7 +817,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                                                 embs=embs, 
                                                 batch_size=batch_size, 
                                                 all_seq_len=all_seq_len)
-        # ms_ts_rep = self.repeat_and_align(ms_seg_timestamps, repeat_mats_ext, all_seq_len, batch_size)
         ms_ts_rep = self.repeat_and_align(ms_seg_timestamps=ms_seg_timestamps, 
                                           scale_mapping=scale_mapping, 
                                           all_seq_len=all_seq_len, 
@@ -1566,7 +1565,6 @@ class NeuralDiarizer(LightningModule):
         """
         self.gamr = self._cfg.diarizer.msdd_model.parameters.global_average_mix_ratio
         self.ga_win_count = self._cfg.diarizer.msdd_model.parameters.global_average_window_count
-        # self.multi_ch_mode = self._cfg.diarizer.msdd_model.parameters.multi_ch_mode
         self.multi_ch_late_fusion_mode = cfg.diarizer.msdd_model.parameters.get('multi_ch_late_fusion_mode', False)
         self.msdd_model.multi_ch_late_fusion_mode = cfg.diarizer.msdd_model.parameters.get('multi_ch_late_fusion_mode', False)
         
@@ -1661,7 +1659,6 @@ class NeuralDiarizer(LightningModule):
         self.transfer_diar_params_to_neural_diar_model_params(self._cfg)
         # Use MSDD Multi-scale params for clustering diarizer
         self._cfg.diarizer.speaker_embeddings.parameters = self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters
-        # self._cfg.diarizer.speaker_embeddings.parameters.interpolate_scale = self.msdd_model.interpolated_scale
         self.msdd_model.emb_seq_test, self.msdd_model.ms_time_stamps, self.vad_probs_dict, self.msdd_model.clus_test_label_dict = self.clustering_embedding.prepare_cluster_embs_infer(multi_ch_mode=False)
         if self.multi_ch_late_fusion_mode:
             self.msdd_model.mc_emb_seq_test, self.msdd_model.mc_ms_time_stamps, self.mc_vad_probs_dict, self.msdd_model.mc_clus_test_label_dict = self.clustering_embedding.prepare_cluster_embs_infer(multi_ch_mode=True)
@@ -1700,12 +1697,8 @@ class NeuralDiarizer(LightningModule):
             max_win_count = self.ms_avg_embs_cache[uniq_id].shape[0]
             curr_idx = self._diar_window_counter[uniq_id]
             win_stt, win_end = max(0, (curr_idx-self.ga_win_count)), min(curr_idx+self.ga_win_count, max_win_count)
-            # print(f"curr_idx: {curr_idx} [win_stt, win_end]: [{win_stt}, {win_end}], max_win_count: {max_win_count}")
             global_average_context = self.ms_avg_embs_cache[uniq_id][win_stt:win_end].mean(dim=0)
-            try:
-                ms_avg_embs[sample_idx] = self.gamr * ms_avg_embs_current[sample_idx] + (1-self.gamr) * global_average_context
-            except:
-                import ipdb; ipdb.set_trace()
+            ms_avg_embs[sample_idx] = self.gamr * ms_avg_embs_current[sample_idx] + (1-self.gamr) * global_average_context
             self._diar_window_counter[uniq_id] += 1
         ms_avg_embs = ms_avg_embs.type(ms_avg_embs_current.dtype)
         return ms_avg_embs 
@@ -1750,7 +1743,8 @@ class NeuralDiarizer(LightningModule):
             batch_uniq_ids = all_manifest_uniq_ids[test_batch_idx * batch_size: (test_batch_idx+1) * batch_size]
             for bi in tqdm(range(mc_ms_emb_seq.shape[0]), desc="Computing average embeddings per sample in batch", leave=False):
                 ms_emb_seq = mc_ms_emb_seq[bi].permute(3, 0, 1, 2)
-                clus_label_index = mc_clus_label_index[bi].permute(1, 0)
+                # clus_label_index = mc_clus_label_index[bi].permute(1, 0)
+                clus_label_index = mc_clus_label_index[bi].repeat(ms_emb_seq.shape[0], 1)
                 seq_lengths = torch.max(mc_seq_lengths).repeat(ms_emb_seq.shape[0])
                 ms_avg_embs_current = self.msdd_model.get_cluster_avg_embs_model(ms_emb_seq, clus_label_index, seq_lengths, add_sil_embs=False).to(self.msdd_model.device)
                 mc_ms_avg_embs = ms_avg_embs_current.permute(1,2,3,0).unsqueeze(0) # (1, scale_n, emb_dim, num_spks, max_ch) - first dim is batch
@@ -1770,7 +1764,8 @@ class NeuralDiarizer(LightningModule):
             preds_batch_list = []
             for bi in tqdm(range(mc_ms_emb_seq.shape[0]), desc="Computing average embeddings per sample in batch", leave=False):
                 ms_emb_seq = mc_ms_emb_seq[bi].permute(3, 0, 1, 2)
-                clus_label_index = mc_clus_label_index[bi].permute(1, 0)
+                # clus_label_index = mc_clus_label_index[bi].permute(1, 0)
+                clus_label_index = mc_clus_label_index[bi].repeat(ms_emb_seq.shape[0], 1)
                 seq_lengths = torch.max(mc_seq_lengths).repeat(ms_emb_seq.shape[0])
                 ms_avg_embs_current = self.msdd_model.get_cluster_avg_embs_model(ms_emb_seq, clus_label_index, seq_lengths, add_sil_embs=False).to(self.msdd_model.device)
                 ms_emb_seq = ms_emb_seq.type(ms_avg_embs_current.dtype)
@@ -1788,7 +1783,6 @@ class NeuralDiarizer(LightningModule):
             targets_list.append(targets.detach().cpu())
 
         all_preds, all_targets, all_time_stamps = self._stitch_and_save(preds_list, targets_list)
-        # import ipdb; ipdb.set_trace() # TODO: Need to add clus label permute matching
         return all_preds, all_targets, all_time_stamps
 
     

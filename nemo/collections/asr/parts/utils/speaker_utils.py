@@ -494,7 +494,7 @@ def divide_and_conquer_clustering(ms_silsp_embs, cluster_labels_infer, unit_clus
         
         # If local clustering shows too much difference from global clustering, use global clustering
         sync_score =  ((clus_label_vad == new_label_index).sum() / clus_label_vad.shape[0]).item()
-        logging.info(f"-----> || Fine grained label sync score|| : [{sync_score:.4f} , offset: {offset}]")
+        logging.info(f"-----> || Fine grained label sync score|| : [{sync_score:.4f} , offset: {offset} sync_score_thres: {sync_score_thres:.3f}]")
         if sync_score < sync_score_thres:
             new_label_index = clus_label_vad + offset
         
@@ -539,9 +539,6 @@ def get_ms_embs_and_ts(
     rep_counts = torch.unique(scale_map[base_scale_idx], return_counts=True)[1]
     base_seg_inds = torch.cumsum(rep_counts, dim=0) - 1 # Pick the last index of each repeating index
 
-    # ms_silsp_embs = embeddings[uniq_id][:, :(base_scale_idx+1), :][base_seg_inds, :, :]
-    # ms_ts_scaled = time_stamps[uniq_id][base_scale_idx][base_seg_inds]/feat_per_sec
-    # base_feat_len_in_scale = torch.mode( torch.round( time_stamps[uniq_id][-1][:,1]- time_stamps[uniq_id][-1][:,0] ).long() )[0]
     ms_silsp_embs = embeddings[:, :(base_scale_idx+1), :][base_seg_inds, :, :]
     ms_ts_scaled = time_stamps[base_scale_idx][base_seg_inds]/feat_per_sec
     base_feat_len_in_scale = torch.mode( torch.round( time_stamps[-1][:,1]- time_stamps[-1][:,0] ).long() )[0]
@@ -582,8 +579,8 @@ def perform_clustering_embs(
     drop_length_thres = 4800,
     feat_per_sec: int = 100,
     long_audio_thres: int = 100000,
-    unit_clus_len: int = 20000,
-    # unit_clus_len: int = 1000,
+    # unit_clus_len: int = 20000,
+    unit_clus_len: int = 1000,
     get_rttm_with_the_finest_scale: bool = True,
 ):
     uniq_clus_labels_dict = {}
@@ -604,7 +601,7 @@ def perform_clustering_embs(
         scale_map = scale_mapping_dict[uniq_id]
         if mc_late_fusion_ch_idx > -1:
             # The last dimension is the channel dimension
-            embeddings = embeddings_dict[uniq_id][:, :, :, mc_late_fusion_ch_idx]
+            embeddings = embeddings_dict[uniq_id]
             time_stamps = time_stamps_dict[uniq_id][:, :, :, mc_late_fusion_ch_idx]
         else:
             embeddings = embeddings_dict[uniq_id]
@@ -1752,7 +1749,7 @@ def generate_speaker_timestamps(
             msdd_preds = msdd_preds.mean(dim=2)
         elif params['mc_late_fusion_mode'] == 'max':
             msdd_preds = msdd_preds.max(dim=2)[0]
-        clus_labels = torch.mode(clus_labels, dim=1)[0]
+        # clus_labels = torch.mode(clus_labels, dim=1)[0]
         vad_mask = (clus_labels > -1)
     elif len(msdd_preds.shape) == 2:
         msdd_preds.squeeze(0)

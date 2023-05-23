@@ -1583,6 +1583,8 @@ class SpeakerClustering(torch.nn.Module):
 
         # embs = ms_embs.mean(dim=1)
         embs = embs.cuda()
+        if len(embs.shape) == 3: # Multi-channel embeddings
+            embs = embs.reshape(embs.shape[0], -1)
         mat = getCosAffinityMatrix(embs)
         
         nmesc = NMESC(

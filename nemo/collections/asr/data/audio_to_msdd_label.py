@@ -1032,19 +1032,22 @@ def _msdd_infer_collate_fn(self, batch):
         flen_list.append(lbl_len)
         # ms_avg_embs_list.append(ivector)
         # if feature.shape[0] < max_seq_len:
+        pad_lbl = (0, max_target_len - label.shape[0])
         if len(feature.shape) == 4: # Multichannel late-fusion mode
             pad_feat = (0, 0, 0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
-            pad_lbl = (0, 0, 0, max_target_len - label.shape[0])
+            # pad_lbl = (0, 0, 0, max_target_len - label.shape[0])
         elif len(feature.shape) == 3:
             pad_feat = (0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
-            pad_lbl = (0, max_target_len - label.shape[0])
         else:
             raise ValueError(f"feature shape {feature.shape} is not supported")
         pad_ts = (0, 0, 0, max_target_len - lbl_len)
         pad_t = (0, 0, 0, max_target_len - target.shape[0])
         padded_feature = torch.nn.functional.pad(feature, pad_feat)
         padded_target = torch.nn.functional.pad(target, pad_t)
-        padded_label = torch.nn.functional.pad(label, pad_lbl)
+        try:
+            padded_label = torch.nn.functional.pad(label, pad_lbl)
+        except:
+            import ipdb; ipdb.set_trace()
         padded_ms_seg_ts = torch.nn.functional.pad(ms_seg_ts, pad_ts)
         feats_list.append(padded_feature)
         ms_ts_list.append(padded_ms_seg_ts)

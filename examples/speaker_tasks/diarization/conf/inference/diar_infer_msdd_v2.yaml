@@ -15,6 +15,7 @@ channel_selector: null
 
 diarizer:
   use_saved_embeddings: True # True or False
+  # use_saved_embeddings: False # True or False
   manifest_filepath: ???
   out_dir: ???
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
@@ -67,7 +68,8 @@ diarizer:
       sparse_search_volume: 25 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
       clustering_scale_index: 2 # The index of scale to be used for clustering. 
-      sync_score_thres: 0.75 # Cascaed clustering threshold for deciding whether to proceed to the finer scale.
+      sync_score_thres: 0.9 # Cascaed clustering threshold for deciding whether to proceed to the finer scale.
+      
        
   msdd_model:
     model_path: diar_msdd_telephonic # .nemo local model path or pretrained model name for multiscale diarization decoder (MSDD)
@@ -78,8 +80,7 @@ diarizer:
       seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
       diar_window_length: 50 # The length of split short sequence when split_infer is True.
-      # global_average_mix_ratio: 0.9 
-      global_average_mix_ratio: 0.75
+      global_average_mix_ratio: 0.9 
       global_average_window_count: 25 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
       overlap_infer_spk_limit: 0.3 # If the proportion of speaking time is lower than this, ignore those speakers for overlap detection.
       mask_spks_with_clus: True
