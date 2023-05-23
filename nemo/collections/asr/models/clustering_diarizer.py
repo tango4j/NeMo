@@ -735,6 +735,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                     self.vad_probs[uniq_id] = [vad_probs[sample_id][:-(ovl)]]
         
         data_type_names = ['embeddings', 'time_stamps', 'vad_probs']
+        embedding_hash, dataset_hash = self.get_hash_from_settings()
         for idx, tensor_var in enumerate([self.embeddings, self.time_stamps, self.vad_probs]):
             data_type_name = data_type_names[idx]
             self._save_tensors(tensor_var, embedding_hash, dataset_hash, data_type_name, is_multi_channel=is_multi_channel)
@@ -747,16 +748,11 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             if self._diarizer_model.uniq_id_segment_counts[uniq_id] != self.uniq_id_segment_counts[uniq_id]:
                 raise ValueError(f"uniq_id: {uniq_id} segment count mismatch")
             # Truncate the embeddings and time stamps to the length of the longest scale
-            # global_time_stamps = self.maxlen_time_stamps.squeeze(0)[:, :self.embeddings[uniq_id].shape[0]]
             if self.embeddings_cat[uniq_id].shape[0] != self.time_stamps_cat[uniq_id].shape[1]:
                 raise ValueError(f"uniq_id {uniq_id} has a dimension mismatch between embeddings and time stamps")
-            # self.scale_mapping[uniq_id] = self.maxlen_scale_map.squeeze(0)[:, :self.embeddings[uniq_id].shape[0]]
             del self.embeddings[uniq_id], self.time_stamps[uniq_id], self.vad_probs[uniq_id]
             torch.cuda.empty_cache()
        
-        embedding_hash, dataset_hash = self.get_hash_from_settings()
-        # data_type_names = ['embeddings', 'time_stamps', 'vad_probs', 'scale_mapping']
-        # for idx, tensor_var in enumerate([self.embeddings, self.time_stamps, self.vad_probs, self.scale_mapping]):
         data_type_names = ['embeddings', 'time_stamps', 'vad_probs']
         for idx, tensor_var in enumerate([self.embeddings_cat, self.time_stamps_cat, self.vad_probs_cat]):
             data_type_name = data_type_names[idx]
@@ -799,14 +795,14 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         embeddings = self._load_tensors(embedding_hash, dataset_hash, 'embeddings', is_mc_late_fusion)
         time_stamps = self._load_tensors(embedding_hash, dataset_hash, 'time_stamps', is_mc_late_fusion)
         vad_probs = self._load_tensors(embedding_hash, dataset_hash, 'vad_probs', is_mc_late_fusion)
-        for uniq_id in tqdm(embeddings.keys(), desc="Concatenating tensors"):
+        for uniq_id in tqdm(embeddings.keys(), desc="Concatenating the loaded tensors"):
             if isinstance(embeddings[uniq_id], list):
                 embeddings[uniq_id] = torch.cat(embeddings[uniq_id], dim=0)
             if isinstance(time_stamps[uniq_id], list):
                 time_stamps[uniq_id] = torch.cat(time_stamps[uniq_id], dim=1)
             if isinstance(vad_probs[uniq_id], list):
                 vad_probs[uniq_id] = torch.cat(vad_probs[uniq_id], dim=0)
-            if embeddings[uniq_id].shape[0] != self.time_stamps[uniq_id].shape[1]:
+            if embeddings[uniq_id].shape[0] != time_stamps[uniq_id].shape[1]:
                 raise ValueError(f"uniq_id {uniq_id} has a dimension mismatch between embeddings and time stamps")
         return embeddings, time_stamps, vad_probs
         
