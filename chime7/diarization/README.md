@@ -1,5 +1,8 @@
-
 # Manual for running Chime7 Multichannel Diarization
+
+
+Please use the following launcher script.
+`chime7/diarization/run_msdd_v2_infer_sysVB01.sh`
 
 
 ### Step 1 - Models
