@@ -69,8 +69,11 @@ for scenario in $SCENARIOS
 do
 for subset in dev
 do
+for ranking_metric in si-sdr pesq stoi mos
+do
     echo "--"
     echo $scenario/$subset
+    echo ranking metric: $ranking_metric
     echo "--"
 
     # Alignments generated from diarization
@@ -98,15 +101,15 @@ do
     # These manifests need to be created from diarization output
     manifests_dir=${manifests_root}/${scenario}/${subset}
 
-    exp_dir=${base_output_dir}/${scenario}/${subset}
+    exp_dir=${base_output_dir}/${ranking_metric}/${scenario}/${subset}
     mkdir -p ${exp_dir}
 
     # mic selection
     echo "Stage 0: Selecting a subset of channels"
-    python ${espnet_root}/local/gss_micrank.py -r ${manifests_dir}/${scenario}-mdm_recordings_${subset}.jsonl.gz \
+    python ./utils/gss_micrank.py -r ${manifests_dir}/${scenario}-mdm_recordings_${subset}.jsonl.gz \
         -s ${manifests_dir}/${scenario}-mdm_supervisions_${subset}.jsonl.gz \
         -o  ${exp_dir}/${scenario}_${subset}_selected \
-        -k $top_k --nj $sel_nj
+        -k $top_k --metric $ranking_metric --nj $sel_nj
 
     recordings=${exp_dir}/${scenario}_${subset}_selected_recordings.jsonl.gz
     supervisions=${exp_dir}/${scenario}_${subset}_selected_supervisions.jsonl.gz
@@ -146,5 +149,6 @@ do
         # Prepare manifests
         python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
     done
+done
 done
 done
