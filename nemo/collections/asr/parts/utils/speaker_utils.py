@@ -574,7 +574,6 @@ def perform_clustering_embs(
     device, 
     vad_threshold: float,
     multiscale_dict: dict, 
-    mc_late_fusion_ch_idx: bool = -1,
     verbose: bool = True,
     drop_length_thres = 4800,
     feat_per_sec: int = 100,
@@ -598,17 +597,21 @@ def perform_clustering_embs(
     speaker_clustering = SpeakerClustering(cuda=cuda)
     # If True, export torch script module and save it to the base folder.
     for uniq_id, audio_rttm_values in tqdm(AUDIO_RTTM_MAP.items(), desc='clustering', leave=True, disable=not verbose):
-        scale_map = scale_mapping_dict[uniq_id]
-        if mc_late_fusion_ch_idx > -1:
+        try:
+            scale_map = scale_mapping_dict[uniq_id]
+        except:
+            import ipdb; ipdb.set_trace()
+            
+        if len(embeddings_dict[uniq_id].shape) > 3:
             # The last dimension is the channel dimension
             embeddings = embeddings_dict[uniq_id]
-            time_stamps = time_stamps_dict[uniq_id][:, :, :, mc_late_fusion_ch_idx]
+            time_stamps = time_stamps_dict[uniq_id][:, :, :, 0]
         else:
             embeddings = embeddings_dict[uniq_id]
             time_stamps = time_stamps_dict[uniq_id]
         
-        if len(vad_probs_dict[uniq_id].shape) > 3 and mc_late_fusion_ch_idx > -1: # If multi-ch VAD is provided
-            vad_probs = vad_probs_dict[uniq_id][:, :, mc_late_fusion_ch_idx]
+        if len(vad_probs_dict[uniq_id].shape) > 3: # If multi-ch VAD is provided
+            vad_probs = vad_probs_dict[uniq_id][:, :, :].mean(dim=2)
         else:
             vad_probs = vad_probs_dict[uniq_id]
         

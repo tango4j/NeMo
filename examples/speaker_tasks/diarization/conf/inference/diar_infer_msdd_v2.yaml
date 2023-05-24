@@ -15,7 +15,6 @@ channel_selector: null
 
 diarizer:
   use_saved_embeddings: True # True or False
-  # use_saved_embeddings: False # True or False
   manifest_filepath: ???
   out_dir: ???
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
