@@ -71,9 +71,12 @@ for subset in dev
 do
 for ranking_metric in si-sdr pesq stoi mos
 do
+for top_k in 80 60
+do
     echo "--"
     echo $scenario/$subset
     echo ranking metric: $ranking_metric
+    echo top_k:          $top_k
     echo "--"
 
     # Alignments generated from diarization
@@ -101,7 +104,7 @@ do
     # These manifests need to be created from diarization output
     manifests_dir=${manifests_root}/${scenario}/${subset}
 
-    exp_dir=${base_output_dir}/${ranking_metric}/${scenario}/${subset}
+    exp_dir=${base_output_dir}/${ranking_metric}/${top_k}/${scenario}/${subset}
     mkdir -p ${exp_dir}
 
     # mic selection
@@ -109,46 +112,49 @@ do
     python ./utils/gss_micrank.py -r ${manifests_dir}/${scenario}-mdm_recordings_${subset}.jsonl.gz \
         -s ${manifests_dir}/${scenario}-mdm_supervisions_${subset}.jsonl.gz \
         -o  ${exp_dir}/${scenario}_${subset}_selected \
-        -k $top_k --metric $ranking_metric --nj $sel_nj
+        -k $top_k --metric $ranking_metric --nj 0 # $sel_nj
 
-    recordings=${exp_dir}/${scenario}_${subset}_selected_recordings.jsonl.gz
-    supervisions=${exp_dir}/${scenario}_${subset}_selected_supervisions.jsonl.gz
+    # Run only mic selection
 
-    echo "Stage 1: Prepare cut set"
-    lhotse cut simple --force-eager \
-        -r $recordings \
-        -s $supervisions \
-        ${exp_dir}/cuts.jsonl.gz
+    # recordings=${exp_dir}/${scenario}_${subset}_selected_recordings.jsonl.gz
+    # supervisions=${exp_dir}/${scenario}_${subset}_selected_supervisions.jsonl.gz
 
-    echo "Stage 2: Trim cuts to supervisions (1 cut per supervision segment)"
-    lhotse cut trim-to-supervisions --discard-overlapping \
-        ${exp_dir}/cuts.jsonl.gz  \
-        ${exp_dir}/cuts_per_segment.jsonl.gz
+    # echo "Stage 1: Prepare cut set"
+    # lhotse cut simple --force-eager \
+    #     -r $recordings \
+    #     -s $supervisions \
+    #     ${exp_dir}/cuts.jsonl.gz
 
-    cuts_per_recording=${exp_dir}/cuts.jsonl.gz
-    cuts_per_segment=${exp_dir}/cuts_per_segment.jsonl.gz
+    # echo "Stage 2: Trim cuts to supervisions (1 cut per supervision segment)"
+    # lhotse cut trim-to-supervisions --discard-overlapping \
+    #     ${exp_dir}/cuts.jsonl.gz  \
+    #     ${exp_dir}/cuts_per_segment.jsonl.gz
 
-    echo "--"
-    ls -l $cuts_per_recording
-    ls -l $cuts_per_segment
-    echo "--"
+    # cuts_per_recording=${exp_dir}/cuts.jsonl.gz
+    # cuts_per_segment=${exp_dir}/cuts_per_segment.jsonl.gz
 
-    for enhancer_impl in $tunings
-    do
-        # Processed output directory
-        enhanced_dir=${exp_dir}/${enhancer_impl}
+    # echo "--"
+    # ls -l $cuts_per_recording
+    # ls -l $cuts_per_segment
+    # echo "--"
 
-        # Run processing
-        CUDA_VISIBLE_DEVICES=${GPU_ID} python ../enhance_cuts/enhance_cuts.py \
-            --enhancer-impl ${enhancer_impl} \
-            --cuts-per-recording ${cuts_per_recording} \
-            --cuts-per-segment ${cuts_per_segment} \
-            --enhanced-dir ${enhanced_dir} \
-            --num-workers ${num_workers}
+    # for enhancer_impl in $tunings
+    # do
+    #     # Processed output directory
+    #     enhanced_dir=${exp_dir}/${enhancer_impl}
 
-        # Prepare manifests
-        python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
-    done
+    #     # Run processing
+    #     CUDA_VISIBLE_DEVICES=${GPU_ID} python ../enhance_cuts/enhance_cuts.py \
+    #         --enhancer-impl ${enhancer_impl} \
+    #         --cuts-per-recording ${cuts_per_recording} \
+    #         --cuts-per-segment ${cuts_per_segment} \
+    #         --enhanced-dir ${enhanced_dir} \
+    #         --num-workers ${num_workers}
+
+    #     # Prepare manifests
+    #     python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
+    # done
+done
 done
 done
 done
