@@ -9,7 +9,7 @@ set -eou pipefail
 # =========
 SCENARIOS=${1:-"chime6 dipco mixer6"} # select scenarios to run
 GPU_ID=${2:-0} # for example, 0 or 1
-DIARIZATION_CONFIG=${3:-system_vA01} # for example, system_vA01
+DIARIZATION_CONFIG=${3:-oracle} # for example, system_vA01
 DIARIZATION_BASE_DIR=${4:-"./chime7_diar_results"} # for example, ${HOME}/scratch/chime7/chime7_diar_results
 
 echo "************************************************************"
@@ -55,13 +55,20 @@ num_workers=4
 sel_nj=16
 # select top 80% channels
 top_k=80
+# ranking metric
+ranking_metric=ev # envelope variance
 # tunings to evaluate
-tunings=nemo_v1
+tunings="nemo_v1 nemo_v1_ref_max_squim_si-sdr nemo_v1_ref_max_squim_stoi nemo_v1_ref_max_squim_pesq"
 
 # Alignment
 # =========
-# Convert diarization output to falign format
-python convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir
+if [ "${diarization_config}" == "oracle" ]
+then
+    echo "Using oracle diarization"
+else
+    # Convert diarization output to falign format
+    python convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir
+fi
 
 # Process all scenarios
 # =====================
@@ -69,18 +76,19 @@ for scenario in $SCENARIOS
 do
 for subset in dev
 do
-for ranking_metric in si-sdr pesq stoi mos
-do
-for top_k in 80 60
-do
     echo "--"
     echo $scenario/$subset
-    echo ranking metric: $ranking_metric
-    echo top_k:          $top_k
     echo "--"
 
     # Alignments generated from diarization
-    alignments_dir=./alignments/${diarization_config}/${scenario} # do not include subset in this path
+    if [ "${diarization_config}" == "oracle" ]
+    then
+        alignments_dir=
+        echo "Using oracle diarization alignments"
+    else
+        alignments_dir=./alignments/${diarization_config}/${scenario} # do not include subset in this path
+        echo "Using alignments from: ${alignments_dir}"
+    fi
 
     # Prepare lhotse manifests from diarization output
     manifests_root=./manifests/lhotse/${diarization_config}
@@ -104,7 +112,7 @@ do
     # These manifests need to be created from diarization output
     manifests_dir=${manifests_root}/${scenario}/${subset}
 
-    exp_dir=${base_output_dir}/${ranking_metric}/${top_k}/${scenario}/${subset}
+    exp_dir=${base_output_dir}/${scenario}/${subset}
     mkdir -p ${exp_dir}
 
     # mic selection
@@ -112,49 +120,47 @@ do
     python ./utils/gss_micrank.py -r ${manifests_dir}/${scenario}-mdm_recordings_${subset}.jsonl.gz \
         -s ${manifests_dir}/${scenario}-mdm_supervisions_${subset}.jsonl.gz \
         -o  ${exp_dir}/${scenario}_${subset}_selected \
-        -k $top_k --metric $ranking_metric --nj 0 # $sel_nj
+        -k $top_k --metric $ranking_metric --nj $sel_nj
 
-    # Run only mic selection
+    recordings=${exp_dir}/${scenario}_${subset}_selected_recordings.jsonl.gz
+    supervisions=${exp_dir}/${scenario}_${subset}_selected_supervisions.jsonl.gz
 
-    # recordings=${exp_dir}/${scenario}_${subset}_selected_recordings.jsonl.gz
-    # supervisions=${exp_dir}/${scenario}_${subset}_selected_supervisions.jsonl.gz
+    echo "Stage 1: Prepare cut set"
+    lhotse cut simple --force-eager \
+        -r $recordings \
+        -s $supervisions \
+        ${exp_dir}/cuts.jsonl.gz
 
-    # echo "Stage 1: Prepare cut set"
-    # lhotse cut simple --force-eager \
-    #     -r $recordings \
-    #     -s $supervisions \
-    #     ${exp_dir}/cuts.jsonl.gz
+    echo "Stage 2: Trim cuts to supervisions (1 cut per supervision segment)"
+    lhotse cut trim-to-supervisions --discard-overlapping \
+        ${exp_dir}/cuts.jsonl.gz  \
+        ${exp_dir}/cuts_per_segment.jsonl.gz
 
-    # echo "Stage 2: Trim cuts to supervisions (1 cut per supervision segment)"
-    # lhotse cut trim-to-supervisions --discard-overlapping \
-    #     ${exp_dir}/cuts.jsonl.gz  \
-    #     ${exp_dir}/cuts_per_segment.jsonl.gz
+    cuts_per_recording=${exp_dir}/cuts.jsonl.gz
+    cuts_per_segment=${exp_dir}/cuts_per_segment.jsonl.gz
 
-    # cuts_per_recording=${exp_dir}/cuts.jsonl.gz
-    # cuts_per_segment=${exp_dir}/cuts_per_segment.jsonl.gz
+    echo "--"
+    ls -l $cuts_per_recording
+    ls -l $cuts_per_segment
+    echo "--"
 
-    # echo "--"
-    # ls -l $cuts_per_recording
-    # ls -l $cuts_per_segment
-    # echo "--"
+    for enhancer_impl in $tunings
+    do
+        echo "Tuning: ${enhancer_impl}"
 
-    # for enhancer_impl in $tunings
-    # do
-    #     # Processed output directory
-    #     enhanced_dir=${exp_dir}/${enhancer_impl}
+        # Processed output directory
+        enhanced_dir=${exp_dir}/${enhancer_impl}
 
-    #     # Run processing
-    #     CUDA_VISIBLE_DEVICES=${GPU_ID} python ../enhance_cuts/enhance_cuts.py \
-    #         --enhancer-impl ${enhancer_impl} \
-    #         --cuts-per-recording ${cuts_per_recording} \
-    #         --cuts-per-segment ${cuts_per_segment} \
-    #         --enhanced-dir ${enhanced_dir} \
-    #         --num-workers ${num_workers}
+        # Run processing
+        CUDA_VISIBLE_DEVICES=${GPU_ID} python ../enhance_cuts/enhance_cuts.py \
+            --enhancer-impl ${enhancer_impl} \
+            --cuts-per-recording ${cuts_per_recording} \
+            --cuts-per-segment ${cuts_per_segment} \
+            --enhanced-dir ${enhanced_dir} \
+            --num-workers ${num_workers}
 
-    #     # Prepare manifests
-    #     python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
-    # done
-done
-done
+        # Prepare manifests
+        python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
+    done
 done
 done

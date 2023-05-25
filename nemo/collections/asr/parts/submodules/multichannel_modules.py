@@ -24,6 +24,13 @@ try:
 except ModuleNotFoundError:
     HAVE_TORCHAUDIO = False
 
+try:
+    from torchaudio.prototype.pipelines import SQUIM_OBJECTIVE
+
+    HAVE_SQUIM = True
+except ModuleNotFoundError:
+    HAVE_SQUIM = False
+
 
 class ParametricMultichannelWienerFilter(torch.nn.Module):
     """Parametric multichannel Wiener filter, with an adjustable
@@ -291,14 +298,16 @@ class ParametricMultichannelWienerFilter(torch.nn.Module):
                 # Fixed ref channel
                 # (B, F, C, 1)
                 W = W[..., self.ref_channel].unsqueeze(-1)
+
             elif self.ref_estimator is not None:
-                # Estimate ref channel tensor (one-hot or soft across C)
+                # Estimate the ref channel tensor (one-hot or soft across C)
                 # (B, C)
                 ref_channel_tensor = self.ref_estimator(W=W, psd_s=psd_s, psd_n=psd_n).to(W.dtype)
                 # Weighting across channels
                 # (B, F, C, 1)
                 W = torch.sum(W * ref_channel_tensor[:, None, None, :], dim=-1, keepdim=True)
 
+            # Calculate the output with the selected filter
             output = self.apply_filter(input=input, filter=W)
 
             # Optional: postfilter
@@ -410,6 +419,97 @@ class ReferenceChannelEstimatorSNR(torch.nn.Module):
         if self.hard:
             _, idx = ref_soft.max(dim=-1, keepdim=True)
             ref_hard = torch.zeros_like(snr).scatter(-1, idx, 1.0)
+            if self.hard_use_grad:
+                # Straight-through for gradient
+                # Propagate ref_soft gradient, as if thresholding is identity
+                ref = ref_hard - ref_soft.detach() + ref_soft
+            else:
+                # No gradient
+                ref = ref_hard
+        else:
+            ref = ref_soft
+
+        return ref
+
+
+class ReferenceChannelEstimatorSQUIM(torch.nn.Module):
+    """Estimate a reference channel by selecting the reference
+    that maximizes a SQUIM metric.
+
+    A straight-through estimator is used for gradient when using
+    hard reference.
+
+    Args:
+        metric: squim objective metric
+        hard: If true, use hard estimate of ref channel.
+            If false, use a soft estimate across channels.
+        hard_use_grad: Use straight-through estimator for
+            the gradient.
+
+    References:
+        TorchAudio-SQUIM
+    """
+
+    def __init__(
+        self,
+        metric: str,
+        hard: bool = True,
+        hard_use_grad: bool = True,
+    ):
+        if not HAVE_SQUIM:
+            logging.error('Could not import SQUIM from torchaudio. Some features might not work.')
+
+            raise ModuleNotFoundError(
+                "torchaudio with SQUIM is not installed but is necessary to instantiate a {self.__class__.__name__}"
+            )
+
+        super().__init__()
+
+        self.metric = metric
+        self.hard = hard
+        self.hard_use_grad = hard_use_grad
+
+        if self.metric in ['stoi', 'pesq', 'si-sdr']:
+            self.model = SQUIM_OBJECTIVE.get_model()
+
+        logging.debug('Initialized %s', self.__class__.__name__)
+        logging.debug('\tmetric:            %d', self.metric)
+        logging.debug('\thard:              %d', self.hard)
+        logging.debug('\thard_use_grad:     %d', self.hard_use_grad)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            input: Multichannel signal, shape (B, C, T)
+
+        Returns:
+            One-hot or soft reference channel, shape (B, C)
+        """
+        assert input.ndim == 3, f'Expected 3D tensor, got {input.ndim}D'
+        B, C, T = input.shape
+        # Reshape to (B * C, T)
+        input = input.reshape(B * C, T)
+
+        # Calculate score for each channel
+        model_output = self.model(input)
+        if self.metric == 'stoi':
+            score = model_output[0]
+        elif self.metric == 'pesq':
+            score = model_output[1]
+        elif self.metric == 'si-sdr':
+            score = model_output[2]
+        else:
+            raise ValueError(f'Unknown metric: {self.metric}')
+
+        # Reshape to (B, C)
+        score = score.reshape(B, C)
+
+        # Soft reference across channels
+        ref_soft = score.softmax(dim=-1)
+
+        if self.hard:
+            _, idx = ref_soft.max(dim=-1, keepdim=True)
+            ref_hard = torch.zeros_like(score).scatter(-1, idx, 1.0)
             if self.hard_use_grad:
                 # Straight-through for gradient
                 # Propagate ref_soft gradient, as if thresholding is identity

@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader
 
 from nemo.collections.asr.modules.audio_modules import MaskBasedBeamformer, MaskBasedDereverbWPE, MaskEstimatorGSS
 from nemo.collections.asr.modules.audio_preprocessing import AudioToSpectrogram, SpectrogramToAudio
+from nemo.collections.asr.parts.submodules.multichannel_modules import ReferenceChannelEstimatorSQUIM
+
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -153,8 +155,15 @@ class CutEnhancer(metaclass=ABCMeta):
         """Create data loaders and enhance cuts.
         This is mostly copied from from gss.core.enhancer.Enhancer.enhance_cuts.
         """
-        torchaudio.set_audio_backend(torchaudio_backend)
-        torchaudio_backend = torchaudio.get_audio_backend()
+        try:
+            logging.info('Set audio backend to %s', torchaudio_backend)
+            torchaudio.set_audio_backend(torchaudio_backend)
+            torchaudio_backend = torchaudio.get_audio_backend()
+        except Exception as e:
+            # This is most likely occur if the I/O backend dispatcher is enabled.
+            logging.warning('Failed to set audio backend to %s', torchaudio_backend)
+            logging.warning('Error: %s', e)
+            torchaudio_backend = 'Unknown backend'
 
         logging.info('Preparing GSS dataset and data loader')
         logging.info('\tcuts:               %s', cuts)
@@ -316,6 +325,18 @@ class FrontEnd_v1(CutEnhancer):
             dtype=use_dtype,
         ).cuda()
         self.gss = MaskEstimatorGSS(num_iterations=bss_iterations, dtype=use_dtype).cuda()
+
+        if mc_ref_channel.startswith('max_squim'):
+            # max_squim requires a time-domain signal, so this cannot be done inside MaskeBasedBeamformer
+            # we set beamformer's ref_channel to None and perform selection after synthesis
+            logging.info('MC ref channel is set to %s', mc_ref_channel)
+            metric = mc_ref_channel.replace('max_squim_', '')
+            mc_ref_channel = None
+            logging.info('Set MC ref channel to None and using %s as a time-domain ref estimator', metric)
+            self.time_domain_ref_estimator = ReferenceChannelEstimatorSQUIM(metric=metric).cuda()
+        else:
+            self.time_domain_ref_estimator = None
+
         self.mc = MaskBasedBeamformer(
             filter_type=mc_filter_type,
             filter_beta=mc_filter_beta,
@@ -410,8 +431,17 @@ class FrontEnd_v1(CutEnhancer):
             target_enc = torch.concatenate(target_enc, axis=-1)
             target, _ = self.synthesis(input=target_enc)
 
+        if self.time_domain_ref_estimator is not None:
+            # Estimate the reference channel in the time domain
+            ref_channel_tensor = self.time_domain_ref_estimator(input=target).to(target.dtype)
+
+            # Weighting across channels
+            target = torch.sum(target * ref_channel_tensor[:, :, None], dim=-2, keepdim=True)
+
         # drop context from the estimated audio
         target = target[0].detach().cpu().numpy().squeeze()
-        target = target[left_context:-right_context]
+        target = target[left_context:]
+        if right_context > 0:
+            target = target[:-right_context]
 
         return target

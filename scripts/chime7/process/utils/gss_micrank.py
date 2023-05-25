@@ -10,17 +10,21 @@ import torchaudio
 import tqdm
 from torch.utils.data import DataLoader, Dataset
 
-# squim
-from torchaudio.prototype.pipelines import SQUIM_OBJECTIVE
-from torchaudio.prototype.pipelines import SQUIM_SUBJECTIVE
+try:
+    from torchaudio.prototype.pipelines import SQUIM_OBJECTIVE
+    from torchaudio.prototype.pipelines import SQUIM_SUBJECTIVE
 
-# non-matching reference
-from torchaudio.utils import download_asset
-NMR_SPEECH = download_asset("tutorial-assets/ctc-decoding/1688-142285-0007.wav")
+    HAVE_SQUIM = True
 
-WAVEFORM_NMR, SAMPLE_RATE_NMR = torchaudio.load(NMR_SPEECH)
-if SAMPLE_RATE_NMR != 16000:
-    WAVEFORM_NMR = F.resample(WAVEFORM_NMR, SAMPLE_RATE_NMR, 16000)
+    # non-matching reference for subjective squim
+    from torchaudio.utils import download_asset
+    NMR_SPEECH = download_asset("tutorial-assets/ctc-decoding/1688-142285-0007.wav")
+
+    WAVEFORM_NMR, SAMPLE_RATE_NMR = torchaudio.load(NMR_SPEECH)
+    if SAMPLE_RATE_NMR != 16000:
+        WAVEFORM_NMR = torchaudio.functional.resample(WAVEFORM_NMR, SAMPLE_RATE_NMR, 16000)
+except ModuleNotFoundError:
+    HAVE_SQUIM = False
 
 
 class EnvelopeVariance(torch.nn.Module):
@@ -91,6 +95,13 @@ class EnvelopeVariance(torch.nn.Module):
 
 class SquimMetric(torch.nn.Module):
     def __init__(self, sample_rate: int, metric: str):
+        if not HAVE_SQUIM:
+            logging.error('Could not import SQUIM from torchaudio. Some features might not work.')
+
+            raise ModuleNotFoundError(
+                "torchaudio with SQUIM is not installed but is necessary to instantiate a {self.__class__.__name__}"
+            )
+            
         super().__init__()
 
         if sample_rate != 16000:

@@ -25,9 +25,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-ENHANCER_IMPL_CHOICES = ['gss', 'nemo_v1']
-
-
 def enhance_cuts(
     enhancer_impl: str,
     cuts_per_recording: str,
@@ -121,6 +118,60 @@ def enhance_cuts(
             context_duration=context_duration,
             activity_garbage_class=use_garbage_class,
         )
+    elif enhancer_impl == 'nemo_v1_ref_max_squim_si-sdr':
+        enhancer = FrontEnd_v1(
+            stft_fft_length=1024,
+            stft_hop_length=256,
+            dereverb_prediction_delay=2,
+            dereverb_filter_length=10,
+            dereverb_num_iterations=3,
+            bss_iterations=bss_iterations,
+            mc_filter_type='pmwf',
+            mc_filter_beta=0,
+            mc_filter_rank='one',
+            mc_filter_postfilter='ban',
+            mc_ref_channel='max_squim_si-sdr',
+            use_dtype=torch.cfloat,
+            cuts=cuts,
+            context_duration=context_duration,
+            activity_garbage_class=use_garbage_class,
+        )
+    elif enhancer_impl == 'nemo_v1_ref_max_squim_stoi':
+        enhancer = FrontEnd_v1(
+            stft_fft_length=1024,
+            stft_hop_length=256,
+            dereverb_prediction_delay=2,
+            dereverb_filter_length=10,
+            dereverb_num_iterations=3,
+            bss_iterations=bss_iterations,
+            mc_filter_type='pmwf',
+            mc_filter_beta=0,
+            mc_filter_rank='one',
+            mc_filter_postfilter='ban',
+            mc_ref_channel='max_squim_stoi',
+            use_dtype=torch.cfloat,
+            cuts=cuts,
+            context_duration=context_duration,
+            activity_garbage_class=use_garbage_class,
+        )
+    elif enhancer_impl == 'nemo_v1_ref_max_squim_pesq':
+        enhancer = FrontEnd_v1(
+            stft_fft_length=1024,
+            stft_hop_length=256,
+            dereverb_prediction_delay=2,
+            dereverb_filter_length=10,
+            dereverb_num_iterations=3,
+            bss_iterations=bss_iterations,
+            mc_filter_type='pmwf',
+            mc_filter_beta=0,
+            mc_filter_rank='one',
+            mc_filter_postfilter='ban',
+            mc_ref_channel='max_squim_pesq',
+            use_dtype=torch.cfloat,
+            cuts=cuts,
+            context_duration=context_duration,
+            activity_garbage_class=use_garbage_class,
+        )
     else:
         raise NotImplementedError(f'Unknown enhancer implementation: {enhancer_impl}')
 
@@ -155,7 +206,6 @@ if __name__ == '__main__':
     parser.add_argument(
         '--enhancer-impl',
         type=str,
-        choices=ENHANCER_IMPL_CHOICES,
         default='nemo_v1',
         help='Implementation of the enhancer, e.g., gss',
     )
