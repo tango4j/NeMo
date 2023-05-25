@@ -412,6 +412,8 @@ class FrontEnd_v1(CutEnhancer):
 
         # drop context from the estimated audio
         target = target[0].detach().cpu().numpy().squeeze()
-        target = target[left_context:-right_context]
+        target = target[left_context:]
+        if right_context > 0:
+            target = target[:-right_context]
 
         return target
