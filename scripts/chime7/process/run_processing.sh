@@ -9,14 +9,16 @@ set -eou pipefail
 # =========
 SCENARIOS=${1:-"chime6 dipco mixer6"} # select scenarios to run
 GPU_ID=${2:-0} # for example, 0 or 1
-DIARIZATION_CONFIG=${3:-system_vA01} # for example, system_vA01
+DIARIZATION_CONFIG=${3:-system_vB02_D03} # for example, system_vA01
 DIARIZATION_BASE_DIR=${4:-"./chime7_diar_results"} # for example, ${HOME}/scratch/chime7/chime7_diar_results
+DIARIZATION_PARAMS=${5:-"T0.5"}  # subfolder for diarization in the format of pred_jsons_{DIARIZATION_PARAMS}. for example, T0.05, with_overlap
 
 echo "************************************************************"
 echo "SCENARIOS:            $SCENARIOS"
 echo "GPU_ID:               $GPU_ID"
 echo "DIARIZATION_CONFIG:   $DIARIZATION_CONFIG"
 echo "DIARIZATION_BASE_DIR: $DIARIZATION_BASE_DIR"
+echo "DIARIZATION_PARAMS:   $DIARIZATION_PARAMS"
 echo "************************************************************"
 
 # Manual path setup
@@ -46,7 +48,7 @@ diarization_output_dir=${diarization_base_dir}/${diarization_config}
 
 # Output
 # ======
-base_output_dir=./processed/${diarization_config}
+base_output_dir=./processed/${diarization_config}-${DIARIZATION_PARAMS}
 num_workers=4
 
 # Processing setup
@@ -61,7 +63,7 @@ tunings=nemo_v1
 # Alignment
 # =========
 # Convert diarization output to falign format
-python convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir
+python convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir --diarization-params $DIARIZATION_PARAMS
 
 # Process all scenarios
 # =====================
@@ -74,10 +76,10 @@ do
     echo "--"
 
     # Alignments generated from diarization
-    alignments_dir=./alignments/${diarization_config}/${scenario} # do not include subset in this path
+    alignments_dir=./alignments/${diarization_config}-${DIARIZATION_PARAMS}/${scenario} # do not include subset in this path
 
     # Prepare lhotse manifests from diarization output
-    manifests_root=./manifests/lhotse/${diarization_config}
+    manifests_root=./manifests/lhotse/${diarization_config}-${DIARIZATION_PARAMS}
 
     # NOTE:
     # Unfortunately, this scripts runs for "mdm" and "ihm" for the dev set.
@@ -141,7 +143,8 @@ do
             --cuts-per-recording ${cuts_per_recording} \
             --cuts-per-segment ${cuts_per_segment} \
             --enhanced-dir ${enhanced_dir} \
-            --num-workers ${num_workers}
+            --num-workers ${num_workers} \
+            --use-garbage-class
 
         # Prepare manifests
         python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir

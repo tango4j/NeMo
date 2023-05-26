@@ -5,14 +5,17 @@ import tqdm
 import json
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 
-diarization_system = 'system_vA04D'
+# diarization_system = 'system_vA04D'
 # diarization_dir = os.path.expanduser(f'~/scratch/chime7/chime7_diar_results/{diarization_system}')
 
-output_dir = f'./alignments/{diarization_system}'
+# output_dir = f'./alignments/{diarization_system}'
 
-def main(diarization_dir: str, subsets: list = ['dev']):
+def main(diarization_dir: str, diarization_params: str, subsets: list = ['dev']):
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
+    diarization_system = diarization_dir.split('/')[-1]
+    output_dir = f'./alignments/{diarization_system}-{diarization_params}'
+
     scenario_dirs = glob.glob(diarization_dir + '/*')
     assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
 
@@ -20,10 +23,10 @@ def main(diarization_dir: str, subsets: list = ['dev']):
         for subset in subsets:
             # Currently, subdirectories don't have a uniform naming scheme
             # Therefore, we pick the subdirectory that has both scenario and subset in its name
-            scenario_subset_dir = [sd for sd in scenario_dirs if scenario in sd and subset in sd][0]
+            scenario_subset_dir = [sd for sd in scenario_dirs if scenario in sd][0]
 
             # Grab manifests from the results of diarization
-            manifests_dir = os.path.join(scenario_subset_dir, 'pred_jsons_with_overlap')
+            manifests_dir = os.path.join(scenario_subset_dir, f"pred_jsons_{diarization_params}")
             manifests = glob.glob(manifests_dir + '/*.json')
             
             # Process each manifest
@@ -62,6 +65,12 @@ if __name__ == '__main__':
         required=True,
         help='Directory with output of diarization',
     )
+    parser.add_argument(
+        '--diarization-params',
+        type=str,
+        default='pred_jsons_with_overlap',
+        help='Name of the subdirectory with diarization results',
+    )
     args = parser.parse_args()
 
-    main(diarization_dir=args.diarization_dir)
+    main(diarization_dir=args.diarization_dir, diarization_params=args.diarization_params)

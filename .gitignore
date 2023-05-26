@@ -18,6 +18,7 @@ fastspeech_output
 alignments/
 manifests/
 processed/
+*_heh*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
