@@ -17,7 +17,7 @@ def main(diarization_dir: str, diarization_params: str, subsets: list = ['dev'])
     output_dir = f'./alignments/{diarization_system}-{diarization_params}'
 
     scenario_dirs = glob.glob(diarization_dir + '/*')
-    assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
+    # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
 
     for scenario in ['chime6', 'dipco', 'mixer6']:
         for subset in subsets:
