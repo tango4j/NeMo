@@ -438,12 +438,12 @@ class FrontEnd_v1(CutEnhancer):
             target_enc = torch.concatenate(target_enc, axis=-1)
             target, _ = self.synthesis(input=target_enc)
 
-        if self.time_domain_ref_estimator is not None:
-            # Estimate the reference channel in the time domain
-            ref_channel_tensor = self.time_domain_ref_estimator(input=target).to(target.dtype)
+            if self.time_domain_ref_estimator is not None:
+                # Estimate the reference channel in the time domain
+                ref_channel_tensor = self.time_domain_ref_estimator(input=target).to(target.dtype)
 
-            # Weighting across channels
-            target = torch.sum(target * ref_channel_tensor[:, :, None], dim=-2, keepdim=True)
+                # Weighting across channels
+                target = torch.sum(target * ref_channel_tensor[:, :, None], dim=-2, keepdim=True)
 
         # drop context from the estimated audio
         target = target[0].detach().cpu().numpy().squeeze()
