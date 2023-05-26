@@ -179,8 +179,9 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--use-garbage-class',
-        action='store_true',
-        help='Use garbage class. Default: False',
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help='Use garbage class. Default: True',
     )
     parser.add_argument(
         '--min-segment-length', type=float, default=0.0,
