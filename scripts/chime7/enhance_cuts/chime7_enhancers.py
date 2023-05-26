@@ -1,3 +1,4 @@
+import os
 import logging
 import math
 import pathlib
@@ -156,6 +157,12 @@ class CutEnhancer(metaclass=ABCMeta):
         This is mostly copied from from gss.core.enhancer.Enhancer.enhance_cuts.
         """
         try:
+            # v2.0 introduced an IO dispatcher
+            # we disable it here, and set the backend explicitly to soundfile, since it is the fastest
+            TORCHAUDIO_USE_BACKEND_DISPATCHER = os.getenv('TORCHAUDIO_USE_BACKEND_DISPATCHER', default='1')
+            if TORCHAUDIO_USE_BACKEND_DISPATCHER == '1':
+                logging.info('TORCHAUDIO_USE_BACKEND_DISPATCHER is set to 1. It will be disabled.')
+                os.environ['TORCHAUDIO_USE_BACKEND_DISPATCHER'] = '0'
             logging.info('Set audio backend to %s', torchaudio_backend)
             torchaudio.set_audio_backend(torchaudio_backend)
             torchaudio_backend = torchaudio.get_audio_backend()
