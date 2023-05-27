@@ -455,6 +455,7 @@ class ReferenceChannelEstimatorSQUIM(torch.nn.Module):
         metric: str,
         hard: bool = True,
         hard_use_grad: bool = True,
+        channel_step: int = 8,
     ):
         if not HAVE_SQUIM:
             logging.error('Could not import SQUIM from torchaudio. Some features might not work.')
@@ -471,11 +472,16 @@ class ReferenceChannelEstimatorSQUIM(torch.nn.Module):
 
         if self.metric in ['stoi', 'pesq', 'si-sdr']:
             self.model = SQUIM_OBJECTIVE.get_model()
+        else:
+            raise ValueError(f'Unknown metric {self.metric}')
+
+        self.channel_step = channel_step
 
         logging.debug('Initialized %s', self.__class__.__name__)
         logging.debug('\tmetric:            %d', self.metric)
         logging.debug('\thard:              %d', self.hard)
         logging.debug('\thard_use_grad:     %d', self.hard_use_grad)
+        logging.debug('\tchannel_step:      %d', self.channel_step)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
@@ -487,22 +493,28 @@ class ReferenceChannelEstimatorSQUIM(torch.nn.Module):
         """
         assert input.ndim == 3, f'Expected 3D tensor, got {input.ndim}D'
         B, C, T = input.shape
-        # Reshape to (B * C, T)
-        input = input.reshape(B * C, T)
 
-        # Calculate score for each channel
-        model_output = self.model(input)
-        if self.metric == 'stoi':
-            score = model_output[0]
-        elif self.metric == 'pesq':
-            score = model_output[1]
-        elif self.metric == 'si-sdr':
-            score = model_output[2]
-        else:
-            raise ValueError(f'Unknown metric: {self.metric}')
+        score = torch.zeros(B, C, device=input.device)
 
-        # Reshape to (B, C)
-        score = score.reshape(B, C)
+        # Process a few channels at a time
+        # Processing all C channels at once caused OOM on GPU
+        for b in range(B):
+            for c in range(0, C, self.channel_step):
+                # Calculate score for each channel
+                model_output = self.model(input[b, c:c+self.channel_step, :])
+
+                # Select the desired metric
+                if self.metric == 'stoi':
+                    metric_val = model_output[0]
+                elif self.metric == 'pesq':
+                    metric_val = model_output[1]
+                elif self.metric == 'si-sdr':
+                    metric_val = model_output[2]
+                else:
+                    raise ValueError(f'Unknown metric: {self.metric}')
+
+                # Save the score
+                score[b, c:c+self.channel_step] = metric_val
 
         # Soft reference across channels
         ref_soft = score.softmax(dim=-1)
