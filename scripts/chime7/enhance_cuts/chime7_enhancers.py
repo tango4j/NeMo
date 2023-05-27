@@ -442,16 +442,13 @@ class FrontEnd_v1(CutEnhancer):
             target, _ = self.synthesis(input=target_enc)
 
             if self.time_domain_ref_estimator is not None:
-                # To save compute, use context only if audio is shorter than ref_min_len
-                ref_min_len = int(5 * self.sample_rate)
+                # To save compute, use shorter context for reference channel estimation
+                ref_context_len_sec = 5
+                ref_context_len = int(ref_context_len_sec * self.sample_rate)
                 audio_len = audio.size(-1) - (left_context + right_context)
 
-                if audio_len < ref_min_len:
-                    ref_start = max(0, left_context - (ref_min_len - audio_len)//2)
-                    ref_end = ref_start + ref_min_len
-                else:
-                    ref_start = left_context
-                    ref_end = ref_start + audio_len
+                ref_start = max(0, left_context - ref_context_len)
+                ref_end = ref_start + audio_len + 2 * ref_context_len
 
                 # Estimate the reference channel in the time domain
                 ref_channel_tensor = self.time_domain_ref_estimator(input=target[..., ref_start:ref_end]).to(target.dtype)
