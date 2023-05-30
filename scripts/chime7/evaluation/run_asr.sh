@@ -19,7 +19,7 @@ do
     echo "data_dir: ${data_dir}"
     echo "--"
 
-    CUDA_VISIBLE_DEVICES=0 python transcribe_speech.py \
+    python transcribe_speech.py \
         batch_size=32 \
         num_workers=8 \
         model_path=$model_path \
