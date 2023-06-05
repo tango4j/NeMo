@@ -18,7 +18,7 @@ def main(diarization_dir: str, diarization_params: str, subsets: list = ['dev'])
 
     scenario_dirs = glob.glob(diarization_dir + '/*')
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
-
+    none_useful_fields = ['audio_filepath', 'words', 'text', 'duration', 'offset']
     for scenario in ['chime6', 'dipco', 'mixer6']:
         for subset in subsets:
             # Currently, subdirectories don't have a uniform naming scheme
@@ -26,7 +26,10 @@ def main(diarization_dir: str, diarization_params: str, subsets: list = ['dev'])
             scenario_subset_dir = [sd for sd in scenario_dirs if scenario in sd][0]
 
             # Grab manifests from the results of diarization
-            manifests_dir = os.path.join(scenario_subset_dir, f"pred_jsons_{diarization_params}")
+            manifests_dir =  os.path.join(scenario_subset_dir, diarization_params)
+            if not os.path.isdir(manifests_dir):
+                manifests_dir = os.path.join(scenario_subset_dir, f"pred_jsons_{diarization_params}")
+
             manifests = glob.glob(manifests_dir + '/*.json')
             
             # Process each manifest
@@ -39,15 +42,16 @@ def main(diarization_dir: str, diarization_params: str, subsets: list = ['dev'])
                     os.makedirs(os.path.dirname(new_manifest))
 
                 # read manifest
-                data = read_manifest(manifest)
+                try:
+                    data = read_manifest(manifest)
+                except json.decoder.JSONDecodeError:
+                    data = json.load(open(manifest, 'r'))
 
                 for item in data:
                     # not required
-                    item.pop('audio_filepath')
-                    item.pop('words')
-                    item.pop('text')
-                    item.pop('duration')
-                    item.pop('offset')
+                    for k in none_useful_fields:
+                        if k in item:
+                            item.pop(k)
                     # set these to be consistent with the baseline falign manifests
                     item['session_id'] = session_name
                     item['words'] = 'placeholder'

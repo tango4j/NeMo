@@ -152,6 +152,8 @@ class TranscriptionConfig:
     # Use this for model-specific changes before transcription
     model_change: ModelChangeConfig = ModelChangeConfig()
 
+    normalize_db: Optional[float] = None  # Normalize audio to this dB level
+
 
 @hydra_runner(config_name="TranscriptionConfig", schema=TranscriptionConfig)
 def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
@@ -313,6 +315,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                         return_hypotheses=return_hypotheses,
                         channel_selector=cfg.channel_selector,
                         augmentor=augmentor,
+                        normalize_db=cfg.normalize_db,
                     )
 
         logging.info(f"Finished transcribing {len(filepaths)} files !")

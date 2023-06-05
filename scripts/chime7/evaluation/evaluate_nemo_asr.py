@@ -544,6 +544,7 @@ def parse_nemo_json(json_file, split_tag=None):
                     "end_time": entry["end_time"],
                     "words": entry["pred_text"],
                     "session_id": entry["session_id"],
+                    "audio_filepath": entry["audio_filepath"],
                 }
             )
     return hyp_segs
