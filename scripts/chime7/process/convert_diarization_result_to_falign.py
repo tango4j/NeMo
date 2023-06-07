@@ -10,11 +10,13 @@ from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
 
 # output_dir = f'./alignments/{diarization_system}'
 
-def main(diarization_dir: str, diarization_params: str, subsets: list = ['dev']):
+def main(diarization_dir: str, diarization_params: str, output_dir: str = "", subsets: list = ['dev']):
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
     diarization_system = diarization_dir.split('/')[-1]
-    output_dir = f'./alignments/{diarization_system}-{diarization_params}'
+
+    if output_dir == "":
+        output_dir = f'./alignments/{diarization_system}-{diarization_params}'
 
     scenario_dirs = glob.glob(diarization_dir + '/*')
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
@@ -75,6 +77,12 @@ if __name__ == '__main__':
         default='pred_jsons_with_overlap',
         help='Name of the subdirectory with diarization results',
     )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default='',
+        help='Directory to store the output',
+    )
     args = parser.parse_args()
 
-    main(diarization_dir=args.diarization_dir, diarization_params=args.diarization_params)
+    main(diarization_dir=args.diarization_dir, diarization_params=args.diarization_params, output_dir=args.output_dir)

@@ -8,10 +8,14 @@ set -eou pipefail
 # Arguments
 # =========
 SCENARIOS=${1:-"chime6 dipco mixer6"} # select scenarios to run
-GPU_ID=${2:-0} # for example, 0 or 1
-DIARIZATION_CONFIG=${3:-system_vB02_D03} # for example, system_vA01
-DIARIZATION_BASE_DIR=${4:-"./chime7_diar_results"} # for example, ${HOME}/scratch/chime7/chime7_diar_results
-DIARIZATION_PARAMS=${5:-"T0.5"}  # subfolder for diarization in the format of pred_jsons_{DIARIZATION_PARAMS}. for example, T0.05, with_overlap
+GPU_ID=${2:-1} # for example, 0 or 1
+DIARIZATION_CONFIG=${3:-system_B_V05_D03} # for example, system_vA01, system_vA04D, 
+DIARIZATION_PARAMS=${4:-"T0.5"}
+DIARIZATION_BASE_DIR=${5:-"/media/data2/chime7-challenge/chime7_diar_results"} # for example, ${HOME}/scratch/chime7/chime7_diar_results
+OUTPUT_ROOT=${6:-"."}
+ESPNET_ROOT=${7:-"/home/heh/github/espnet/egs2/chime7_task1/asr1"}  # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
+CHIME7_ROOT=${8:-"/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"}  # For example, /data/chime7/chime7_official_cleaned
+NEMO_CHIME7_ROOT=${9:-"/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"} # For example, /media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7
 
 echo "************************************************************"
 echo "SCENARIOS:            $SCENARIOS"
@@ -19,12 +23,13 @@ echo "GPU_ID:               $GPU_ID"
 echo "DIARIZATION_CONFIG:   $DIARIZATION_CONFIG"
 echo "DIARIZATION_BASE_DIR: $DIARIZATION_BASE_DIR"
 echo "DIARIZATION_PARAMS:   $DIARIZATION_PARAMS"
+echo "OUTPUT_ROOT:          $OUTPUT_ROOT"
 echo "************************************************************"
 
 # Manual path setup
 # =================
-espnet_root= # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
-chime7_root= # For example, /data/chime7/chime7_official_cleaned
+espnet_root=$ESPNET_ROOT # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
+chime7_root=$CHIME7_ROOT # For example, /data/chime7/chime7_official_cleaned
 
 if [ -z "$espnet_root" ]
 then
@@ -40,6 +45,27 @@ then
     exit -1
 fi
 
+if [ -z "$BSS_ITERATION" ]
+then
+    BSS_ITERATION=5
+fi
+
+if [ -z "$MC_MASK_MIN_DB" ]
+then
+    MC_MASK_MIN_DB=-60
+fi
+
+if [ -z "$MC_POSTMASK_MIN_DB" ]
+then
+    MC_POSTMASK_MIN_DB=-9
+fi
+
+if [ -z "$DEREVERB_FILTER_LENGTH" ]
+then
+    DEREVERB_FILTER_LENGTH=5
+fi
+
+
 # Diarization output
 # ==================
 diarization_base_dir=${DIARIZATION_BASE_DIR}
@@ -48,7 +74,9 @@ diarization_output_dir=${diarization_base_dir}/${diarization_config}
 
 # Output
 # ======
-base_output_dir=./processed/${diarization_config}-${DIARIZATION_PARAMS}
+base_output_dir=${OUTPUT_ROOT}/processed/${diarization_config}-${DIARIZATION_PARAMS}
+alignments_output_dir=${OUTPUT_ROOT}/alignments/${diarization_config}-${DIARIZATION_PARAMS}
+manifests_root=${OUTPUT_ROOT}/manifests/lhotse/${diarization_config}-${DIARIZATION_PARAMS}
 num_workers=4
 
 # Processing setup
@@ -63,7 +91,7 @@ tunings=nemo_v1
 # Alignment
 # =========
 # Convert diarization output to falign format
-python convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir --diarization-params $DIARIZATION_PARAMS
+python ${NEMO_CHIME7_ROOT}/process/convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir --diarization-params $DIARIZATION_PARAMS --output-dir $alignments_output_dir
 
 # Process all scenarios
 # =====================
@@ -76,11 +104,9 @@ do
     echo "--"
 
     # Alignments generated from diarization
-    alignments_dir=./alignments/${diarization_config}-${DIARIZATION_PARAMS}/${scenario} # do not include subset in this path
-
+    alignments_dir=${alignments_output_dir}/${scenario} # do not include subset in this path
+    
     # Prepare lhotse manifests from diarization output
-    manifests_root=./manifests/lhotse/${diarization_config}-${DIARIZATION_PARAMS}
-
     # NOTE:
     # Unfortunately, this scripts runs for "mdm" and "ihm" for the dev set.
     # This means it will always fail for "ihm", since we only have diarization output for "mdm".
@@ -138,16 +164,20 @@ do
         enhanced_dir=${exp_dir}/${enhancer_impl}
 
         # Run processing
-        CUDA_VISIBLE_DEVICES=${GPU_ID} python ../enhance_cuts/enhance_cuts.py \
+        CUDA_VISIBLE_DEVICES=${GPU_ID} python ${NEMO_CHIME7_ROOT}/enhance_cuts/enhance_cuts.py \
             --enhancer-impl ${enhancer_impl} \
             --cuts-per-recording ${cuts_per_recording} \
             --cuts-per-segment ${cuts_per_segment} \
             --enhanced-dir ${enhanced_dir} \
             --num-workers ${num_workers} \
+            --bss-iterations ${BSS_ITERATION} \
+            --dereverb-filter-length ${DEREVERB_FILTER_LENGTH} \
+            --mc-mask-min-db ${MC_MASK_MIN_DB} \
+            --mc-postmask-min-db ${MC_POSTMASK_MIN_DB} \
             --use-garbage-class
 
         # Prepare manifests
-        python prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
+        python ${NEMO_CHIME7_ROOT}/process/prepare_nemo_manifests_for_processed.py --data-dir $enhanced_dir
     done
 done
 done

@@ -22,10 +22,6 @@ from pyannote.metrics.types import MetricComponents
 from tabulate import tabulate
 from tqdm import tqdm
 
-DEBUG = False
-if DEBUG:
-    from meeteval import wer as meeteval_wer  # isort: skip
-
 
 def compute_der(df_or_dict):
     if isinstance(df_or_dict, dict):
@@ -549,7 +545,7 @@ def parse_nemo_json(json_file, split_tag=None):
             )
     return hyp_segs
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         "This script is used for scoring according to the procedure outlined in"
         " CHiME-7 DASR challenge website"
@@ -648,6 +644,12 @@ if __name__ == "__main__":
         raise RuntimeError("Please update jiwer package to 3.0.0 version.")
 
     args = parser.parse_args()
+    macro_wer = run_chime7_evaluation(args)
+    with open(os.path.join(args.output_folder, "macro_wer.txt"), "w") as f:
+        f.write(str(macro_wer))
+
+
+def run_chime7_evaluation(args):
     skip_macro = False
     spk_wise_df = []
     sess_wise_df = []
@@ -723,12 +725,17 @@ if __name__ == "__main__":
     print("### Metrics for all Scenarios ###")
     print("###################################################")
     print(tabulate(scenario_wise_df, headers="keys", tablefmt="psql"))
-    if not skip_macro:
-        print("####################################################################")
-        print("### Macro-Averaged Metrics across all Scenarios (Ranking Metric) ###")
-        print("####################################################################")
-        macro_avg = (
-            scenario_wise_df.drop("scenario", axis="columns").mean(0).to_frame().T
-        )
-        macro_avg.insert(0, "scenario", "macro-average")
-        print(tabulate(macro_avg, headers="keys", tablefmt="psql"))
+    # if not skip_macro:
+    print("####################################################################")
+    print("### Macro-Averaged Metrics across all Scenarios (Ranking Metric) ###")
+    print("####################################################################")
+    macro_avg = (
+        scenario_wise_df.drop("scenario", axis="columns").mean(0).to_frame().T
+    )
+    macro_avg.insert(0, "scenario", "macro-average")
+    print(tabulate(macro_avg, headers="keys", tablefmt="psql"))
+    return macro_avg['wer'][0]
+
+
+if __name__ == "__main__":
+    main()

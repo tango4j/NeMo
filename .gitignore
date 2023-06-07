@@ -19,12 +19,14 @@ alignments/
 manifests/
 processed/
 *_heh*
+optuna_output*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 **.pyc
+*.db
 
 # C extensions
 *.so
