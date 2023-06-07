@@ -40,7 +40,7 @@ DIAR_CONFIG="system_B_V05_D03"
 DIAR_PARAM="T0.5"
 DIAR_BASE_DIR="/media/data2/chime7-challenge/chime7_diar_results"
 
-SCENARIOS = "dipco"  # "chime6 dipco mixer6"
+SCENARIOS = "chime6 dipco mixer6"
 
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
@@ -91,7 +91,7 @@ def objective_gss_asr(
         print(f"Time taken for trial: {time.time() - start_time:.2f}s")
     return wer
 
-def objective(
+def objective_diar(
     trial: optuna.Trial,
     gpu_id: int,
     manifest_path: str,
