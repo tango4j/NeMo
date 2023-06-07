@@ -13,15 +13,7 @@ DIAR_PARAM="T0.5"
 DIAR_BASE_DIR="/media/data2/chime7-challenge/chime7_diar_results"
 ```
 
-In one terminal, start the sqlite3 server:
-
-```bash
-sqlite3 optuna.db
-
-# write .quit to close CLI
-```
-
-In another terminal, start the optimization:
+In a terminal, start the optimization:
 ```bash
 python optimize.py --n_jobs -1 --n_trials 100 --study_name chime7
 ```
