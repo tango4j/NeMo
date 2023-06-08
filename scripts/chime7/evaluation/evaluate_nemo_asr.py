@@ -197,18 +197,6 @@ def compute_diar_errors(hyp_segs, ref_segs, uem_boundaries=None, collar=0.5):
     jer_score = jer_compute.compute_jer(
         reference, hypothesis, {v: k for k, v in mapping.items()}
     )
-    if DEBUG:
-        from pyannote.metrics.diarization import (  # isort: skip
-            DiarizationErrorRate,
-            JaccardErrorRate,
-        )
-
-        orig_jer = JaccardErrorRate(collar=collar, skip_overlap=False)
-        orig_der = DiarizationErrorRate(collar=collar, skip_overlap=False)
-        jer_test = orig_jer(ref_annotation, hyp_annotation, uem=uem)
-        der_test = orig_der(ref_annotation, hyp_annotation, uem=uem)
-        assert abs(jer_score["Jaccard error rate"] - jer_test) < 1e-4
-        assert abs(der_test - der_score["diarization error rate"]) < 1e-4
 
     # error analysis here
     error_compute = IdentificationErrorAnalysis(collar=collar, skip_overlap=False)
@@ -316,23 +304,6 @@ def compute_asr_errors(output_folder, hyp_segs, ref_segs, mapping=None, uem=None
 
     c_wer = compute_wer(tot_stats)
     tot_stats.update({"wer": c_wer})
-
-    if DEBUG:
-        if mapping is not None:
-            # remove the dummy speakers
-            if missed_speakers:
-                for m_spk in list(missed_speakers):
-                    del hyp[m_spk]
-            if false_speakers:
-                for f_spk in list(false_speakers):
-                    del ref[f_spk]
-        # check consistency with meeteval cpWER, note if diarization is bad
-        # this consistency will fail.
-        cp_wer = meeteval_wer.cp_word_error_rate(
-            {k: " ".join([x["words"] for x in ref[k]]) for k in ref.keys()},
-            {k: " ".join([x["words"] for x in hyp[k]]) for k in hyp.keys()},
-        )
-        assert abs(cp_wer.error_rate - c_wer) < 1e-4
 
     return tot_stats, speakers_stats
 
