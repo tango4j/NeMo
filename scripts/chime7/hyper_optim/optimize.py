@@ -48,7 +48,7 @@ def scale_weights(r, K):
 def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
                     bss_iterations, dereverb_filter_length):
     command = f"BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
-              f" {NEMO_CHIME7_ROOT}/process/run_processing.sh {SCENARIOS} " \
+              f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
               f" {gpu_id} {diar_config} {diar_param} {diar_base_dir} {output_dir} " \
               f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
               
@@ -56,7 +56,7 @@ def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, 
 
 
 def get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir):
-    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh {SCENARIOS} dev " \
+    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{SCENARIOS}' dev " \
               f"{diar_config}-{diar_param} {output_dir}/processed {output_dir} {normalize_db} {ASR_MODEL_PATH} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id}"
 
     return command
@@ -258,6 +258,8 @@ if __name__ == "__main__":
     if args.n_jobs == -1:
         args.n_jobs = torch.cuda.device_count()
     n_jobs = min(args.n_jobs, torch.cuda.device_count())
+    print(f"Running {args.n_trials} trials on {n_jobs} GPUs")
+
     for i in range(0, n_jobs):
         p = Process(target=optimize, args=(i,))
         processes.append(p)
