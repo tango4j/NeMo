@@ -307,8 +307,9 @@ class MegatronGPTPromptLearningModel(MegatronBasePromptLearningModel):
             forward_only=forward_only,
             tensor_shape=tensor_shape,
             dtype=self.autocast_dtype,
-            grad_scaler=self.trainer.precision_plugin.scaler if self.cfg.precision == 16 else None,
+            grad_scaler=self.trainer.precision_plugin.scaler.scale if self.cfg.precision == 16 else None,
             sequence_parallel=self.cfg.get('sequence_parallel', False),
+            enable_autocast=True,
         )
 
         # only the last stages of the pipeline return losses
@@ -604,7 +605,9 @@ class MegatronGPTPromptLearningModel(MegatronBasePromptLearningModel):
             drop_last=drop_last,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=True,  # (@adithyare and @eharper) We need this to make spawn=True to work.
+            persistent_workers=True
+            if num_workers > 0
+            else False,  # (@adithyare and @eharper) We need this to make spawn=True to work.
         )
 
         return dataset, dataloader

@@ -15,7 +15,6 @@ channel_selector: null
 
 diarizer:
   use_saved_embeddings: True # True or False
-  # use_saved_embeddings: False # True or False
   manifest_filepath: ???
   out_dir: ???
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
@@ -38,7 +37,6 @@ diarizer:
       shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
       top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
       use_external_vad: True
-      # frame_vad_threshold: 0.01 # Golden for chime7 challenge all three dataset
       frame_vad_threshold: 0.04
       window_length_in_sec: 0.02  # Window length in sec for VAD context input 
       smoothing: "median" # False or type of smoothing method (eg: median)
@@ -82,36 +80,23 @@ diarizer:
       seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
       diar_window_length: 50 # The length of split short sequence when split_infer is True.
-      # global_average_mix_ratio: 0.9
-      # global_average_window_count: 25 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
       global_average_mix_ratio: 0.9
       global_average_window_count: 25 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
       overlap_infer_spk_limit: 0.3 # If the proportion of speaking time is lower than this, ignore those speakers for overlap detection.
-      # msdd_overlap_add: True
       msdd_overlap_add: False
       use_1ch_from_ch_clus: False
       mask_spks_with_clus: True
       ts_vad_threshold: -1 # if negative number, use VAD for clustering diarizer.
-      # ts_vad_threshold: 0.93 # if negative number, use VAD for clustering diarizer.
       infer_overlap: True
       affinity_weighting: True
       power_p_aff: 3
       thres_aff: 0.25
       use_ts_vad: True
       multi_ch_late_fusion_mode: True # True or False
-      # mc_late_fusion_mode: "post_max" # "pre_mean", "pre_max", "pre_mean", "pre_mode" 
-      # mc_late_fusion_mode: "post_max" 
       mc_late_fusion_mode: "post_mean" 
-      # mc_late_fusion_mode: "pre_mean" 
-
-      # infer_mode: "only_clus"
-      # infer_mode: "vad_masked_logits"
-      # infer_mode: "vad_masked_logits_force_1spk"
       infer_mode: "vad_masked_logits_force_1spk_rel_thres"
-      # infer_mode: "vad_masked_logits_force_1spk_rel_thres_clus_union"
       system_name: "sys-B-V07"
       use_var_weights: False
-
   
   asr:
     model_path: stt_en_conformer_ctc_large # Provide NGC cloud ASR model name. stt_en_conformer_ctc_* models are recommended for diarization purposes.

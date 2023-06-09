@@ -80,6 +80,8 @@ class AudioSegment(object):
         channel_selector=None,
         normalize=False,
         normalize_target=-20,
+        normalize_db=False,
+        normalize_db_target=-20.0,
     ):
         """Create audio segment from samples.
         Samples are convert float32 internally, with int scaled to [-1, 1].
@@ -116,6 +118,8 @@ class AudioSegment(object):
         self._orig_sr = orig_sr if orig_sr is not None else sample_rate
         if normalize:
             self.normalize(normalize_target)
+        if normalize_db:
+            self.normalize_db(normalize_db_target)
 
     def __eq__(self, other):
         """Return whether two objects are equal."""
@@ -187,6 +191,8 @@ class AudioSegment(object):
         channel_selector=None,
         normalize=False,
         normalize_target=-20,
+        normalize_db=False,
+        normalize_db_target=-20.0,
     ):
         """
         Load a file supported by librosa and return as an AudioSegment.
@@ -209,6 +215,8 @@ class AudioSegment(object):
                                  If set to `None`, the original signal will be used.
         :param normalize: if true, normalize the audio signal to a target RMS value
         :param normalize_target: the target RMS value in decibels
+        :param normalize_db (bool): if true, normalize the audio signal to a target RMS value
+        :param normalize_db_target (float): the target RMS value in decibels
         :return: AudioSegment instance
         """
         samples = None
@@ -284,6 +292,8 @@ class AudioSegment(object):
             channel_selector=channel_selector,
             normalize=normalize,
             normalize_target=normalize_target,
+            normalize_db=normalize_db,
+            normalize_db_target=normalize_db_target,
         )
 
     @classmethod
@@ -352,9 +362,8 @@ class AudioSegment(object):
             else:
                 # Check the dimensions match
                 if len(a_samples) != len(samples):
-                    # import ipdb; ipdb.set_trace()
-                    logging.warning(
-                        f'Loaded samples have different lengths: {a_samples.shape} != {samples.shape}, using zero-padding to match the shorter one.'
+                    raise RuntimeError(
+                        f'Loaded samples need to have identical length: {a_samples.shape} != {samples.shape}'
                     )
                     # Zero-pad the shorter signal
                     if len(a_samples) < len(samples):
@@ -409,7 +418,7 @@ class AudioSegment(object):
                         audio_start = math.floor(offset * sample_rate)
                         if audio_start > max_audio_start:
                             raise RuntimeError(
-                                f'Provided audio start ({audio_start_seconds} seconds = {audio_start} samples) is larger than the maximum possible ({max_audio_start})'
+                                f'Provided audio start ({audio_start}) is larger than the maximum possible ({max_audio_start})'
                             )
                     f.seek(audio_start)
                     samples = f.read(n_segments_at_original_sr, dtype='float32')
@@ -470,8 +479,8 @@ class AudioSegment(object):
     def gain_db(self, gain):
         self._samples *= 10.0 ** (gain / 20.0)
 
-    def normalize(self, target_db=-20):
-        """Normalize the signal to a target RMS value in decibels.
+    def normalize_db(self, target_db=-20):
+        """Normalize the signal to a target RMS value in decibels. 
         """
         rms_db = self.rms_db
         gain = target_db - rms_db
