@@ -492,6 +492,8 @@ class _AudioTextDataset(Dataset):
         pad_id: int = 0,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
+        normalize_db: Optional[bool] = False,
+        normalize_db_target: Optional[float] = -25.0,
     ):
         if type(manifest_filepath) == str:
             manifest_filepath = manifest_filepath.split(",")
@@ -513,6 +515,8 @@ class _AudioTextDataset(Dataset):
         self.trim = trim
         self.return_sample_id = return_sample_id
         self.channel_selector = channel_selector
+        self.normalize_db = normalize_db
+        self.normalize_db_target = normalize_db_target
 
     def get_manifest_sample(self, sample_id):
         return self.manifest_processor.collection[sample_id]
@@ -531,6 +535,8 @@ class _AudioTextDataset(Dataset):
             trim=self.trim,
             orig_sr=sample.orig_sr,
             channel_selector=self.channel_selector,
+            normalize=self.normalize_db,
+            normalize_target=self.normalize_db_target,
         )
         f, fl = features, torch.tensor(features.shape[0]).long()
 
@@ -703,7 +709,10 @@ class AudioToBPEDataset(_AudioTextDataset):
         use_start_end_token: bool = True,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
+        normalize_db: Optional[bool] = False,
+        normalize_db_target: Optional[float] = -25.0,
     ):
+        
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
             bos_id = tokenizer.bos_id
         else:
@@ -752,6 +761,8 @@ class AudioToBPEDataset(_AudioTextDataset):
             trim=trim,
             return_sample_id=return_sample_id,
             channel_selector=channel_selector,
+            normalize_db=normalize_db,
+            normalize_db_target=normalize_db_target,
         )
 
 

@@ -218,6 +218,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, Exportable):
         channel_selector: Optional[ChannelSelectorType] = None,
         augmentor: DictConfig = None,
         verbose: bool = True,
+        normalize_db: Optional[float] = None
     ) -> Tuple[List[str], Optional[List['Hypothesis']]]:
         """
         Uses greedy decoding to transcribe audio files. Use this method for debugging and prototyping.
@@ -279,6 +280,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, Exportable):
                     'temp_dir': tmpdir,
                     'num_workers': num_workers,
                     'channel_selector': channel_selector,
+                    'normalize_db': normalize_db
                 }
 
                 if augmentor:
@@ -879,6 +881,13 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, Exportable):
             manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
             batch_size = min(config['batch_size'], len(config['paths2audio_files']))
 
+        if config.get("normalize_db", None) is not None:
+            normalize_db = True
+            normalize_db_target = config["normalize_db"]
+        else:
+            normalize_db = False
+            normalize_db_target = None
+
         dl_config = {
             'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,
@@ -888,6 +897,8 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, Exportable):
             'shuffle': False,
             'num_workers': config.get('num_workers', min(batch_size, os.cpu_count() - 1)),
             'pin_memory': True,
+            'normalize_db': normalize_db,
+            'normalize_db_target': normalize_db_target,
         }
 
         if config.get("augmentor"):

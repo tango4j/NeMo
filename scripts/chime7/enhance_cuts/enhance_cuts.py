@@ -15,6 +15,7 @@ from gss.core.enhancer import get_enhancer
 from lhotse import Recording, SupervisionSet, load_manifest_lazy
 from lhotse.audio import set_audio_duration_mismatch_tolerance
 from lhotse.cut import CutSet
+from lhotse.utils import fastcopy
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -45,6 +46,9 @@ def enhance_cuts(
     duration_tolerance: float,
     channels: Optional[str] = None,
     torchaudio_backend: str = 'soundfile',
+    mc_mask_min_db: float = -60,
+    mc_postmask_min_db: float = 0,
+    dereverb_filter_length: int = 10,
 ):
     logger.info('Enhance cuts')
     logger.info('\tenhancer_impl:      %s', enhancer_impl)
@@ -64,6 +68,9 @@ def enhance_cuts(
     logger.info('\tduration_tolerance: %f', duration_tolerance)
     logger.info('\tchannels:           %s', channels)
     logger.info('\ttorchaudio_backend: %s', torchaudio_backend)
+    logger.info('\tmc_mask_min_db:     %f', mc_mask_min_db)
+    logger.info('\tmc_postmask_min_db: %f', mc_postmask_min_db)
+    logger.info('\tdereverb_filter_length: %d', dereverb_filter_length)
 
     # ########################################
     # Setup as in gss.bin.modes.enhance.cuts_
@@ -107,7 +114,7 @@ def enhance_cuts(
             stft_fft_length=1024,
             stft_hop_length=256,
             dereverb_prediction_delay=2,
-            dereverb_filter_length=10,
+            dereverb_filter_length=dereverb_filter_length,
             dereverb_num_iterations=3,
             bss_iterations=bss_iterations,
             mc_filter_type='pmwf',
@@ -115,6 +122,8 @@ def enhance_cuts(
             mc_filter_rank='one',
             mc_filter_postfilter='ban',
             mc_ref_channel='max_snr',
+            mc_mask_min_db=mc_mask_min_db,
+            mc_postmask_min_db=mc_postmask_min_db,
             use_dtype=torch.cfloat,
             cuts=cuts,
             context_duration=context_duration,
@@ -155,7 +164,7 @@ if __name__ == '__main__':
         '--enhancer-impl',
         type=str,
         choices=ENHANCER_IMPL_CHOICES,
-        default='nemo',
+        default='nemo_v1',
         help='Implementation of the enhancer, e.g., gss',
     )
     parser.add_argument(
@@ -178,9 +187,8 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--use-garbage-class',
-        default=True,
-        action=argparse.BooleanOptionalAction,
-        help='Use garbage class. Default: True',
+        action="store_true",
+        help='Set this flag to use garbage class',
     )
     parser.add_argument(
         '--min-segment-length', type=float, default=0.0,
@@ -214,6 +222,9 @@ if __name__ == '__main__':
         default='soundfile',  # faster than the defaulut sox_io
         help='Backend used for torchaudio',
     )
+    parser.add_argument('--dereverb-filter-length', type=int, default=10, help='Dereverb filter length')
+    parser.add_argument('--mc-mask-min-db', type=float, default=-60, help='Minimum mask value in dB')
+    parser.add_argument('--mc-postmask-min-db', type=float, default=0, help='Minimum postmask value in dB')
     args = parser.parse_args()
 
     enhance_cuts(
@@ -234,4 +245,7 @@ if __name__ == '__main__':
         duration_tolerance=args.duration_tolerance,
         channels=args.channels,
         torchaudio_backend=args.torchaudio_backend,
+        dereverb_filter_length=args.dereverb_filter_length,
+        mc_mask_min_db=args.mc_mask_min_db,
+        mc_postmask_min_db=args.mc_postmask_min_db,
     )

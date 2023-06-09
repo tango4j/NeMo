@@ -14,4 +14,4 @@ cuts_per_segment=$PWD/manifests/chime6/dev/cuts_per_segment_short.jsonl.gz
 enhancer_impl=nemo_v1 # NeMo baseline
 
 enhanced_dir=${PWD}/output/${enhancer_impl}
-python enhance_cuts.py --enhancer-impl ${enhancer_impl} --cuts-per-recording ${cuts_per_recording} --cuts-per-segment ${cuts_per_segment} --enhanced-dir ${enhanced_dir}
+python enhance_cuts.py --enhancer-impl ${enhancer_impl} --cuts-per-recording ${cuts_per_recording} --cuts-per-segment ${cuts_per_segment} --enhanced-dir ${enhanced_dir} --use-garbage-class

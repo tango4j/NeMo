@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 from pyannote.core import Annotation, Segment
 from pyannote.metrics import detection
-from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
+from sklearn.metrics import classification_report, roc_auc_score
 
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.parts.utils.vad_utils import (
@@ -33,7 +33,7 @@ from nemo.collections.asr.parts.utils.vad_utils import (
     get_frame_labels,
     load_speech_segments_from_rttm,
     prepare_manifest,
-    vad_frame_construct_pyannote_object_per_file
+    vad_frame_construct_pyannote_object_per_file,
 )
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
@@ -46,12 +46,10 @@ def main(cfg):
     if not cfg.dataset:
         raise ValueError("You must input the path of json file of evaluation data")
 
-    if not os.path.exists(cfg.frame_out_dir):
-        os.mkdir(cfg.frame_out_dir)
-    else:
+    if os.path.exists(cfg.frame_out_dir):
         logging.info(f"Found existing dir: {cfg.frame_out_dir}, remove and create new one...")
         os.system(f"rm -rf {cfg.frame_out_dir}")
-        os.mkdir(cfg.frame_out_dir)
+    Path(cfg.frame_out_dir).mkdir(parents=True, exist_ok=True)
 
     # init and load model
     torch.set_grad_enabled(False)
@@ -141,6 +139,48 @@ def main(cfg):
     logging.info("Done.")
     print(Path(cfg.vad.model_path).absolute())
 
+def get_common_prefix(filelist: List[str]):
+    filelist = [x.split('/')[-1] for x in filelist]
+    common_prefix = os.path.commonprefix(filelist)
+    return common_prefix
+
+def load_pred(filepath):
+    with open(filepath, 'r') as fin:
+        probs = [float(x.strip()) for x in fin.readlines()]
+    return probs
+
+def merge_list(list1, list2):
+    length = max(len(list1), len(list2))
+    res = []
+    for i in range(length):
+        if i < len(list1) and i < len(list2):
+            res.append(max(list1[i], list2[i]))
+        elif i < len(list1):
+            res.append(list1[i])
+        else:
+            res.append(list2[i])
+    return res
+
+def merge_multi_channel_pred(pred_dir, all_labels_map, sess_map):
+    all_files = Path(pred_dir).glob("*.frame")
+    all_preds_map = {}
+    all_labels_map_new = {}
+    for file in all_files:
+        key = file.stem
+        sess = sess_map[key]
+        if sess not in all_preds_map:
+            all_preds_map[sess] = load_pred(file)
+        else:
+            all_preds_map[sess] = merge_list(all_preds_map[sess], load_pred(file))
+        all_labels_map_new[sess] = all_labels_map[key]
+    
+    out_dir = Path(pred_dir, "merged")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for key in all_preds_map:
+        with open(Path(out_dir, f"{key}.frame"), 'w') as fout:
+            fout.write("\n".join([str(x) for x in all_preds_map[key]]))
+    return str(out_dir), all_preds_map, all_labels_map_new
+
 
 def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
 
@@ -149,28 +189,32 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
     # each line of dataset should be have different audio_filepath and unique name to simplify edge cases or conditions
     key_meta_map = {}
     all_labels_map = {}
+    sess_map = {}
     with open(manifest_filepath, 'r') as manifest:
         for line in manifest.readlines():
             data = json.loads(line.strip())
-            audio_filepath = data['audio_filepath']
-            uniq_audio_name = audio_filepath.split('/')[-1].rsplit('.', 1)[0]
-            if uniq_audio_name in key_meta_map:
-                raise ValueError("Please make sure each line is with different audio name! ")
-            key_meta_map[uniq_audio_name] = {'audio_filepath': audio_filepath}
-            if cfg.get("infer_only", False):
-                all_labels_map[uniq_audio_name] = [0]
-            elif "label" not in data:
-                rttm_key = "rttm_filepath" if "rttm_filepath" in data else "rttm_file"
-                segments = load_speech_segments_from_rttm(data[rttm_key])
-                label_str = get_frame_labels(
-                    segments=segments,
-                    frame_length=cfg.vad.parameters.shift_length_in_sec,
-                    duration=data['duration'],
-                    offset=data['offset'],
-                )
-                all_labels_map[uniq_audio_name] = [int(x) for x in label_str.split()]
-            else:
-                all_labels_map[uniq_audio_name] = [int(x) for x in data["label"].split()]
+            audio_filepath_list = data['audio_filepath']
+            common_prefix = get_common_prefix(audio_filepath_list)
+            for audio_filepath in audio_filepath_list:
+                uniq_audio_name = audio_filepath.split('/')[-1].rsplit('.', 1)[0]
+                sess_map[uniq_audio_name] = common_prefix
+                if uniq_audio_name in key_meta_map:
+                    raise ValueError("Please make sure each line is with different audio name! ")
+                key_meta_map[uniq_audio_name] = {'audio_filepath': audio_filepath}
+                if cfg.get("infer_only", False):
+                    all_labels_map[uniq_audio_name] = [0]
+                elif "rttm_filepath" in data or "rttm_file" in data or "label" not in data:
+                    rttm_key = "rttm_filepath" if "rttm_filepath" in data else "rttm_file"
+                    segments = load_speech_segments_from_rttm(data[rttm_key])
+                    label_str = get_frame_labels(
+                        segments=segments,
+                        frame_length=cfg.vad.parameters.shift_length_in_sec,
+                        duration=data['duration'],
+                        offset=data['offset'],
+                    )
+                    all_labels_map[uniq_audio_name] = [int(x) for x in label_str.split()]
+                else:
+                    all_labels_map[uniq_audio_name] = [int(x) for x in data["label"].split()]
 
     # Prepare manifest for streaming VAD
     manifest_vad_input = manifest_filepath
@@ -219,6 +263,8 @@ def evaluate_single_manifest(manifest_filepath, cfg, vad_model, out_dir):
         manifest_vad_input=manifest_vad_input,
         out_dir=os.path.join(out_dir, "frames_predictions"),
     )
+
+    pred_dir, all_probs_map, all_labels_map = merge_multi_channel_pred(pred_dir, all_labels_map, sess_map)
 
     logging.info(
         f"Finish generating VAD frame level prediction with window_length_in_sec={cfg.vad.parameters.window_length_in_sec} and shift_length_in_sec={cfg.vad.parameters.shift_length_in_sec}"
@@ -303,10 +349,16 @@ def calculate_detection_error(
     metric = detection.DetectionErrorRate()
 
     logging.info("Calculating detection error metrics...")
+    logging.info(f"Found {len(paired_files)} paired files")
+    
     # add reference and hypothesis to metrics
     for key, gt_file, pred_file in paired_files:
         reference, hypothesis = vad_frame_construct_pyannote_object_per_file(pred_file, gt_file)
         metric(reference, hypothesis)  # accumulation
+
+    # delete tmp table files
+    # shutil.rmtree(pred_segment_dir, ignore_errors=True)
+    # shutil.rmtree(gt_segment_dir, ignore_errors=True)
 
     report = metric.report(display=False)
     DetER = report.iloc[[-1]][('detection error rate', '%')].item()
@@ -331,7 +383,7 @@ def dump_groundtruth_frames(out_dir, labels_map):
 
 
 def generate_gt_segment_table(
-    vad_pred_dir: str, frame_length_in_sec: float, num_workers: int, out_dir: str = None,
+    vad_pred_dir: str, frame_length_in_sec: float, num_workers: int, out_dir: str = None, save_rttm: bool = True
 ):
     params = {
         "onset": 0.5,  # onset threshold for detecting the beginning and end of a speech
@@ -340,8 +392,8 @@ def generate_gt_segment_table(
         "pad_offset": 0.0,  # adding durations after each speech segment
         "min_duration_on": 0.0,  # threshold for small non_speech deletion
         "min_duration_off": 0.0,  # threshold for short speech segment deletion
-        "filter_speech_first": False,
-        "save_rttm": True
+        "filter_speech_first": True,
+        "save_rttm": save_rttm
     }
     vad_table_dir = generate_vad_segment_table(
         vad_pred_dir, params, frame_length_in_sec=frame_length_in_sec, num_workers=num_workers, out_dir=out_dir
@@ -349,9 +401,9 @@ def generate_gt_segment_table(
     return vad_table_dir
 
 
-def find_paired_files(pred_dir, gt_dir):
-    pred_files = list(Path(pred_dir).glob("*.rttm"))
-    gt_files = list(Path(gt_dir).glob("*.rttm"))
+def find_paired_files(pred_dir, gt_dir, ext="rttm"):
+    pred_files = list(Path(pred_dir).glob(f"*.{ext}"))
+    gt_files = list(Path(gt_dir).glob(f"*.{ext}"))
 
     gt_file_map = {}
     for filepath in gt_files:
@@ -369,32 +421,6 @@ def find_paired_files(pred_dir, gt_dir):
             results.append((key, gt_file_map[key], pred_file_map[key]))
     return results
 
-def vad_frame_construct_pyannote_object_per_file(
-    pred_table_path: str, gt_table_path: str
-) -> Tuple[Annotation, Annotation]:
-    """
-    Construct a Pyannote object for evaluation.
-    Args:
-        pred_table_path(str) : path of vad rttm-like table.
-        gt_table_path(str): path of groundtruth rttm file.
-    Returns:
-        reference(pyannote.Annotation): groundtruth
-        hypothesis(pyannote.Annotation): prediction
-    """
-
-    pred = pd.read_csv(pred_table_path, sep=" ", header=None)
-    label = pd.read_csv(gt_table_path, sep=" ", header=None)
-
-    # construct reference
-    reference = Annotation()
-    for index, row in label.iterrows():
-        reference[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
-
-    # construct hypothsis
-    hypothesis = Annotation()
-    for index, row in pred.iterrows():
-        hypothesis[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
-    return reference, hypothesis
 
 if __name__ == '__main__':
     main()

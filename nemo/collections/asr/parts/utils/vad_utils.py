@@ -93,6 +93,14 @@ def align_labels_to_frames(probs, labels):
     else:
         return labels.long().tolist()
 
+def expand_multi_channel_manifest(item):
+    results = []
+    if isinstance(item['audio_filepath'], list):
+        for audio_path in item['audio_filepath']:
+            results.append({'audio_filepath': audio_path, 'duration': item.get('duration', None), 'offset': item.get('offset', 0.0), 'text': '-', 'label': 'infer'})
+        return results
+    else:
+        return [item]
 
 def prepare_manifest(config: dict) -> str:
     """
@@ -110,7 +118,8 @@ def prepare_manifest(config: dict) -> str:
         input_list = []
         with open(config['input'], 'r', encoding='utf-8') as manifest:
             for line in manifest.readlines():
-                input_list.append(json.loads(line.strip()))
+                item = json.loads(line.strip())
+                input_list.extend(expand_multi_channel_manifest(item))
     elif type(config['input']) == list:
         input_list = config['input']
     else:
@@ -821,8 +830,8 @@ def vad_construct_pyannote_object_per_file(
         hypothesis(pyannote.Annotation): prediction
     """
 
-    pred = pd.read_csv(vad_table_filepath, sep=" ", header=None)
-    label = pd.read_csv(groundtruth_RTTM_file, sep=" ", delimiter=None, header=None)
+    pred = pd.read_csv(vad_table_filepath, sep="s\+", header=None)
+    label = pd.read_csv(groundtruth_RTTM_file, sep="s\+", delimiter=None, header=None)
     label = label.rename(columns={3: "start", 4: "dur", 7: "speaker"})
 
     # construct reference
@@ -1094,7 +1103,7 @@ def extract_labels(path2ground_truth_label: str, time: list) -> list:
     time (list) : a list of array representing time period.
     """
 
-    data = pd.read_csv(path2ground_truth_label, sep=" ", delimiter=None, header=None)
+    data = pd.read_csv(path2ground_truth_label, sep="\s+", delimiter=None, header=None)
     data = data.rename(columns={3: "start", 4: "dur", 7: "speaker"})
     labels = []
     for pos in time:
@@ -1550,229 +1559,216 @@ def get_channel_averaging_matrix(channel_clustering_mapping):
     avg_cal_mat = avg_cal_mat_select / avg_cal_mat_select.sum(dim=1).unsqueeze(1)
     return avg_cal_mat
 
-# def get_single_ch_averaging_matrix(channel_clustering_mapping):
-#     """
-#     Generate channel averaging matrix for channel clustering.
-
-#     """
-#     ch_bin_count = torch.bincount(channel_clustering_mapping)
-#     in_ch_count = len(channel_clustering_mapping)
-#     avg_cal_mat_select = torch.zeros(1, in_ch_count)
-#     avg_cal_mat_select[channel_clustering_mapping, torch.arange(in_ch_count)] = 1
-#     avg_cal_mat = avg_cal_mat_select / avg_cal_mat_select.sum(dim=1).unsqueeze(1)
-#     return avg_cal_mat
-
-
 def get_channel_averaged_frame_logits(frame_mc_logits, avg_cal_mat):
     clustered_avg_ch_logits = torch.matmul(avg_cal_mat, frame_mc_logits)
     return clustered_avg_ch_logits
 
-class MultichannelVADProcessor:
-    def __init__(self, cfg):
-        self._cfg = cfg
-        self.top_k = int(self._cfg.diarizer.vad.parameters.top_k_channels)
-        # self.channel_cluster = self._cfg.diarizer.vad.parameters.get("channel_cluster", True)
-        if self._cfg.diarizer.multi_channel_mode in ["mc_vad_cc", "mc_vad_cc_mixer"]:
-            self.channel_cluster = True
-        else:
-            self.channel_cluster = False
+# class MultichannelVADProcessor:
+#     def __init__(self, cfg):
+#         self._cfg = cfg
+#         self.top_k = int(self._cfg.diarizer.vad.parameters.top_k_channels)
+#         # self.channel_cluster = self._cfg.diarizer.vad.parameters.get("channel_cluster", True)
+#         if self._cfg.diarizer.multi_channel_mode in ["mc_vad_cc", "mc_vad_cc_mixer"]:
+#             self.channel_cluster = True
+#         else:
+#             self.channel_cluster = False
 
-        self.channel_cluster_mapping = {}
-        self.sample_rate = 16000
-        self.use_subset_for_chclus = True
-        self.max_ch = 1
-        self.max_clus = 1
-        self.mc_split_manifest = None
+#         self.channel_cluster_mapping = {}
+#         self.sample_rate = 16000
+#         self.use_subset_for_chclus = True
+#         self.max_ch = 1
+#         self.max_clus = 1
+#         self.mc_split_manifest = None
 
-    def get_channel_cluster_mapping(self, json_dict):
-        logging.info(f"Channel clustering for {json_dict['uniq_id']}")
-        if self.use_subset_for_chclus:
-            duration = min(json_dict['duration'], 100)
-        else:
-            duration = json_dict['duration']
-        audio_segment = AudioSegment.from_file(audio_file=json_dict['audio_filepath'], 
-                                                target_sr=self.sample_rate, 
-                                                offset=json_dict['offset'], 
-                                                duration=duration)
+#     def get_channel_cluster_mapping(self, json_dict):
+#         logging.info(f"Channel clustering for {json_dict['uniq_id']}")
+#         if self.use_subset_for_chclus:
+#             duration = min(json_dict['duration'], 100)
+#         else:
+#             duration = json_dict['duration']
+#         audio_segment = AudioSegment.from_file(audio_file=json_dict['audio_filepath'], 
+#                                                 target_sr=self.sample_rate, 
+#                                                 offset=json_dict['offset'], 
+#                                                 duration=duration)
             
-        audio_signal = torch.tensor(audio_segment.samples.T)
-        clusters, mag_coherence = channel_cluster_from_coherence(
-                                        audio_signal=audio_signal,
-                                        sample_rate=self.sample_rate,
-                                        output_coherence=True,
-                                        )
-        self.channel_cluster_mapping[json_dict['uniq_id']] = clusters
+#         audio_signal = torch.tensor(audio_segment.samples.T)
+#         clusters, mag_coherence = channel_cluster_from_coherence(
+#                                         audio_signal=audio_signal,
+#                                         sample_rate=self.sample_rate,
+#                                         output_coherence=True,
+#                                         )
+#         self.channel_cluster_mapping[json_dict['uniq_id']] = clusters
 
-    def split_mc_vad_manifest(self, manifest_vad_input: str, channel_clustering: bool) -> str:
-        """
-        Split multi-channel vad manifest into single-channel vad manifest.
+#     def split_mc_vad_manifest(self, manifest_vad_input: str, channel_clustering: bool) -> str:
+#         """
+#         Split multi-channel vad manifest into single-channel vad manifest.
 
-        Args:
-            manifest_vad_input (str): Path to multi-channel vad manifest with list of audio files in python list format.
+#         Args:
+#             manifest_vad_input (str): Path to multi-channel vad manifest with list of audio files in python list format.
 
-        Returns:
-            mc_split_manifest_vad_input (str): Path to single-channel vad manifest with single audio file in string format.
-        """
-        new_audio_manifest_list = []
-        for line in open(manifest_vad_input, 'r', encoding='utf-8'):
-            json_dict = json.loads(line)
-            if isinstance(json_dict['audio_filepath'], list):
-                if not ('uniq_id' in json_dict and json_dict['uniq_id'] is not None):
-                    raise ValueError(f"Multi-channel input with list of files but uniq_id is not present in the manifest: {manifest_vad_input}")
-                else:
-                    self.max_ch = max(self.max_ch, len(json_dict['audio_filepath']))
-                    if channel_clustering:
-                        self.get_channel_cluster_mapping(json_dict)
+#         Returns:
+#             mc_split_manifest_vad_input (str): Path to single-channel vad manifest with single audio file in string format.
+#         """
+#         new_audio_manifest_list = []
+#         for line in open(manifest_vad_input, 'r', encoding='utf-8'):
+#             json_dict = json.loads(line)
+#             if isinstance(json_dict['audio_filepath'], list):
+#                 if not ('uniq_id' in json_dict and json_dict['uniq_id'] is not None):
+#                     raise ValueError(f"Multi-channel input with list of files but uniq_id is not present in the manifest: {manifest_vad_input}")
+#                 else:
+#                     self.max_ch = max(self.max_ch, len(json_dict['audio_filepath']))
+#                     if channel_clustering:
+#                         self.get_channel_cluster_mapping(json_dict)
 
-                    for audio_filepath in json_dict['audio_filepath']:
-                        split_entry_dict = deepcopy(json_dict)
-                        split_entry_dict['audio_filepath'] = audio_filepath
-                        new_audio_manifest_list.append(split_entry_dict)
-            else:
-                raise ValueError(f"Multi-channel input is not a list type: {manifest_vad_input}")
-        filename = os.path.basename(manifest_vad_input).replace('.json', '.mc_split.json') 
-        mc_split_manifest_vad_input = os.path.join(os.path.dirname(manifest_vad_input), filename)
-        write_manifest(output_path=mc_split_manifest_vad_input, 
-                       target_manifest=new_audio_manifest_list, 
-                       ensure_ascii=True)
-        return mc_split_manifest_vad_input       
+#                     for audio_filepath in json_dict['audio_filepath']:
+#                         split_entry_dict = deepcopy(json_dict)
+#                         split_entry_dict['audio_filepath'] = audio_filepath
+#                         new_audio_manifest_list.append(split_entry_dict)
+#             else:
+#                 raise ValueError(f"Multi-channel input is not a list type: {manifest_vad_input}")
+#         filename = os.path.basename(manifest_vad_input).replace('.json', '.mc_split.json') 
+#         mc_split_manifest_vad_input = os.path.join(os.path.dirname(manifest_vad_input), filename)
+#         write_manifest(output_path=mc_split_manifest_vad_input, 
+#                        target_manifest=new_audio_manifest_list, 
+#                        ensure_ascii=True)
+#         return mc_split_manifest_vad_input       
 
-    @staticmethod
-    def find_uniq_id_from_audio_filepath(frame_filepath, audio_rttm_map):
-        """
-        Find uniq_id of a single channel VAD frame file from the audio_rttm_map keys.
-        """
-        uniq_id = None
-        for global_key in audio_rttm_map.keys():
-            key = global_key.split('-')[-1]
-            if key in os.path.basename(frame_filepath):
-                # uniq_id = key
-                uniq_id = global_key
-                break
-        return uniq_id
+#     @staticmethod
+#     def find_uniq_id_from_audio_filepath(frame_filepath, audio_rttm_map):
+#         """
+#         Find uniq_id of a single channel VAD frame file from the audio_rttm_map keys.
+#         """
+#         uniq_id = None
+#         for global_key in audio_rttm_map.keys():
+#             key = global_key.split('-')[-1]
+#             if key in os.path.basename(frame_filepath):
+#                 # uniq_id = key
+#                 uniq_id = global_key
+#                 break
+#         return uniq_id
 
-    @staticmethod
-    def stack_list_frames(frame_dict: Dict[str, List[torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        """
-        Stack list of frames into a single tensor.
+#     @staticmethod
+#     def stack_list_frames(frame_dict: Dict[str, List[torch.Tensor]]) -> Dict[str, torch.Tensor]:
+#         """
+#         Stack list of frames into a single tensor.
 
-        Args:
-            frame_dict (Dict[str, List[torch.Tensor]]): Dictionary of list of frames with uniq_id as key.
+#         Args:
+#             frame_dict (Dict[str, List[torch.Tensor]]): Dictionary of list of frames with uniq_id as key.
 
-        Returns:
-            frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
-        """
-        frame_mc_tensor_dict = {}
-        for uniq_id in frame_dict:
-            frame_mc_tensor_dict[uniq_id] = torch.stack(frame_dict[uniq_id], dim=0)
-        return frame_mc_tensor_dict
+#         Returns:
+#             frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
+#         """
+#         frame_mc_tensor_dict = {}
+#         for uniq_id in frame_dict:
+#             frame_mc_tensor_dict[uniq_id] = torch.stack(frame_dict[uniq_id], dim=0)
+#         return frame_mc_tensor_dict
     
-    def merge_channel_clustered_frames(self, frame_mc_tensor_dict, method='max'):
-        """
-        Merge channel-clustered frames.
-        Only turned on when channel_cluster is True.
-        This function changes the channel indices and creates the new channel indices.
+#     def merge_channel_clustered_frames(self, frame_mc_tensor_dict, method='max'):
+#         """
+#         Merge channel-clustered frames.
+#         Only turned on when channel_cluster is True.
+#         This function changes the channel indices and creates the new channel indices.
 
-        Args:
-            frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
-            method (str): Method to merge multi-channel frames. 
-                Options: ['max', 'mean']
-        Returns:
-            frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.        
-        """
-        ch_avged_tensors, avg_cal_mats = {}, {}
-        for uniq_id in frame_mc_tensor_dict:
-            avg_cal_mat = get_channel_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
-            # avg_1ch_cal_mat = get_single_ch_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
-            avg_cal_mats[uniq_id] = avg_cal_mat
-            self.max_clus = max(self.max_clus, avg_cal_mat.shape[0])
-            ch_avged_tensors[uniq_id] = get_channel_averaged_frame_logits(frame_mc_logits=frame_mc_tensor_dict[uniq_id], avg_cal_mat=avg_cal_mat)
-        return ch_avged_tensors, avg_cal_mats
+#         Args:
+#             frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
+#             method (str): Method to merge multi-channel frames. 
+#                 Options: ['max', 'mean']
+#         Returns:
+#             frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.        
+#         """
+#         ch_avged_tensors, avg_cal_mats = {}, {}
+#         for uniq_id in frame_mc_tensor_dict:
+#             avg_cal_mat = get_channel_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
+#             # avg_1ch_cal_mat = get_single_ch_averaging_matrix(channel_clustering_mapping=self.channel_cluster_mapping[uniq_id])
+#             avg_cal_mats[uniq_id] = avg_cal_mat
+#             self.max_clus = max(self.max_clus, avg_cal_mat.shape[0])
+#             ch_avged_tensors[uniq_id] = get_channel_averaged_frame_logits(frame_mc_logits=frame_mc_tensor_dict[uniq_id], avg_cal_mat=avg_cal_mat)
+#         return ch_avged_tensors, avg_cal_mats
     
-    def merge_mc_frames(self, frame_mc_tensor_dict, method='max'):
-        """
-        Merge multi-channel frames into single channel frames.
+#     def merge_mc_frames(self, frame_mc_tensor_dict, method='max'):
+#         """
+#         Merge multi-channel frames into single channel frames.
 
-        Args:
-            frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
-            method (str): Method to merge multi-channel frames. 
-                Options: ['max', 'mean']
-        Returns:
-            frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.        
-        """
-        frame_single_channel_dict, argmax_ch_idx_dict = {}, {}
+#         Args:
+#             frame_mc_tensor_dict (Dict[str, torch.Tensor]): Dictionary of stacked frames with uniq_id as key.
+#             method (str): Method to merge multi-channel frames. 
+#                 Options: ['max', 'mean']
+#         Returns:
+#             frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.        
+#         """
+#         frame_single_channel_dict, argmax_ch_idx_dict = {}, {}
 
-        for uniq_id in frame_mc_tensor_dict:
-            argmax_ch_idx = torch.max(frame_mc_tensor_dict[uniq_id], dim=0)[1]
-            bincount = torch.bincount(argmax_ch_idx.view(-1))
-            sorted_inds = torch.sort(bincount, descending=True)[1]
-            argmax_ch_idx_dict[uniq_id] = sorted_inds
-            frame_mc_tensor_dict[uniq_id] = frame_mc_tensor_dict[uniq_id][sorted_inds[:self.top_k]]
-            if method == 'max':
-                frame_single_channel_dict[uniq_id]= torch.max(frame_mc_tensor_dict[uniq_id], dim=0)[0]
-            elif method == 'mean':
-                frame_single_channel_dict[uniq_id] = torch.mean(frame_mc_tensor_dict[uniq_id], dim=0)
-            else:
-                raise ValueError(f"Invalid method for merging multichannel VAD frames: {method}")
-        return frame_single_channel_dict, argmax_ch_idx_dict
+#         for uniq_id in frame_mc_tensor_dict:
+#             argmax_ch_idx = torch.max(frame_mc_tensor_dict[uniq_id], dim=0)[1]
+#             bincount = torch.bincount(argmax_ch_idx.view(-1))
+#             sorted_inds = torch.sort(bincount, descending=True)[1]
+#             argmax_ch_idx_dict[uniq_id] = sorted_inds
+#             frame_mc_tensor_dict[uniq_id] = frame_mc_tensor_dict[uniq_id][sorted_inds[:self.top_k]]
+#             if method == 'max':
+#                 frame_single_channel_dict[uniq_id]= torch.max(frame_mc_tensor_dict[uniq_id], dim=0)[0]
+#             elif method == 'mean':
+#                 frame_single_channel_dict[uniq_id] = torch.mean(frame_mc_tensor_dict[uniq_id], dim=0)
+#             else:
+#                 raise ValueError(f"Invalid method for merging multichannel VAD frames: {method}")
+#         return frame_single_channel_dict, argmax_ch_idx_dict
 
-    @staticmethod
-    def write_merged_frame_pred(frame_single_channel_dict: Dict[str, torch.Tensor], frame_vad_dir: str):
-        """
-        Write merged frame-level VAD predictions to the frame VAD folder.
+#     @staticmethod
+#     def write_merged_frame_pred(frame_single_channel_dict: Dict[str, torch.Tensor], frame_vad_dir: str):
+#         """
+#         Write merged frame-level VAD predictions to the frame VAD folder.
 
-        Args:
-            frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.
-            frame_vad_dir (str): Path to the frame VAD folder.
-        """
-        for uniq_id, frame_mat in frame_single_channel_dict.items():
-            outpath = os.path.join(frame_vad_dir, f"{uniq_id}.frame")
-            with open(outpath, "a", encoding='utf-8') as fout:
-                to_save = frame_mat.cpu().numpy()
-                for f in range(len(to_save)):
-                    fout.write('{0:0.4f}\n'.format(to_save[f]))
+#         Args:
+#             frame_single_channel_dict (Dict[str, torch.Tensor]): Dictionary of single channel frames with uniq_id as key.
+#             frame_vad_dir (str): Path to the frame VAD folder.
+#         """
+#         for uniq_id, frame_mat in frame_single_channel_dict.items():
+#             outpath = os.path.join(frame_vad_dir, f"{uniq_id}.frame")
+#             with open(outpath, "a", encoding='utf-8') as fout:
+#                 to_save = frame_mat.cpu().numpy()
+#                 for f in range(len(to_save)):
+#                     fout.write('{0:0.4f}\n'.format(to_save[f]))
 
-    def load_frame_dict_from_files(self, frame_vad_dir: str, audio_rttm_map: dict):
-        """
-        Load frame dict from the frame VAD folder.
+#     def load_frame_dict_from_files(self, frame_vad_dir: str, audio_rttm_map: dict):
+#         """
+#         Load frame dict from the frame VAD folder.
 
-        Args:
-            frame_vad_dir (str): Path to the frame VAD folder.
-            audio_rttm_map (dict): Map of audio filepaths to RTTM files.
+#         Args:
+#             frame_vad_dir (str): Path to the frame VAD folder.
+#             audio_rttm_map (dict): Map of audio filepaths to RTTM files.
 
-        Returns:
-            frame_dict (Dict[str, List[torch.Tensor]]): Dictionary of list of frames (torch.Tensor) with uniq_id as key.
-        """
-        frame_filepathlist = sorted(glob.glob(frame_vad_dir + "/*.frame"))
-        frame_dict = {}
-        for frame_filepath in frame_filepathlist:
-            frame_mat, name = load_tensor_from_file(frame_filepath)
-            uniq_id = self.find_uniq_id_from_audio_filepath(frame_filepath, audio_rttm_map)
-            if uniq_id in frame_dict:
-                frame_dict[uniq_id].append(frame_mat)
-            else:
-                frame_dict[uniq_id] = [frame_mat]
-        return frame_dict
+#         Returns:
+#             frame_dict (Dict[str, List[torch.Tensor]]): Dictionary of list of frames (torch.Tensor) with uniq_id as key.
+#         """
+#         frame_filepathlist = sorted(glob.glob(frame_vad_dir + "/*.frame"))
+#         frame_dict = {}
+#         for frame_filepath in frame_filepathlist:
+#             frame_mat, name = load_tensor_from_file(frame_filepath)
+#             uniq_id = self.find_uniq_id_from_audio_filepath(frame_filepath, audio_rttm_map)
+#             if uniq_id in frame_dict:
+#                 frame_dict[uniq_id].append(frame_mat)
+#             else:
+#                 frame_dict[uniq_id] = [frame_mat]
+#         return frame_dict
 
-    def merge_frame_mc_vad(self, frame_vad_dir: str, audio_rttm_map: dict, method='max'):
-        """
-        Get single channel frame predictions from multi-channel frame predictions.
+#     def merge_frame_mc_vad(self, frame_vad_dir: str, audio_rttm_map: dict, method='max'):
+#         """
+#         Get single channel frame predictions from multi-channel frame predictions.
 
-        Args:
-            frame_vad_dir (str): Path to the folder containing multi-channel frame predictions.
-            audio_rttm_map (dict): Map of audio filepaths to RTTM files.
+#         Args:
+#             frame_vad_dir (str): Path to the folder containing multi-channel frame predictions.
+#             audio_rttm_map (dict): Map of audio filepaths to RTTM files.
 
-        Returns:
-            out_vad_dir (str): Path to the folder containing single-channel frame predictions.
-        """
-        frame_dict = self.load_frame_dict_from_files(frame_vad_dir, audio_rttm_map)
-        frame_mc_tensor_dict = self.stack_list_frames(frame_dict)
-        if self.channel_cluster:
-            frame_mc_tensor_dict, avg_cal_mats = self.merge_channel_clustered_frames(frame_mc_tensor_dict, method)
-        else:
-            avg_cal_mats = None
-        self.frame_single_channel_dict, self.argmax_ch_idx_dict  = self.merge_mc_frames(frame_mc_tensor_dict, method)
-        out_vad_dir = os.path.join(frame_vad_dir, 'frame_merged')
-        Path.mkdir(Path(out_vad_dir), exist_ok=True, parents=True)
-        self.write_merged_frame_pred(self.frame_single_channel_dict, out_vad_dir)
-        return out_vad_dir, self.argmax_ch_idx_dict, avg_cal_mats
+#         Returns:
+#             out_vad_dir (str): Path to the folder containing single-channel frame predictions.
+#         """
+#         frame_dict = self.load_frame_dict_from_files(frame_vad_dir, audio_rttm_map)
+#         frame_mc_tensor_dict = self.stack_list_frames(frame_dict)
+#         if self.channel_cluster:
+#             frame_mc_tensor_dict, avg_cal_mats = self.merge_channel_clustered_frames(frame_mc_tensor_dict, method)
+#         else:
+#             avg_cal_mats = None
+#         self.frame_single_channel_dict, self.argmax_ch_idx_dict  = self.merge_mc_frames(frame_mc_tensor_dict, method)
+#         out_vad_dir = os.path.join(frame_vad_dir, 'frame_merged')
+#         Path.mkdir(Path(out_vad_dir), exist_ok=True, parents=True)
+#         self.write_merged_frame_pred(self.frame_single_channel_dict, out_vad_dir)
+#         return out_vad_dir, self.argmax_ch_idx_dict, avg_cal_mats
