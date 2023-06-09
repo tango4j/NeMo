@@ -36,6 +36,7 @@
 import math
 import os
 import random
+from typing import Optional
 
 import librosa
 import numpy as np
@@ -80,6 +81,8 @@ class AudioSegment(object):
         channel_selector=None,
         normalize=False,
         normalize_target=-20,
+        normalize_db: Optional[float] = None,
+        ref_channel: Optional[int] = None,
     ):
         """Create audio segment from samples.
         Samples are convert float32 internally, with int scaled to [-1, 1].
@@ -116,6 +119,11 @@ class AudioSegment(object):
         self._orig_sr = orig_sr if orig_sr is not None else sample_rate
         if normalize:
             self.normalize(normalize_target)
+        self._ref_channel = ref_channel
+        self._normalize_db = normalize_db
+
+        if normalize_db is not None:
+            self.normalize_db(normalize_db, ref_channel)
 
     def __eq__(self, other):
         """Return whether two objects are equal."""
@@ -187,6 +195,8 @@ class AudioSegment(object):
         channel_selector=None,
         normalize=False,
         normalize_target=-20,
+        normalize_db=None,
+        ref_channel=None,
     ):
         """
         Load a file supported by librosa and return as an AudioSegment.
@@ -209,6 +219,8 @@ class AudioSegment(object):
                                  If set to `None`, the original signal will be used.
         :param normalize: if true, normalize the audio signal to a target RMS value
         :param normalize_target: the target RMS value in decibels
+        :param normalize_db (Optional[float]): if not None, normalize the audio signal to a target RMS value
+        :param ref_channel (Optional[int]): channel to use as reference for normalizing multi-channel audio, set None to use max RMS across channels
         :return: AudioSegment instance
         """
         samples = None
@@ -226,6 +238,8 @@ class AudioSegment(object):
                 trim_hop_length=trim_hop_length,
                 orig_sr=orig_sr,
                 channel_selector=channel_selector,
+                normalize_db=normalize_db,
+                ref_channel=ref_channel,
             )
 
         if not isinstance(audio_file, str) or os.path.splitext(audio_file)[-1] in sf_supported_formats:
@@ -284,6 +298,8 @@ class AudioSegment(object):
             channel_selector=channel_selector,
             normalize=normalize,
             normalize_target=normalize_target,
+            normalize_db=normalize_db,
+            ref_channel=ref_channel,
         )
 
     @classmethod
@@ -352,9 +368,8 @@ class AudioSegment(object):
             else:
                 # Check the dimensions match
                 if len(a_samples) != len(samples):
-                    # import ipdb; ipdb.set_trace()
-                    logging.warning(
-                        f'Loaded samples have different lengths: {a_samples.shape} != {samples.shape}, using zero-padding to match the shorter one.'
+                    raise RuntimeError(
+                        f'Loaded samples need to have identical length: {a_samples.shape} != {samples.shape}'
                     )
                     # Zero-pad the shorter signal
                     if len(a_samples) < len(samples):
@@ -409,7 +424,7 @@ class AudioSegment(object):
                         audio_start = math.floor(offset * sample_rate)
                         if audio_start > max_audio_start:
                             raise RuntimeError(
-                                f'Provided audio start ({audio_start_seconds} seconds = {audio_start} samples) is larger than the maximum possible ({max_audio_start})'
+                                f'Provided audio start ({audio_start}) is larger than the maximum possible ({max_audio_start})'
                             )
                     f.seek(audio_start)
                     samples = f.read(n_segments_at_original_sr, dtype='float32')
@@ -423,6 +438,7 @@ class AudioSegment(object):
                     samples = f.read(dtype='float32')
         except RuntimeError as e:
             logging.error(f"Loading {audio_file} via SoundFile raised RuntimeError: `{e}`.")
+            raise e
 
         features = cls(
             samples, sample_rate, target_sr=target_sr, trim=trim, orig_sr=orig_sr, channel_selector=channel_selector
@@ -474,6 +490,14 @@ class AudioSegment(object):
         """Normalize the signal to a target RMS value in decibels.
         """
         rms_db = self.rms_db
+    def normalize_db(self, target_db=-20, ref_channel=None):
+        """Normalize the signal to a target RMS value in decibels. 
+        For multi-channel audio, the RMS value is determined by the reference channel (if not None),
+        otherwise it will be the maximum RMS across all channels.
+        """
+        rms_db = self.rms_db
+        if self.num_channels > 1:
+            rms_db = max(rms_db) if ref_channel is None else rms_db[ref_channel]
         gain = target_db - rms_db
         self.gain_db(gain)
 

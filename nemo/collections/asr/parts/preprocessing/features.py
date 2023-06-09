@@ -183,6 +183,7 @@ class WaveformFeaturizer(object):
         channel_selector=None,
         normalize=False,
         normalize_target=-20,
+        normalize_db=None,
     ):
         audio = AudioSegment.from_file(
             file_path,
@@ -199,6 +200,7 @@ class WaveformFeaturizer(object):
             channel_selector=channel_selector,
             normalize=normalize,
             normalize_target=normalize_target,
+            normalize_db=normalize_db,
         )
         return self.process_segment(audio)
 
