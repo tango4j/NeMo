@@ -43,8 +43,9 @@ import importlib
 def ts_vad_post_processing(ts_vad_binary_vec, vad_params, hop_length):
     vad_utils = importlib.import_module(f"nemo.collections.asr.parts.utils.vad_utils")
     ts_vad_binary_frames = torch.repeat_interleave(torch.tensor(ts_vad_binary_vec),  hop_length)
-    ts_vad_processed = vad_utils.binarization(ts_vad_binary_frames, vad_params)
-    return ts_vad_processed
+    speech_segments = vad_utils.binarization(ts_vad_binary_frames, vad_params)
+    speech_segments = vad_utils.filtering(speech_segments, vad_params)
+    return speech_segments
 
 
 def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:

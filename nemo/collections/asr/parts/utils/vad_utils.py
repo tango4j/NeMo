@@ -541,7 +541,7 @@ def binarization(sequence: torch.Tensor, per_args: Dict[str, float]) -> torch.Te
     offset = per_args.get('offset', 0.5)
     pad_onset = per_args.get('pad_onset', 0.0)
     pad_offset = per_args.get('pad_offset', 0.0)
-
+    
     speech = False
     start = 0.0
     i = 0

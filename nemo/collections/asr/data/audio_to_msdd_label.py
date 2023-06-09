@@ -47,10 +47,7 @@ def get_subsegments_to_scale_timestamps(subsegments: List[Tuple[float, float]], 
     """
     # scale_ts = (torch.tensor(subsegments) * feat_per_sec).long()
     seg_ts = (torch.tensor(subsegments) * feat_per_sec).float()
-    try:
-        scale_ts_round = torch.round(seg_ts, decimals=decimals)
-    except:
-        import ipdb; ipdb.set_trace()
+    scale_ts_round = torch.round(seg_ts, decimals=decimals)
     scale_ts = scale_ts_round.long()
     scale_ts[:, 1] = scale_ts[:, 0] + scale_ts[:, 1]
     return scale_ts 
@@ -444,6 +441,8 @@ class _AudioMSDDTrainDataset(Dataset):
         self.global_speaker_label_table = get_speaker_labels_from_diar_rttms(self.collection)
         self.ch_clus_mat_dict = {}
         self.channel_cluster_dict = {}
+        # self.use_1ch_from_ch_clus = True
+        self.use_1ch_from_ch_clus = False
     
     def __len__(self):
         return len(self.collection)
@@ -631,6 +630,10 @@ class _AudioMSDDTrainDataset(Dataset):
                                     output_coherence=True,
                                     ) 
         ch_clus_mat = get_channel_averaging_matrix(clusters)
+        # if self.use_1ch_from_ch_clus:
+        #     ch_inds = torch.max(ch_clus_mat, dim=1)[1]
+        #     ch_clus_mat = torch.zeros_like(ch_clus_mat)
+        #     ch_clus_mat[torch.arange(ch_inds.shape[0]), ch_inds] = 1
         return ch_clus_mat
         
     def __getitem__(self, index):
@@ -737,6 +740,7 @@ class _AudioMSDDInferDataset(Dataset):
         manifest_filepath: str,
         max_spks: int,
         emb_seq: Dict,
+        original_audio_offsets: Dict,
         clus_label_dict: Dict,
         multiscale_args_dict: Dict,
         soft_label_thres: float,
@@ -766,6 +770,7 @@ class _AudioMSDDInferDataset(Dataset):
         self.use_single_scale_clus = use_single_scale_clus
         self.seq_eval_mode = seq_eval_mode
         self.session_len_sec = session_len_sec
+        self.original_audio_offsets = original_audio_offsets
 
         self.multiscale_args_dict = multiscale_args_dict 
         self.scale_n = len(self.multiscale_args_dict['scale_dict'])
@@ -891,9 +896,16 @@ class _AudioMSDDInferDataset(Dataset):
                                                 soft_label_thres=self.soft_label_thres,
                                                 global_speaker_label_table=self.global_speaker_label_table,
                                                 )
-        offset_index = int(offset / self.scale_dict[ms_seg_counts.shape[0]-1][1])
+        
+        # Caveat: Global offset index is the offset in the original audio file, so it should be subtracted from the offset in the truncated audio file.
+        global_offset_index = (self.original_audio_offsets[uniq_id] / self.scale_dict[ms_seg_counts.shape[0]-1][1]) # [global offset in sec]/[scale duration in sec]
+        offset_index = max(int((offset / self.scale_dict[ms_seg_counts.shape[0]-1][1]) - global_offset_index), 0) 
+        
         seq_length = ms_seg_counts[-1]
-        ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
+        try:
+            ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
+        except:
+            import ipdb; ipdb.set_trace()
         if self.mc_late_fusion:
             clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
         else:
@@ -1027,6 +1039,11 @@ def _msdd_infer_collate_fn(self, batch):
     feats_list, flen_list, ms_ts_list, clus_label_list, targets_list = [], [], [], [], []
     max_seq_len = max(lbl_len)
     max_target_len = max([x.shape[0] for x in targets])
+    feat_dim = min([len(feat.shape)for feat in feats])
+    if feat_dim == 4: # Multichannel
+        max_clus_ch = max([feat.shape[3] for feat in feats])
+    else:
+        max_clus_ch = 1
 
     for feature, ms_seg_ts, lbl_len, label, target in batch:
         flen_list.append(lbl_len)
@@ -1034,8 +1051,9 @@ def _msdd_infer_collate_fn(self, batch):
         # if feature.shape[0] < max_seq_len:
         pad_lbl = (0, max_target_len - label.shape[0])
         if len(feature.shape) == 4: # Multichannel late-fusion mode
-            pad_feat = (0, 0, 0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
+            # pad_feat = (0, 0, 0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
             # pad_lbl = (0, 0, 0, max_target_len - label.shape[0])
+            pad_feat = (0, max_clus_ch - feature.shape[3], 0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
         elif len(feature.shape) == 3:
             pad_feat = (0, 0, 0, 0, 0, max_seq_len - feature.shape[0])
         else:
@@ -1044,24 +1062,14 @@ def _msdd_infer_collate_fn(self, batch):
         pad_t = (0, 0, 0, max_target_len - target.shape[0])
         padded_feature = torch.nn.functional.pad(feature, pad_feat)
         padded_target = torch.nn.functional.pad(target, pad_t)
-        try:
-            padded_label = torch.nn.functional.pad(label, pad_lbl)
-        except:
-            import ipdb; ipdb.set_trace()
+        padded_label = torch.nn.functional.pad(label, pad_lbl)
         padded_ms_seg_ts = torch.nn.functional.pad(ms_seg_ts, pad_ts)
         feats_list.append(padded_feature)
         ms_ts_list.append(padded_ms_seg_ts)
         targets_list.append(padded_target)
         clus_label_list.append(padded_label)
-        # else:
-        #     feats_list.append(feature.clone().detach())
-        #     ms_ts_list.append(ms_seg_ts.clone().detach())
-        #     targets_list.append(target.clone().detach())
-        #     clus_label_list.append(label.clone().detach())
-    try:
-        feats = torch.stack(feats_list)
-    except:
-        import ipdb; ipdb.set_trace()
+
+    feats = torch.stack(feats_list)
     feats_len = torch.tensor(flen_list)
     ms_seg_ts = torch.stack(ms_ts_list)
     clus_label = torch.stack(clus_label_list)
@@ -1182,6 +1190,7 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
         manifest_filepath: str,
         emb_seq: Dict,
         clus_label_dict: Dict,
+        original_audio_offsets: Dict,
         multiscale_args_dict: Dict,
         soft_label_thres: float,
         session_len_sec: float,
@@ -1197,6 +1206,7 @@ class AudioToSpeechMSDDInferDataset(_AudioMSDDInferDataset):
             # emb_dict=emb_dict,
             emb_seq=emb_seq,
             clus_label_dict=clus_label_dict,
+            original_audio_offsets=original_audio_offsets,
             multiscale_args_dict=multiscale_args_dict,
             soft_label_thres=soft_label_thres,
             session_len_sec=session_len_sec,

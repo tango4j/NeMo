@@ -72,7 +72,7 @@ export CUDA_VISIBLE_DEVICES="0"
 UNIQ_MEMO=$(basename $test_manifest | cut -d'.' -f1-2)
 norm_mc_audio="true"
 
-MY_TEMP_PATH="/disk_c/temporary_data"
+MY_TEMP_PATH="/disk_a/temporary_data"
 DIAR_OUT_DOWNLOAD="$MY_TEMP_PATH"/diar_results_v2_norm-"$norm_mc_audio"/diarout_"$UNIQ_MEMO""$DEREV"
 echo "DIAR_OUT_DOWNLOAD: " $DIAR_OUT_DOWNLOAD 
 mkdir -p $DIAR_OUT_DOWNLOAD

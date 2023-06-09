@@ -39,7 +39,9 @@ from nemo.collections.asr.parts.utils.offline_clustering import (
 ts_vad_post_processing,
 SpeakerClustering, 
 get_argmin_mat, 
-split_input_data
+split_input_data,
+cos_similarity,
+cos_similarity_batch,
 )
 from nemo.utils import logging
 
@@ -521,6 +523,7 @@ def get_cluster_labels_infer(
     # Convert clustering to the finest scale (=base scale)
     cluster_labels_infer = -1 * torch.ones(scale_map[0].shape[0]) # Finest scale thus, the longest vector
     max_scm = scale_map[base_scale_idx].shape[0]
+    
     cluster_labels_infer[scale_map[-1][vad_decision_base[:max_scm]]]= clus_labels_infer_org_scale[scale_map[base_scale_idx][vad_decision_base[:max_scm]]]
     return cluster_labels_infer, max_scm
 
@@ -539,16 +542,27 @@ def get_ms_embs_and_ts(
     rep_counts = torch.unique(scale_map[base_scale_idx], return_counts=True)[1]
     base_seg_inds = torch.cumsum(rep_counts, dim=0) - 1 # Pick the last index of each repeating index
 
-    ms_silsp_embs = embeddings[:, :(base_scale_idx+1), :][base_seg_inds, :, :]
+    ms_silsp_embs = embeddings[:, :(base_scale_idx+1), :][base_seg_inds, :, :] # [T, num_scales, emb_dim, (num_of_channels)]
     ms_ts_scaled = time_stamps[base_scale_idx][base_seg_inds]/feat_per_sec
     base_feat_len_in_scale = torch.mode( torch.round( time_stamps[-1][:,1]- time_stamps[-1][:,0] ).long() )[0]
     
     feat_len_in_scale = torch.mode( torch.round((ms_ts_scaled[:, 1] - ms_ts_scaled[:, 0])*feat_per_sec).long() )[0]
-    vad_prob_mat_seg = vad_probs[base_seg_inds, base_scale_idx, :feat_len_in_scale] # [T, feat_len]
-    vad_prob_mat = vad_prob_mat_seg.mean(dim=1)
-    vad_prob_mat_base_seg = vad_probs[:, -1, :base_feat_len_in_scale] # [T, feat_len]
-    vad_prob_mat_base = vad_prob_mat_base_seg.mean(dim=1)
+    vad_index_list = [0] + (base_seg_inds + 1).tolist() # selected scale's T + 1
+    
+    vad_prob_mat_list = []
+    for i in range(len(vad_index_list)-1):
+        vad_prob_mat_list.append(torch.mean(vad_probs[vad_index_list[i]:vad_index_list[i+1]]))
+        
+    vad_prob_mat = torch.stack(vad_prob_mat_list, dim=0)
+    vad_prob_mat_base = vad_probs 
+        
+    # vad_prob_mat_seg = vad_probs[base_seg_inds, base_scale_idx, :feat_len_in_scale] # [T, feat_len]
+    # vad_prob_mat = vad_prob_mat_seg.mean(dim=1)
+    # vad_prob_mat_base_seg = vad_probs[:, -1, :base_feat_len_in_scale] # [T, feat_len]
+    # vad_prob_mat_base = vad_prob_mat_base_seg.mean(dim=1)
+    
     hist_ct, bins = torch.histogram(vad_prob_mat, bins=50, range=(0, 1))
+    # hist_ct, bins = torch.histogram(vad_prob_mat, bins=1000, range=(0, 1))
     hist_ct_norm = hist_ct / hist_ct.sum()
     vad_thres_knee_argmax = torch.argmax(hist_ct_norm[0:10] - hist_ct_norm[1:11])
     vad_thres_offset = bins[vad_thres_knee_argmax+1].item()
@@ -561,6 +575,31 @@ def get_ms_embs_and_ts(
 
 def get_scaled_drop_length_thres(drop_length_thres, base_scale_idx, clustering_scale_index, multiscale_dict):
     return int((multiscale_dict[clustering_scale_index][0]/multiscale_dict[base_scale_idx][0]) * drop_length_thres)
+
+def get_selected_channel_embs(ms_emb_seq, max_mc_ch_num, collapse_scale_dim=False):
+    if collapse_scale_dim:
+        merged_mono_scale_embs = ms_emb_seq.mean(dim=1) # [T, scale_n, emb_dim, ch] -> [T, emb_dim, ch]
+    else:
+        merged_mono_scale_embs = ms_emb_seq.reshape(ms_emb_seq.shape[0], -1, ms_emb_seq.shape[-1]) # [T, scale_n, emb_dim, ch] -> [T, scale_n * emb_dim, ch]
+    t_embs  = merged_mono_scale_embs.transpose(1, 2) # [T, ch, emb_dim]
+    ch_sim = cos_similarity_batch(emb_a=t_embs.float(), emb_b=t_embs.float())  # [T, ch, ch]
+    ch_sim_T = ch_sim.mean(dim=1)
+    arg_sort_inds = torch.sort(ch_sim_T, descending=True)[1]
+    if arg_sort_inds.shape[1] > max_mc_ch_num:
+        arg_sort_inds = arg_sort_inds[:, :max_mc_ch_num]
+    sorted_ch_inds = torch.sort(arg_sort_inds, dim=1, descending=True)[0]
+    merged_mono_scale_embs_list = []
+    for tdx in range(sorted_ch_inds.shape[0]):
+        merged_mono_scale_embs_list.append(merged_mono_scale_embs[tdx, :, sorted_ch_inds[tdx,:]])
+    if collapse_scale_dim:
+        selected_ss_mc_embs = torch.stack(merged_mono_scale_embs_list, dim=0)
+    else:
+        ms_cat_emb_seq = torch.stack(merged_mono_scale_embs_list, dim=0)
+        try:
+            selected_ss_mc_embs = ms_cat_emb_seq.reshape(ms_emb_seq.shape[0], ms_emb_seq.shape[1], ms_emb_seq.shape[2], ms_cat_emb_seq.shape[-1])
+        except:
+            import ipdb; ipdb.set_trace()
+    return selected_ss_mc_embs
 
 def perform_clustering_embs(
     embeddings_dict, 
@@ -582,13 +621,17 @@ def perform_clustering_embs(
     unit_clus_len: int = 1000,
     get_rttm_with_the_finest_scale: bool = True,
 ):
+    if len(embeddings_dict) == 0:
+        raise ValueError("Empty embeddings_dict.")
+    if len(time_stamps_dict) == 0:
+        raise ValueError("Empty time_stamps_dict.")
     uniq_clus_labels_dict = {}
     cuda = True
     all_hypothesis, all_reference = [], []
     no_references = False
     lines_cluster_labels = []
     base_scale_idx = clustering_params.clustering_scale_index
-    
+    max_mc_ch_num = clustering_params.max_mc_ch_num 
     if device.type != 'cuda':
         if verbose:
             logging.warning("cuda=False, using CPU for eigen decomposition. This might slow down the clustering process.")
@@ -597,10 +640,7 @@ def perform_clustering_embs(
     speaker_clustering = SpeakerClustering(cuda=cuda)
     # If True, export torch script module and save it to the base folder.
     for uniq_id, audio_rttm_values in tqdm(AUDIO_RTTM_MAP.items(), desc='clustering', leave=True, disable=not verbose):
-        try:
-            scale_map = scale_mapping_dict[uniq_id]
-        except:
-            import ipdb; ipdb.set_trace()
+        scale_map = scale_mapping_dict[uniq_id]
             
         if len(embeddings_dict[uniq_id].shape) > 3:
             # The last dimension is the channel dimension
@@ -610,11 +650,7 @@ def perform_clustering_embs(
             embeddings = embeddings_dict[uniq_id]
             time_stamps = time_stamps_dict[uniq_id]
         
-        if len(vad_probs_dict[uniq_id].shape) > 3: # If multi-ch VAD is provided
-            vad_probs = vad_probs_dict[uniq_id][:, :, :].mean(dim=2)
-        else:
-            vad_probs = vad_probs_dict[uniq_id]
-        
+        vad_probs = vad_probs_dict[uniq_id]
         if scale_map.shape[1] > long_audio_thres:
             if verbose:
                 logging.info(f"---------> Long form audio detected: Using {base_scale_idx}-index scale length {multiscale_dict[base_scale_idx]} Segment Count - {scale_map.shape[1]}")
@@ -632,8 +668,11 @@ def perform_clustering_embs(
                                                                                                                            vad_probs, 
                                                                                                                            vad_threshold,
                                                                                                                            feat_per_sec)
-        merged_mono_scale_embs = ms_embs_scaled_vadmasked.mean(dim=1)
-
+        if len(ms_embs_scaled_vadmasked.shape) > 3: # This is multi-channel case
+            selected_ss_mc_embs = get_selected_channel_embs(ms_embs_scaled_vadmasked, max_mc_ch_num, collapse_scale_dim=True)
+        else:
+            selected_ss_mc_embs = ms_embs_scaled_vadmasked
+        
         if clustering_params.oracle_num_speakers:
             num_speakers = audio_rttm_values.get('num_speakers', None)
             if num_speakers is None:
@@ -647,7 +686,7 @@ def perform_clustering_embs(
                                                                 multiscale_dict)
         
         cluster_labels = speaker_clustering.forward_embs(
-                embs=merged_mono_scale_embs,
+                embs=selected_ss_mc_embs,
                 oracle_num_speakers=int(num_speakers),
                 max_num_speakers=int(clustering_params.max_num_speakers),
                 min_num_speakers=int(clustering_params.get('min_num_speakers', 1)),
@@ -655,6 +694,7 @@ def perform_clustering_embs(
                 sparse_search_volume=int(clustering_params.sparse_search_volume),
                 drop_length_thres=drop_length_thres_scaled,
             )
+        
         cluster_labels_infer, max_scm = get_cluster_labels_infer(ms_silsp_embs, 
                                                                  cluster_labels, 
                                                                  vad_decision_scaled, 
@@ -679,7 +719,7 @@ def perform_clustering_embs(
 
         uniq_clus_labels_dict[uniq_id] = cluster_labels_infer
        
-        del ms_embs_scaled_vadmasked, ms_silsp_embs, merged_mono_scale_embs, ms_ts_scaled, vad_decision_scaled, vad_decision_base
+        del ms_embs_scaled_vadmasked, ms_silsp_embs, selected_ss_mc_embs, ms_ts_scaled, vad_decision_scaled, vad_decision_base
         if get_rttm_with_the_finest_scale: 
             timestamps = time_stamps[-1][:max_scm][cluster_labels_infer != -1]/feat_per_sec
             cluster_labels = cluster_labels_infer[cluster_labels_infer != -1].cpu().numpy()
@@ -695,11 +735,10 @@ def perform_clustering_embs(
             lines_cluster_labels.extend([f'{uniq_id} {seg_line}\n' for seg_line in lines])
         hypothesis = labels_to_pyannote_object(labels, uniq_name=uniq_id)
         all_hypothesis.append([uniq_id, hypothesis])
-
         rttm_file = audio_rttm_values.get('rttm_filepath', None)
         if rttm_file is not None and os.path.exists(rttm_file) and not no_references:
             ref_labels = rttm_to_labels(rttm_file)
-            ref_labels = get_partial_ref_labels(pred_labels=labels, ref_labels=ref_labels)
+            # ref_labels = get_partial_ref_labels(pred_labels=labels, ref_labels=ref_labels)
             reference = labels_to_pyannote_object(ref_labels, uniq_name=uniq_id)
             all_reference.append([uniq_id, reference])
         else:
@@ -1699,6 +1738,8 @@ def generate_speaker_timestamps_(
             Note that `ovl_labels` includes only overlapping speech that is not included in `maj_labels`.
             Example: [..., '152.495 152.745 speaker_1', '372.71 373.085 speaker_0', '554.97 555.885 speaker_1', ...]
     '''
+    if torch.isnan(msdd_preds).any():
+        import ipdb; ipdb.set_trace()
     msdd_preds.squeeze(0)
     estimated_num_of_spks = msdd_preds.shape[-1]
     overlap_speaker_list = [[] for _ in range(estimated_num_of_spks)]
@@ -1739,6 +1780,7 @@ def generate_speaker_timestamps(
     clus_labels: List[Union[float, int]], 
     msdd_preds: List[torch.Tensor], 
     timestamps, 
+    offset,
     threshold,
     vad_params,
     **params,
@@ -1746,12 +1788,7 @@ def generate_speaker_timestamps(
     max_overlap_count=2
     if len(msdd_preds.shape) == 3: # Multi-channel late-fusion
         model_spk_num = msdd_preds.shape[1]
-        if params['mc_late_fusion_mode'] == 'mode':
-            msdd_preds = torch.mode(msdd_preds, dim=2)[0]
-        elif params['mc_late_fusion_mode'] == 'mean':
-            msdd_preds = msdd_preds.mean(dim=2)
-        elif params['mc_late_fusion_mode'] == 'max':
-            msdd_preds = msdd_preds.max(dim=2)[0]
+
         # clus_labels = torch.mode(clus_labels, dim=1)[0]
         vad_mask = (clus_labels > -1)
     elif len(msdd_preds.shape) == 2:
@@ -1772,6 +1809,7 @@ def generate_speaker_timestamps(
         mask_ch_inds = torch.ones(msdd_preds.shape[1]).bool()
         mask_ch_inds[active_spk_inds] = False
         msdd_preds[:, mask_ch_inds] = 0.0
+    # import ipdb; ipdb.set_trace()
     if params['infer_mode'] == 'only_logits':
         msdd_preds_binary = (msdd_preds > threshold).int().cpu().numpy()
         speaker_assign_mat = msdd_preds_binary
@@ -1786,7 +1824,6 @@ def generate_speaker_timestamps(
             max_overlap_count = min(active_spk_inds.shape[0], max_overlap_count) # If there is one speaker, then max_overlap_count = 1
         msdd_preds_topk_per_seg, logit_gap = get_top_k_for_each_row(msdd_preds, k_count=max_overlap_count, orig_dim=model_spk_num)
         msdd_preds_top1_per_seg, _ = get_top_k_for_each_row(msdd_preds, k_count=1, orig_dim=model_spk_num)
-        
         if not torch.all((msdd_preds_topk_per_seg > 0.0).sum(axis=1) == max_overlap_count):
             raise ValueError(f"Top-k per seg operation with max_overlap_count: {max_overlap_count} is not correct")
         msdd_preds_topk_per_seg[:, spk_time_each < params['overlap_infer_spk_limit']] = 0.0
@@ -1804,10 +1841,16 @@ def generate_speaker_timestamps(
                 raise ValueError(f"msdd_preds_masked_one is not correct")
             if params['infer_mode'] == 'vad_masked_logits_force_1spk_rel_thres_clus_union':
                 speaker_assign_mat = np.logical_or(clustering_assign_mat, msdd_preds_masked_ovl).astype(int)
-                speaker_assign_mat[vad_mask==False, :] = 0
+                # speaker_assign_mat[vad_mask==False, :] = 0
             elif params['infer_mode'] == 'vad_masked_logits_force_1spk_rel_thres':
                 speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
+                # speaker_assign_mat[vad_mask==False, :] = 0
+               
+            if params['ts_vad_threshold'] <= 0:
                 speaker_assign_mat[vad_mask==False, :] = 0
+            else:
+                msdd_step_max = torch.max(msdd_preds, dim=1)[0]
+                speaker_assign_mat[(msdd_step_max < params['ts_vad_threshold']), :] = 0
         elif 'force_1spk' in params['infer_mode']:
             speaker_assign_mat = msdd_preds_masked
             msdd_preds_masked_one = np.zeros_like(msdd_preds)
@@ -1818,13 +1861,18 @@ def generate_speaker_timestamps(
                 raise ValueError(f"msdd_preds_masked_one is not correct")
             if params['infer_mode'] == 'vad_masked_logits_force_1spk':
                 speaker_assign_mat = np.logical_or(msdd_preds_masked_one, msdd_preds_masked_ovl).astype(int)
-                speaker_assign_mat[vad_mask==False, :] = 0
+                # speaker_assign_mat[vad_mask==False, :] = 0
             elif params['infer_mode'] == 'vad_masked_logits_force_1spk_clus_union':
                 speaker_assign_mat = np.logical_or(clustering_assign_mat, msdd_preds_masked_ovl).astype(int)
-                speaker_assign_mat[vad_mask==False, :] = 0
+                # speaker_assign_mat[vad_mask==False, :] = 0
             elif params['infer_mode'] == 'vad_masked_logits_force_1spk_clus_intersection':
                 speaker_assign_mat = np.logical_and(speaker_assign_mat, clustering_assign_mat).astype(int)
+                # speaker_assign_mat[vad_mask==False, :] = 0
+            if params['ts_vad_threshold'] <= 0:
                 speaker_assign_mat[vad_mask==False, :] = 0
+            else:
+                msdd_step_max = torch.max(msdd_preds, dim=1)[0]
+                speaker_assign_mat[(msdd_step_max < params['ts_vad_threshold']), :] = 0
             
         elif params['infer_mode'] == 'vad_masked_logits':
             speaker_assign_mat = msdd_preds_masked
@@ -1835,26 +1883,30 @@ def generate_speaker_timestamps(
                 speaker_assign_mat = np.logical_and(clustering_assign_mat, msdd_preds_masked).astype(int)
         else:
             raise ValueError(f"Unknown infer_mode: {params['infer_mode']}")
-
-    if params['use_ts_vad']:    
-        spk_ts = []
-        for spk_id in range(speaker_assign_mat.shape[-1]):
-            ts_mat = ts_vad_post_processing(speaker_assign_mat[:, spk_id], vad_params, hop_length=params['hop_len_in_cs'])
-            spk_ts.append(ts_mat.tolist())
-    else:
-        timestamps = timestamps.cpu().numpy()/100.0
-        spk_ts = generate_speaker_assignment_intervals(speaker_assign_mat=speaker_assign_mat, timestamps=timestamps)
-    speaker_labels_total = generate_diarization_output_lines(speaker_timestamps=spk_ts, model_spk_num=model_spk_num)
-    return speaker_labels_total
+    return speaker_assign_mat
+    # if params['use_ts_vad']:    
+    #     spk_ts = []
+    #     for spk_id in range(speaker_assign_mat.shape[-1]):
+    #         ts_mat = ts_vad_post_processing(speaker_assign_mat[:, spk_id], vad_params, hop_length=params['hop_len_in_cs'])
+    #         ts_mat = ts_mat + offset
+    #         spk_ts.append(ts_mat.tolist())
+    # else:
+    #     timestamps = timestamps.cpu().numpy()/100.0
+    #     spk_ts = generate_speaker_assignment_intervals(speaker_assign_mat=speaker_assign_mat, timestamps=timestamps)
+    # speaker_labels_total = generate_diarization_output_lines(speaker_timestamps=spk_ts, model_spk_num=model_spk_num)
+    # return speaker_labels_total
 
 def get_top_k_for_each_row(logit_mat, k_count, orig_dim):
-    topk_vals, moc_inds = torch.topk(logit_mat, k=k_count, dim=1)
-    top_k_mask = F.one_hot(moc_inds.t().flatten(), num_classes=orig_dim)
-    if k_count > 1:
-        top_k_mask = top_k_mask.reshape(-1, logit_mat.shape[0], orig_dim).sum(dim=0)
-        logit_gap = topk_vals[:, 1]/topk_vals[:, 0]
-    else:
-        logit_gap = torch.zeros_like(topk_vals[:, 0])
+    try:
+        topk_vals, moc_inds = torch.topk(logit_mat, k=k_count, dim=1)
+        top_k_mask = F.one_hot(moc_inds.t().flatten(), num_classes=orig_dim)
+        if k_count > 1:
+            top_k_mask = top_k_mask.reshape(-1, logit_mat.shape[0], orig_dim).sum(dim=0)
+            logit_gap = topk_vals[:, 1]/topk_vals[:, 0]
+        else:
+            logit_gap = torch.zeros_like(topk_vals[:, 0])
+    except:
+        import ipdb; ipdb.set_trace()
     masked_logit_mat = top_k_mask * logit_mat
     return masked_logit_mat, logit_gap
     
@@ -2010,13 +2062,48 @@ def change_output_dir_names(params, threshold):
     Create output directories for RTTM and JSON files with the MSDD threshold value.
     """
     head, tail = os.path.split(params['out_rttm_dir']) 
-    params['out_rttm_dir'] = os.path.join(head, f"pred_rttms_T{threshold}")
-    params['out_json_dir'] = os.path.join(head, f"pred_jsons_T{threshold}")
+    if not os.path.exists(os.path.join(params['out_rttm_dir'], params['system_name'])):
+        os.makedirs(os.path.join(head, params['system_name']), exist_ok=True)
+    params['out_rttm_dir'] = os.path.join(head, params['system_name'], f"pred_rttms_T{threshold}")
+    params['out_json_dir'] = os.path.join(head, params['system_name'], f"pred_jsons_T{threshold}")
     if not os.path.exists(params['out_rttm_dir']):
-        os.makedirs(params['out_rttm_dir'])
+        os.makedirs(params['out_rttm_dir'], exist_ok=True)
     if not os.path.exists(params['out_json_dir']):
-        os.makedirs(params['out_json_dir'])
+        os.makedirs(params['out_json_dir'], exist_ok=True)
     return params
+
+def mixdown_msdd_preds(clus_labels, msdd_preds, time_stamps, offset, threshold, vad_params, params):
+    if len(msdd_preds.shape) > 2: # Multichannel case
+        mc_speaker_assign_mat = []
+        if params['mc_late_fusion_mode'].startswith('post'):
+            for ch_idx in range(msdd_preds.shape[2]):
+                msdd_preds_ch = msdd_preds[:, :, ch_idx]
+                speaker_assign_mat = generate_speaker_timestamps(clus_labels, msdd_preds_ch, time_stamps, offset, threshold, vad_params, **params)
+                mc_speaker_assign_mat.append(speaker_assign_mat)
+            mc_speaker_assign_mat = np.stack(mc_speaker_assign_mat, axis=2)
+            if params['mc_late_fusion_mode'] == 'post_max':
+                speaker_assign_mat = np.max(mc_speaker_assign_mat, axis=2) 
+            elif params['mc_late_fusion_mode'] == 'post_mean':
+                speaker_assign_mat = np.mean(mc_speaker_assign_mat, axis=2) 
+        elif params['mc_late_fusion_mode'].startswith('pre'):
+            if params['mc_late_fusion_mode'] == 'pre_mean':
+                msdd_preds_mixed = msdd_preds.mean(dim=2)
+            speaker_assign_mat = generate_speaker_timestamps(clus_labels, msdd_preds_mixed, time_stamps, offset, threshold, vad_params, **params)
+        else:
+            raise NotImplementedError(f"mc_late_fusion_mode: {params['mc_late_fusion_mode']} not implemented.")
+    else: # Single channel case
+        speaker_assign_mat = generate_speaker_timestamps(clus_labels, msdd_preds, time_stamps, offset, threshold, vad_params, **params)
+    
+    if params['use_ts_vad']:    
+        spk_ts = []
+        for spk_id in range(speaker_assign_mat.shape[-1]):
+            ts_mat = ts_vad_post_processing(speaker_assign_mat[:, spk_id], vad_params, hop_length=params['hop_len_in_cs'])
+            ts_mat = ts_mat + offset
+            spk_ts.append(ts_mat.tolist())
+    else:
+        timestamps = timestamps.cpu().numpy()/100.0
+        spk_ts = generate_speaker_assignment_intervals(speaker_assign_mat=speaker_assign_mat, timestamps=timestamps)
+    return spk_ts
 
 def make_rttm_with_overlap(
     manifest_file_path: str,
@@ -2051,15 +2138,18 @@ def make_rttm_with_overlap(
         all_reference
             List containing Pyannote's `Annotation` objects that are created from ground-truth RTTM outputs
     """
+    params = change_output_dir_names(params, threshold)
     AUDIO_RTTM_MAP = audio_rttm_map(manifest_file_path)
     all_hypothesis, all_reference = [], []
     no_references = False
     logging.info(f"Generating RTTM with infer_mode: {params['infer_mode']}")
     with open(manifest_file_path, 'r', encoding='utf-8') as manifest:
         for i, line in tqdm(enumerate(manifest.readlines()), total=len(manifest.readlines()), desc="Generating RTTM"):
+            
             uniq_id = get_uniq_id_from_manifest_line(line)
             
             manifest_dic = AUDIO_RTTM_MAP[uniq_id]
+            offset = manifest_dic['offset']
             clus_labels = clus_label_dict[uniq_id]
             
             msdd_preds = preds_dict[uniq_id]
@@ -2067,11 +2157,12 @@ def make_rttm_with_overlap(
 
             if clus_labels.shape[0] < msdd_preds.shape[0]:
                 clus_labels = torch.cat([clus_labels, torch.ones(msdd_preds.shape[0]-clus_labels.shape[0]).long()*-1])
+
+            speaker_timestamps = mixdown_msdd_preds(clus_labels, msdd_preds, time_stamps, offset, threshold, vad_params, params)
+            hyp_labels = generate_diarization_output_lines(speaker_timestamps=speaker_timestamps, model_spk_num=msdd_preds.shape[1])
             
-            hyp_labels = generate_speaker_timestamps(clus_labels, msdd_preds, time_stamps, threshold, vad_params, **params)
             hyp_labels = sorted(hyp_labels, key=lambda x: float(x.split()[0]))
             hypothesis = labels_to_pyannote_object(hyp_labels, uniq_name=uniq_id)
-            params = change_output_dir_names(params, threshold)
             if params['out_rttm_dir']:
                 labels_to_rttmfile(hyp_labels, uniq_id, params['out_rttm_dir'])
             if params['out_json_dir']:
@@ -2081,7 +2172,7 @@ def make_rttm_with_overlap(
             
             if rttm_file is not None and os.path.exists(rttm_file) and not no_references:
                 ref_labels = rttm_to_labels(rttm_file)
-                ref_labels = get_partial_ref_labels(pred_labels=hyp_labels, ref_labels=ref_labels)
+                # ref_labels = get_partial_ref_labels(pred_labels=hyp_labels, ref_labels=ref_labels)
                 reference = labels_to_pyannote_object(ref_labels, uniq_name=uniq_id)
                 all_reference.append([uniq_id, reference])
             else:
