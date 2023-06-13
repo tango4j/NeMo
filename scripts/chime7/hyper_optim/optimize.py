@@ -30,6 +30,7 @@ from pytorch_lightning.utilities.exceptions import MisconfigurationException
 
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
+from optimize_diar import diar_config_setup, objective_diar
 
 ESPNET_ROOT="/home/heh/github/espnet/egs2/chime7_task1/asr1"
 CHIME7_ROOT="/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"
@@ -54,16 +55,15 @@ def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, 
               
     return command
 
-
 def get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir):
     command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{SCENARIOS}' dev " \
               f"{diar_config}-{diar_param} {output_dir}/processed {output_dir} {normalize_db} {ASR_MODEL_PATH} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id}"
 
     return command
 
-
 def objective_gss_asr(
         trial: optuna.Trial,
+        diar_segments_filelist: List[str],
         gpu_id: int,
         temp_dir: str,
         diar_config: str = DIAR_CONFIG,
@@ -91,76 +91,47 @@ def objective_gss_asr(
         print(f"Time taken for trial: {time.time() - start_time:.2f}s")
     return wer
 
-def objective_diar(
+def objective_chime7_mcmsasr(
     trial: optuna.Trial,
-    gpu_id: int,
-    manifest_path: str,
     config,
-    pretrained_msdd_model: str,
-    pretrained_speaker_model: str,
-    pretrained_vad_model: str,
+    diarizer_manifest_path: str,
+    msdd_model_path: str,
+    vad_model_path: str,
+    output_dir: str,
+    gpu_id: int,
     temp_dir: str,
-    collar: float,
-    ignore_overlap: bool,
-    oracle_vad: bool,
-    optimize_segment_length: bool,
-    optimize_clustering: bool,
 ):
-    start_time = time.time()
-    device = torch.device(f"cuda:{gpu_id}")
-    with tempfile.TemporaryDirectory(dir=temp_dir, prefix=str(trial.number)) as output_dir:
-        config.diarizer.speaker_embeddings.model_path = pretrained_speaker_model
-        if not oracle_vad:
-            config.diarizer.oracle_vad = False
-            config.diarizer.clustering.parameters.oracle_num_speakers = False
-            # Here, we use our in-house pretrained NeMo VAD model
-            config.diarizer.vad.model_path = pretrained_vad_model
-            config.diarizer.vad.parameters.onset = 0.8
-            config.diarizer.vad.parameters.offset = 0.6
-            config.diarizer.vad.parameters.pad_offset = -0.05
-
-        config.diarizer.msdd_model.model_path = pretrained_msdd_model
-        config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", 0.7, 1.0)]
-        config.diarizer.msdd_model.parameters.diar_eval_settings = [
-            (collar, ignore_overlap),
-        ]
-        config.diarizer.manifest_filepath = manifest_path
-        config.diarizer.out_dir = output_dir  # Directory to store intermediate files and prediction outputs
-        # todo: without setting this to 1, process hangs
-        config.num_workers = 10  # Workaround for multiprocessing hanging
-        config.prepared_manifest_vad_input = os.path.join(output_dir, 'manifest_vad.json')
-
-        if optimize_segment_length:
-            # Segmentation Optimization
-            stt = trial.suggest_float("window_stt", 0.9, 2.5, step=0.05)
-            end = trial.suggest_float("window_end", 0.25, 0.75, step=0.05)
-            scale_n = trial.suggest_int("scale_n", 2, 11)
-            _step = -1 * (stt - end) / (scale_n - 1)
-            shift_ratio = 0.5
-            window_mat = np.arange(stt, end - 0.01, _step).round(5)
-            config.diarizer.speaker_embeddings.parameters.window_length_in_sec = window_mat.tolist()
-            config.diarizer.speaker_embeddings.parameters.shift_length_in_sec = (shift_ratio * window_mat / 2).tolist()
-            config.diarizer.speaker_embeddings.parameters.multiscale_weights = [1] * scale_n
-        if optimize_clustering:
-            # Clustering Optimization
-            r_value = round(trial.suggest_float("r_value", 0.0, 2.25, step=0.01), 4)
-            max_rp_threshold = round(trial.suggest_float("max_rp_threshold", 0.05, 0.35, step=0.01), 2)
-            sparse_search_volume = trial.suggest_int("sparse_search_volume", 2, 100, log=True)
-            max_num_speakers = trial.suggest_int("max_num_speakers", 8, 27, step=1)
-            config.diarizer.clustering.parameters.max_num_speakers = max_num_speakers
-            config.diarizer.clustering.parameters.sparse_search_volume = sparse_search_volume
-            config.diarizer.clustering.parameters.max_rp_threshold = max_rp_threshold
-            scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
-            config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
-
-        system_vad_msdd_model = NeuralDiarizer(cfg=config).to(device)
-        outputs = system_vad_msdd_model.diarize()
-        # For each threshold, for each collar setting
-        metric = outputs[0][0][0]
-        DER = abs(metric)
-        print(f"Time taken for trial: {time.time() - start_time:.2f}s")
-        return DER
-
+    """
+    [Note] Diarizaiton out `outputs`
+    
+    outputs = (metric, mapping_dict, itemized_erros)
+    itemized_errors = (DER, CER, FA, MISS)
+    """
+    # Step:1-1 Configure Diarization
+    config = diar_config_setup(
+        trial, 
+        config,
+        diarizer_manifest_path,
+        msdd_model_path,
+        vad_model_path,
+        output_dir
+    )
+    # Step:1-2 Run Diarization 
+    diarizer_model = NeuralDiarizer(cfg=config).to("cuda:0")
+    outputs = diarizer_model.diarize(verbose=False)
+    json_output_folder = os.path.join(output_dir, config.diarizer.msdd_model.parameters.system_name, "pred_jsons_T")
+    metric = outputs[0][0]
+    DER = abs(metric)
+    # Glob all json files in json_output_folder:
+    diar_segments_filelist = glob.glob(os.path.join(json_output_folder, "*.json"))
+    print(f"[optuna] Diarization Segment Json saved in : {json_output_folder}")
+    WER = objective_gss_asr(
+        trial,
+        diar_segments_filelist,
+        gpu_id,
+        temp_dir,
+    )
+    return WER
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -175,12 +146,6 @@ if __name__ == "__main__":
         "examples/speaker_tasks/diarization/conf/inference/diar_infer_telephonic.yaml",
     )
     parser.add_argument(
-        "--pretrained_speaker_model",
-        help="path to the speaker embedding model",
-        type=str,
-        default="titanet_large",
-    )
-    parser.add_argument(
         "--pretrained_vad_model",
         help="path to the VAD model",
         type=str,
@@ -193,52 +158,29 @@ if __name__ == "__main__":
         default="diar_msdd_telephonic",
     )
     parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="optuna_output/")
+    parser.add_argument("--output_dir", help="path to store temporary files", type=str, default="output/")
     parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="output.log")
-    parser.add_argument(
-        "--collar",
-        help="collar used to be more forgiving at boundaries (usually set to 0 or 0.25)",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument("--ignore_overlap", help="ignore overlap when evaluating", action="store_true")
     parser.add_argument("--n_trials", help="Number of trials to run optuna", type=int, default=100)
     parser.add_argument("--n_jobs", help="Number of parallel jobs to run, set -1 to use all GPUs", type=int, default=-1)
-    parser.add_argument(
-        "--oracle_vad",
-        help="Enable oracle VAD (no need for VAD when enabled)",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--optimize_clustering",
-        help="Optimize clustering parameters",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--optimize_segment_length",
-        help="Optimize segment length parameters",
-        action="store_true",
-    )
 
     args = parser.parse_args()
-
-    # if not (args.optimize_clustering or args.optimize_segment_length):
-    #     raise MisconfigurationException(
-    #         "When using the script you must pass one or both flags: --optimize_clustering, --optimize_segment_length"
-    #     )
-
     os.makedirs(args.temp_dir, exist_ok=True)
 
     nemo_logger.setLevel(logging.ERROR)
-
-    # model_config = os.path.basename(args.config_url)
-    # if not os.path.exists(model_config):
-    #     model_config = wget.download(args.config_url)
-    # config = OmegaConf.load(model_config)
-
-    func = lambda trial, gpu_id: objective_gss_asr(
+    model_config = args.config_url
+    config = OmegaConf.load(model_config)
+    config.batch_size = args.batch_size
+    
+    # func = lambda trial, gpu_id: objective_gss_asr(
+    func = lambda trial, gpu_id: objective_chime7_mcmsasr(
         trial,
+        config,
         gpu_id,
         temp_dir=args.temp_dir,
+        diarizer_manifest_path=args.manifest_path,
+        msdd_model_path=args.msdd_model_path,
+        vad_model_path=args.vad_model_path,
+        output_dir=args.output_dir,
     )
 
     def optimize(gpu_id=0):

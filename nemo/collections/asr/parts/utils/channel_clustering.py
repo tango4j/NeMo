@@ -194,7 +194,7 @@ def channel_cluster_from_coherence(
     k_min = freq_to_subband(freq_min, fft_length, sample_rate)
     k_max = freq_to_subband(freq_max, fft_length, sample_rate)
 
-    stft = AudioToSpectrogram(fft_length=fft_length, hop_length=hop_length)
+    stft = AudioToSpectrogram(fft_length=fft_length, hop_length=hop_length).to(device=audio_signal.device)
 
     # analysis transform
     A_spec, _ = stft(input=audio_signal[None, ...])

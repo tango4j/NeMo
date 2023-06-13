@@ -31,16 +31,21 @@ import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig
+from copy import deepcopy 
 from pyannote.core import Annotation, Segment
 from pyannote.metrics import detection
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import ParameterGrid
+from nemo.collections.asr.parts.utils.manifest_utils import write_manifest
 from tqdm import tqdm
 
 from nemo.collections.asr.models import EncDecClassificationModel, EncDecFrameClassificationModel
 from nemo.collections.common.parts.preprocessing.manifest import get_full_path
 from nemo.utils import logging
+import concurrent.futures 
 
+from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
+from nemo.collections.asr.parts.utils.channel_clustering import channel_cluster_from_coherence
 try:
     from torch.cuda.amp import autocast
 except ImportError:
@@ -188,6 +193,7 @@ def write_vad_infer_manifest(file: dict, args_func: dict) -> list:
     split_duration = args_func['split_duration']
     window_length_in_sec = args_func['window_length_in_sec']
     filepath = file['audio_filepath']
+    uniq_id = file.get('uniq_id', None)
     in_duration = file.get('duration', None)
     in_offset = file.get('offset', 0)
 
@@ -199,8 +205,11 @@ def write_vad_infer_manifest(file: dict, args_func: dict) -> list:
 
     try:
         sr = 16000
-        x, _sr = librosa.load(filepath, sr=sr, offset=in_offset, duration=in_duration)
-        duration = librosa.get_duration(y=x, sr=sr)
+        if isinstance(filepath, list):
+            duration = file['duration']
+        else:
+            x, _sr = librosa.load(filepath, sr=sr, offset=in_offset, duration=in_duration)
+            duration = librosa.get_duration(y=x, sr=sr)
         left = duration
         current_offset = in_offset
 
@@ -234,6 +243,7 @@ def write_vad_infer_manifest(file: dict, args_func: dict) -> list:
 
             metadata = {
                 'audio_filepath': filepath,
+                'uniq_id': uniq_id,
                 'duration': write_duration,
                 'label': label,
                 'text': '_',
@@ -301,6 +311,7 @@ def generate_overlap_vad_seq(
     shift_length_in_sec: float,
     num_workers: int,
     out_dir: str = None,
+    multi_channel: bool = False,
 ) -> str:
     """
     Generate predictions with overlapping input windows/segments. Then a smoothing filter is applied to decide the label for a frame spanned by multiple windows. 
@@ -360,7 +371,7 @@ def generate_overlap_vad_seq_per_file_star(args):
     return generate_overlap_vad_seq_per_file(*args)
 
 
-@torch.jit.script
+# @torch.jit.script
 def generate_overlap_vad_seq_per_tensor(
     frame: torch.Tensor, per_args: Dict[str, float], smoothing_method: str
 ) -> torch.Tensor:
@@ -383,6 +394,7 @@ def generate_overlap_vad_seq_per_tensor(
     jump_on_frame = int(jump_on_target / shift)  # jump on input frame sequence
 
     if jump_on_frame < 1:
+        import ipdb; ipdb.set_trace()
         raise ValueError(
             f"Note we jump over frame sequence to generate overlapping input segments. \n \
         Your input makes jump_on_frame={jump_on_frame} < 1 which is invalid because it cannot jump and will stuck.\n \
@@ -410,7 +422,8 @@ def generate_overlap_vad_seq_per_tensor(
         preds[pred_count == 0] = last_non_zero_pred
 
     elif smoothing_method == 'median':
-        preds = [torch.empty(0) for _ in range(target_len)]
+        # preds = [torch.empty(0) for _ in range(target_len)]
+        preds = [torch.empty(0).to(frame.device) for _ in range(target_len)]
         for i, og_pred in enumerate(frame):
             if i % jump_on_frame != 0:
                 continue
@@ -456,7 +469,7 @@ def generate_overlap_vad_seq_per_file(frame_filepath: str, per_args: dict) -> st
     return overlap_filepath
 
 
-@torch.jit.script
+# @torch.jit.script
 def merge_overlap_segment(segments: torch.Tensor) -> torch.Tensor:
     """
     Merged the given overlapped segments.
@@ -480,7 +493,7 @@ def merge_overlap_segment(segments: torch.Tensor) -> torch.Tensor:
     return merged
 
 
-@torch.jit.script
+# @torch.jit.script
 def filter_short_segments(segments: torch.Tensor, threshold: float) -> torch.Tensor:
     """
     Remove segments which duration is smaller than a threshold.
@@ -521,7 +534,7 @@ def cal_vad_onset_offset(
     return float(onset), float(offset)
 
 
-@torch.jit.script
+# @torch.jit.script
 def binarization(sequence: torch.Tensor, per_args: Dict[str, float]) -> torch.Tensor:
     """
     Binarize predictions to speech and non-speech
@@ -548,7 +561,7 @@ def binarization(sequence: torch.Tensor, per_args: Dict[str, float]) -> torch.Te
     offset = per_args.get('offset', 0.5)
     pad_onset = per_args.get('pad_onset', 0.0)
     pad_offset = per_args.get('pad_offset', 0.0)
-
+    
     speech = False
     start = 0.0
     i = 0
@@ -586,7 +599,7 @@ def binarization(sequence: torch.Tensor, per_args: Dict[str, float]) -> torch.Te
     return speech_segments
 
 
-@torch.jit.script
+# @torch.jit.script
 def remove_segments(original_segments: torch.Tensor, to_be_removed_segments: torch.Tensor) -> torch.Tensor:
     """
     Remove speech segments list in to_be_removed_segments from original_segments.
@@ -600,7 +613,7 @@ def remove_segments(original_segments: torch.Tensor, to_be_removed_segments: tor
     return original_segments
 
 
-@torch.jit.script
+# @torch.jit.script
 def get_gap_segments(segments: torch.Tensor) -> torch.Tensor:
     """
     Get the gap segments. 
@@ -611,7 +624,7 @@ def get_gap_segments(segments: torch.Tensor) -> torch.Tensor:
     return torch.column_stack((segments[:-1, 1], segments[1:, 0]))
 
 
-@torch.jit.script
+# @torch.jit.script
 def filtering(speech_segments: torch.Tensor, per_args: Dict[str, float]) -> torch.Tensor:
 
     """
@@ -699,7 +712,7 @@ def prepare_gen_segment_table(sequence: torch.Tensor, per_args: dict) -> Tuple[s
     return out_dir, per_args_float
 
 
-@torch.jit.script
+# @torch.jit.script
 def generate_vad_segment_table_per_tensor(sequence: torch.Tensor, per_args: Dict[str, float]) -> torch.Tensor:
     """
     See description in generate_overlap_vad_seq.
@@ -1146,9 +1159,85 @@ def extract_labels(path2ground_truth_label: str, time: list) -> list:
             labels.append(0)
     return labels
 
+def get_timing_params(window_length_in_sec, shift_length_in_sec, all_len=0):
+    time_unit = int(window_length_in_sec / shift_length_in_sec)  # num frames per window
+    trunc = int(time_unit / 2)
+    trunc_l = time_unit - trunc
+    return trunc, trunc_l, all_len
+
+def write_frame_data(outpath, to_save):
+    with open(outpath, "a", encoding='utf-8') as fout:
+        for f in range(len(to_save)):
+            fout.write('{0:0.4f}\n'.format(to_save[f]))
+    fout.close()
+
+def get_frame_data_from_logprob(
+    log_probs: torch.Tensor,
+    window_length_in_sec: float, 
+    status: str,
+    idx: int,
+    trunc: int,
+    trunc_l: int, 
+    mc_vad: bool = False):
+    """
+    Get frame data from log probability.
+
+
+    """
+    probs = torch.softmax(log_probs, dim=-1)
+    # squeeze the batch dimension, since batch size is 1
+    if not mc_vad and len(probs.shape) == 3:
+        probs = probs.squeeze(0)  # [1,T,C] -> [T,C]
+    elif mc_vad:
+        if len(probs.shape) != 3:
+            raise ValueError("mc_vad is True, but the shape of log_probs is not [Channels, T, C]")
+        probs = probs.transpose(0, 2) # [Ch,T,C] -> [C,T,Ch]
+    pred = probs[:, 1]  
+    if window_length_in_sec == 0:
+        to_save = pred
+    elif status[idx] == 'start':
+        to_save = pred[:-trunc]
+    elif status[idx] == 'next':
+        to_save = pred[trunc:-trunc_l]
+    elif status[idx] == 'end':
+        to_save = pred[trunc_l:]
+    else:
+        to_save = pred
+
+    if mc_vad:
+        to_save = to_save.transpose(0, 2) 
+    return to_save.detach().cpu()
+
+
+def get_uniqname_from_filepath(filepath):
+    """
+    Return base name from provided filepath
+    """
+    if type(filepath) is str:
+        uniq_id = os.path.splitext(os.path.basename(filepath))[0]
+        return uniq_id
+    else:
+        raise TypeError("input must be filepath string")
+
+def load_data_from_vad_manifest(manifest_vad_input, use_audio_filename=True):
+    data = []
+    for line in open(manifest_vad_input, 'r', encoding='utf-8'):
+        json_dict = json.loads(line)
+        if not use_audio_filename and 'uniq_id' in json_dict and json_dict['uniq_id'] is not None:
+            uniq_id = json_dict['uniq_id']
+        else:
+            uniq_id = get_uniqname_from_filepath(json_dict['audio_filepath'])
+        data.append(uniq_id)
+    return data
 
 def generate_vad_frame_pred(
-    vad_model, window_length_in_sec: float, shift_length_in_sec: float, manifest_vad_input: str, out_dir: str
+    vad_model,
+    window_length_in_sec: float,
+    shift_length_in_sec: float,
+    manifest_vad_input: str,
+    out_dir: str,
+    use_feat: bool = False,
+    verbose: bool = True,
 ) -> str:
     """
     Generate VAD frame level prediction and write to out_dir
@@ -1156,37 +1245,22 @@ def generate_vad_frame_pred(
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
 
-    time_unit = int(window_length_in_sec / shift_length_in_sec)  # num frames per window
-    trunc = int(time_unit / 2)
-    trunc_l = time_unit - trunc
-    all_len = 0
-
-    data = []
-    for line in open(manifest_vad_input, 'r', encoding='utf-8'):
-        filepath = json.loads(line)['audio_filepath']
-        file = filepath.split("/")[-1]
-        data.append(file.split(".wav")[0])
-
-    logging.info(f"Inference on {len(data)} audio files/json lines!")
+    trunc, trunc_l, all_len = get_timing_params(window_length_in_sec, shift_length_in_sec)
+    data = load_data_from_vad_manifest(manifest_vad_input, use_audio_filename=True)
+    logging.info(f"Inference on {len(data)} audio files/json lines.")
 
     all_probs = defaultdict(list)
     status = get_vad_stream_status(data)
-    for i, test_batch in enumerate(vad_model.test_dataloader()):
+    # for i, test_batch in enumerate(vad_model.test_dataloader()):
+    for i, test_batch in enumerate(tqdm(vad_model.test_dataloader(), desc='vad', leave=True, disable=not verbose)):
         test_batch = [x.to(vad_model.device) for x in test_batch]
         with autocast():
             log_probs = vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
             probs = torch.softmax(log_probs, dim=-1)
-<<<<<<< HEAD
-            if len(probs.shape) == 3:
-                # squeeze the batch dimension, since batch size is 1
-                probs = probs.squeeze(0)  # [1,T,C] -> [T,C]
-            pred = probs[:, 1]  # [T,]
-=======
             if len(probs.shape) == 3 and probs.shape[0] == 1:
                 # squeeze the batch dimension, since batch size is 1 for frame-VAD
                 probs = probs.squeeze(0)  # [1,T,C] -> [T,C]
             pred = probs[:, 1]
->>>>>>> origin/main
 
             if window_length_in_sec == 0:
                 to_save = pred
@@ -1196,23 +1270,27 @@ def generate_vad_frame_pred(
                 to_save = pred[trunc:-trunc_l]
             elif status[i] == 'end':
                 to_save = pred[trunc_l:]
+            if use_feat:
+                log_probs = vad_model(processed_signal=test_batch[0], processed_signal_length=test_batch[1])
             else:
-                to_save = pred
-
-            to_save = to_save.cpu().tolist()
+                log_probs = vad_model(input_signal=test_batch[0], input_signal_length=test_batch[1])
+            to_save = get_frame_data_from_logprob(log_probs=log_probs, 
+                                                  window_length_in_sec=window_length_in_sec, 
+                                                  status=status, 
+                                                  idx=i, 
+                                                  trunc=trunc, 
+                                                  trunc_l=trunc_l)
             all_len += len(to_save)
             outpath = os.path.join(out_dir, data[i] + ".frame")
-            with open(outpath, "a", encoding='utf-8') as fout:
-                for p in to_save:
-                    fout.write(f'{p:0.4f}\n')
+            write_frame_data(outpath, to_save=to_save)
             all_probs[data[i]].extend(to_save)
 
-        del test_batch
+        del test_batch, to_save, log_probs
+        torch.cuda.empty_cache()
         if status[i] == 'end' or status[i] == 'single':
             logging.debug(f"Overall length of prediction of {data[i]} is {all_len}!")
             all_len = 0
     return out_dir, all_probs
-
 
 def init_vad_model(model_path: str):
     """
@@ -1530,9 +1608,6 @@ def plot_sample_from_rttm(
         plt.savefig(save_path)
     return ipd.Audio(audio, rate=16000)
 
-<<<<<<< HEAD
-=======
-
 def align_labels_to_frames(probs, labels, threshold=0.2):
     """
     Aligns labels to frames when the frame length (e.g., 10ms) is different from the label length (e.g., 20ms). 
@@ -1588,7 +1663,6 @@ def align_labels_to_frames(probs, labels, threshold=0.2):
         return labels.long().tolist()
 
 
->>>>>>> origin/main
 def read_rttm_as_pyannote_object(rttm_file: str, speaker_override: Optional[str] = None) -> Annotation:
     """
     Read rttm file and construct a Pyannote object.
@@ -1608,10 +1682,6 @@ def read_rttm_as_pyannote_object(rttm_file: str, speaker_override: Optional[str]
             annotation[Segment(row['start'], row['start'] + row['dur'])] = row['speaker']
     return annotation
 
-<<<<<<< HEAD
-def vad_frame_construct_pyannote_object_per_file(
-    pred_table_path: str, gt_table_path: str
-=======
 
 def convert_labels_to_speech_segments(labels: List[float], frame_length_in_sec: float = 0.01):
     """
@@ -1639,45 +1709,18 @@ def convert_labels_to_speech_segments(labels: List[float], frame_length_in_sec: 
 
 def frame_vad_construct_pyannote_object_per_file(
     prediction: Union[str, List[float]], groundtruth: Union[str, List[float]], frame_length_in_sec: float = 0.01
->>>>>>> origin/main
 ) -> Tuple[Annotation, Annotation]:
     """
     Construct a Pyannote object for evaluation.
     Args:
-<<<<<<< HEAD
-        pred_table_path(str) : path of vad rttm-like table.
-        gt_table_path(str): path of groundtruth rttm file.
-=======
         prediction (str) : path of VAD predictions stored as RTTM or CSV-like txt.
         groundtruth (str): path of groundtruth rttm file.
         frame_length_in_sec(float): frame length in seconds
->>>>>>> origin/main
     Returns:
         reference(pyannote.Annotation): groundtruth
         hypothesis(pyannote.Annotation): prediction
     """
 
-<<<<<<< HEAD
-    if pred_table_path.endswith(".rttm"):
-        hypothesis = read_rttm_as_pyannote_object(pred_table_path, speaker_override='Speech')
-    else:
-        pred = pd.read_csv(pred_table_path, sep="\s+", header=None)
-        # construct hypothsis
-        hypothesis = Annotation()
-        for index, row in pred.iterrows():
-            hypothesis[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
-
-    if gt_table_path.endswith(".rttm"):
-        reference = read_rttm_as_pyannote_object(gt_table_path, speaker_override='Speech')
-    else:
-        label = pd.read_csv(gt_table_path, sep="\s+", header=None)
-        # construct reference
-        reference = Annotation()
-        for index, row in label.iterrows():
-            reference[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
-
-    return reference, hypothesis
-=======
     hypothesis = Annotation()
     if isinstance(groundtruth, str) and prediction.endswith('.rttm'):
         hypothesis = read_rttm_as_pyannote_object(prediction, speaker_override='speech')
@@ -1800,4 +1843,19 @@ def frame_vad_eval_detection_error(
     auroc = roc_auc_score(y_true=all_labels, y_score=all_probs)
     report = metric.report(display=False)
     return auroc, report
->>>>>>> origin/main
+
+def get_channel_averaging_matrix(channel_clustering_mapping):
+    """
+    Generate channel averaging matrix for channel clustering.
+
+    """
+    ch_bin_count = torch.bincount(channel_clustering_mapping)
+    out_ch_count, in_ch_count = len(ch_bin_count), len(channel_clustering_mapping)
+    avg_cal_mat_select = torch.zeros(out_ch_count, in_ch_count)
+    avg_cal_mat_select[channel_clustering_mapping, torch.arange(in_ch_count)] = 1
+    avg_cal_mat = avg_cal_mat_select / avg_cal_mat_select.sum(dim=1).unsqueeze(1)
+    return avg_cal_mat
+
+def get_channel_averaged_frame_logits(frame_mc_logits, avg_cal_mat):
+    clustered_avg_ch_logits = torch.matmul(avg_cal_mat, frame_mc_logits)
+    return clustered_avg_ch_logits

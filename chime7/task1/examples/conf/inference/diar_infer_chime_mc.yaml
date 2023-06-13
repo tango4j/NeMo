@@ -6,16 +6,12 @@
 # {"audio_filepath": "/path/to/audio_file", "offset": 0, "duration": null, "label": "infer", "text": "-", "num_speakers": null, "rttm_filepath": "/path/to/rttm/file", "uem_filepath": "/path/to/uem/file"}
 name: &name "ClusterDiarizerMCchime7"
 
-num_workers: 20
+num_workers: 1
 sample_rate: 16000
 batch_size: 64
 device: cuda:0 # can specify a specific device, i.e: cuda:1 (default cuda if cuda available, else cpu)
 verbose: True # enable additional logging
-max_ch: 1
-channel_selector: null
-# channel_selector: [1]
-# channel_selector: average
-# 'average' # Channel number (e.g. 0), list of channels (e.g. [0,5,7] or method (e.g. average)
+channel_selector: 'average' # Channel number (e.g. 0), list of channels (e.g. [0,5,7] or method (e.g. average)
 
 diarizer:
   manifest_filepath: ???
@@ -24,60 +20,25 @@ diarizer:
   collar: 0.25 # Collar value for scoring
   ignore_overlap: True # Consider or ignore overlap segments while scoring
   channel_selector: ${channel_selector}
-  # multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-  # multi_channel_mode: 'mc_vad_cc_mixer' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
-  multi_channel_mode: 'mc_vad_cc_mixer'
+  multi_channel_mode: 'mc_vad' # Multichannel model: 'mc_vad', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
 
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
     external_vad_manifest: null # This option is provided to use external vad and provide its speech activity labels for speaker embeddings extraction. Only one of model_path or external_vad_manifest should be set
 
     parameters: # Tuned parameters for CH109 (using the 11 multi-speaker sessions as dev set) 
-      window_length_in_sec: 0.63  # Window length in sec for VAD context input 
-      shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
-      smoothing: False # False or type of smoothing method (eg: median)
+      window_length_in_sec: 0.15  # Window length in sec for VAD context input 
+      shift_length_in_sec: 0.01 # Shift length in sec for generate frame level VAD prediction
+      smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
-      ####### Steve's recommendations
-      # onset: 0.2 # onset threshold for detecting the beginning and end of a speech
-      # offset: 0.3 # offset threshold for detecting the end of a speech.
-      # pad_onset: 0.3 # adding durations before each speech segment
-      # pad_offset: 0.3 # adding durations after each speech segment
-      # min_duration_on: 0.0 # threshold for small non_speech deletion
-      # min_duration_off: 0.8 # threshold for short speech segment deletion
-
-      #### Regular chime7-mixer6 setup
-      # onset: 0.01
-      # offset: 0.01
-      # pad_onset: 0.25 # Adding durations before each speech segment 
-      # pad_offset: 0.25 # Adding durations after each speech segment 
-      # min_duration_on: 0.25 # Threshold for small non_speech deletion
-      # min_duration_off: 0.0 # Threshold for short speech segment deletion
-
-      ### Chime6 - harsh audio setup
-      onset: 0.2
-      offset: 0.3
-      pad_onset: 0.0 # Adding durations before each speech segment 
-      pad_offset: 0.0 # Adding durations after each speech segment 
-      min_duration_on: 0.5 # Threshold for small non_speech deletion
-      min_duration_off: 0.0 # Threshold for short speech segment deletion
-
-      split_duration: 1500
+      onset: 0.9 # Onset threshold for detecting the beginning and end of a speech 
+      offset: 0.5 # Offset threshold for detecting the end of a speech
+      pad_onset: 0 # Adding durations before each speech segment 
+      pad_offset: 0 # Adding durations after each speech segment 
+      min_duration_on: 0 # Threshold for small non_speech deletion
+      min_duration_off: 0.6 # Threshold for short speech segment deletion
+      split_duration: 500
       filter_speech_first: True 
-      top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
-
-  #### Golden VAD for mixer6-dev
-      # window_length_in_sec: 0.63  # Window length in sec for VAD context input 
-      # shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
-      # smoothing: False # False or type of smoothing method (eg: median)
-      # overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
-      # onset: 0.005
-      # offset: 0.005 # 
-      # pad_onset: 0.25 # Adding durations before each speech segment 
-      # pad_offset: 0.25 # Adding durations after each speech segment 
-      # min_duration_on: 0.25 # Threshold for small non_speech deletion
-      # min_duration_off: 0.0 # Threshold for short speech segment deletion
-      # split_duration: 50
-      # filter_speech_first: True 
 
   speaker_embeddings:
     model_path: titanet_large # .nemo local model path or pretrained model name (titanet_large, ecapa_tdnn or speakerverification_speakernet)
@@ -92,7 +53,7 @@ diarizer:
       oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
       max_num_speakers: 8 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
-      max_rp_threshold: 0.05 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
+      max_rp_threshold: 0.25 # Determines the range of p-value search: 0 < p <= max_rp_threshold. 
       sparse_search_volume: 30 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
   
@@ -112,10 +73,11 @@ diarizer:
     parameters:
       asr_based_vad: False # if True, speech segmentation for diarization is based on word-timestamps from ASR inference.
       asr_based_vad_threshold: 1.0 # Threshold (in sec) that caps the gap between two words when generating VAD timestamps using ASR based VAD.
-      asr_batch_size: null # Batch size can be dependent on each ASR model. Default batch sizes are applied if set to null.
+      asr_batch_size: 32 # Batch size can be dependent on each ASR model. Default batch sizes are applied if set to null.
       decoder_delay_in_sec: null # Native decoder delay. null is recommended to use the default values for each ASR model.
       word_ts_anchor_offset: null # Offset to set a reference point from the start of the word. Recommended range of values is [-0.05  0.2]. 
       word_ts_anchor_pos: "start" # Select which part of the word timestamp we want to use. The options are: 'start', 'end', 'mid'.
+      channel_selector: ${channel_selector}
       fix_word_ts_with_VAD: False # Fix the word timestamp using VAD output. You must provide a VAD model to use this feature.
       colored_text: False # If True, use colored text to distinguish speakers in the output transcript.
       print_time: True # If True, the start and end time of each speaker turn is printed in the output transcript.

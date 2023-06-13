@@ -222,8 +222,8 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, Exportable):
         num_workers: int = 0,
         channel_selector: Optional[ChannelSelectorType] = None,
         augmentor: DictConfig = None,
-        normalize_db: Optional[float] = None
         verbose: bool = True,
+        normalize_db: Optional[float] = None
     ) -> Tuple[List[str], Optional[List['Hypothesis']]]:
         """
         Uses greedy decoding to transcribe audio files. Use this method for debugging and prototyping.
