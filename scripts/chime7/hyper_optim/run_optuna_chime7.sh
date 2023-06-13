@@ -2,7 +2,9 @@
 ################################################################################################
 ### < Need Your Change 1>
 branch_name="dev_chime7_gitlab"
-BASEPATH=/home/taejinp/projects/$branch_name/NeMo/scripts/chime7/hyper_optim
+# BASEPATH=/home/taejinp/projects/$branch_name/NeMo/scripts/chime7/hyper_optim
+BASEPATH=$pwd
+
 cd $BASEPATH
 
 DEREV="-d03"
@@ -30,14 +32,10 @@ test_manifest="/"$DISK_D"/datasets/nemo_chime7_diar_manifests/chdipmixShort180s-
 # test_manifest="/"$DISK_D"/datasets/nemo_chime7_diar_manifests/chdipmixShort1-dev-d03.json"
 # test_manifest="/"$DISK_D"/datasets/nemo_chime7_diar_manifests/chdipmixALL-dev-d03.json"
 
-
-emb_tag='ch109_full_main'
 pwd
-titanet_path="/home/taejinp/Downloads/titanet-l.nemo"
 export PYTHONPATH=/home/taejinp/projects/$branch_name/NeMo:$PYTHONPATH
 
 BATCH_SIZE=11
-MEMO="$emb_tag"
 echo "----BASEPATH" $BASEPATH
 
 # STUDY_NAME="chime7_pilot_v01"
@@ -48,7 +46,6 @@ MSDD_MODEL_PATH="/disk_c/models/msdd_v2_models/msdd_v2_PALO_bs6_a003_version6_e5
 VAD_MODEL_PATH="/disk_c/taejinp/gdrive/model/VAD_models/frame_vad_chime7_acrobat.nemo"
 TEMP_DIR="output/"
 OUTPUT_LOG="$STUDY_NAME".log
-COLLAR=0.25
 N_TRIALS=1000000
 N_JOBS=1
 
@@ -64,8 +61,9 @@ mkdir -p $DIAR_OUT_PATH || exit 1
 
 echo ">>>> DIAR_OUT_PATH: " $DIAR_OUT_PATH
 
-for cuda_device in {0..$LAST_CUDA_DEVICE}
-do
+
+LAST_CUDA_DEVICE=3
+for cuda_device in $(seq 0 $LAST_CUDA_DEVICE); do
 # cuda_device=2
 export CUDA_VISIBLE_DEVICES=$cuda_device
 

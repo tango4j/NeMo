@@ -55,7 +55,7 @@ def diar_config_setup(
     msdd_model_path: str,
     vad_model_path: str,
     output_dir: str,
-    tune_vad: bool=False,
+    tune_vad: bool=True,
     ):
     
     config.diarizer.vad.model_path = vad_model_path
