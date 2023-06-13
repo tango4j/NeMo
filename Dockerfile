@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:23.02-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:22.12-py3
 
 # build an image that includes only the nemo dependencies, ensures that dependencies
 # are included first for optimal caching, and useful for building a development
@@ -46,10 +46,10 @@ WORKDIR /tmp/
 
 # TODO: Remove once this Apex commit (2/24/23) is included in PyTorch
 # container
-RUN git clone https://github.com/NVIDIA/apex.git && \
-  cd apex && \
-  git checkout 03c9d80ed54c0eaa5b581bf42ceca3162f085327 && \
-  pip3 install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" --global-option="--fast_layer_norm" --global-option="--distributed_adam" --global-option="--deprecated_fused_adam" ./
+# RUN git clone https://github.com/NVIDIA/apex.git && \
+#   cd apex && \
+#   git checkout 03c9d80ed54c0eaa5b581bf42ceca3162f085327 && \
+#   pip3 install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" --global-option="--fast_layer_norm" --global-option="--distributed_adam" --global-option="--deprecated_fused_adam" ./
 
 # uninstall stuff from base container
 RUN pip3 uninstall -y sacrebleu torchtext
@@ -73,14 +73,14 @@ RUN for f in $(ls requirements*.txt); do pip3 install --disable-pip-version-chec
 
 # install k2, skip if installation fails
 COPY scripts /tmp/nemo/scripts/
-RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/speech_recognition/k2/setup.sh); INSTALL_CODE=$?; \
-  echo ${INSTALL_MSG}; \
-  if [ ${INSTALL_CODE} -ne 0 ]; then \
-  echo "k2 installation failed";  \
-  if [ "${REQUIRE_K2}" = true ]; then \
-  exit ${INSTALL_CODE};  \
-  else echo "Skipping failed k2 installation"; fi \
-  else echo "k2 installed successfully"; fi
+# RUN INSTALL_MSG=$(/bin/bash /tmp/nemo/scripts/speech_recognition/k2/setup.sh); INSTALL_CODE=$?; \
+#   echo ${INSTALL_MSG}; \
+#   if [ ${INSTALL_CODE} -ne 0 ]; then \
+#   echo "k2 installation failed";  \
+#   if [ "${REQUIRE_K2}" = true ]; then \
+#   exit ${INSTALL_CODE};  \
+#   else echo "Skipping failed k2 installation"; fi \
+#   else echo "k2 installed successfully"; fi
 
 # copy nemo source into a scratch image
 FROM scratch as nemo-src
@@ -125,3 +125,8 @@ RUN if [ "${REQUIRE_AIS_CLI}" = true ]; then \
   exit ${INSTALL_CODE}; \
   else echo "AIS CLI installed successfully"; fi \
   else echo "Skipping AIS CLI installation"; fi
+
+# RUN pip uninstall -y 'cupy-cuda118'
+RUN pip install 'cupy-cuda11x<12'
+RUN pip install espnet
+RUN git clone https://github.com/espnet/espnet.git /workspace/espnet

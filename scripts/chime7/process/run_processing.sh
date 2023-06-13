@@ -65,6 +65,16 @@ then
     DEREVERB_FILTER_LENGTH=5
 fi
 
+if [ -z "$MAX_SEGMENT_LENGTH" ]
+then
+    MAX_SEGMENT_LENGTH=100
+fi
+
+if [ -z "$MAX_BATCH_DURATION" ]
+then
+    MAX_BATCH_DURATION=100
+fi
+
 
 # Diarization output
 # ==================
@@ -174,6 +184,8 @@ do
             --dereverb-filter-length ${DEREVERB_FILTER_LENGTH} \
             --mc-mask-min-db ${MC_MASK_MIN_DB} \
             --mc-postmask-min-db ${MC_POSTMASK_MIN_DB} \
+            --max-segment-length ${MAX_SEGMENT_LENGTH} \
+            --max-batch-duration ${MAX_BATCH_DURATION} \
             --use-garbage-class
 
         # Prepare manifests

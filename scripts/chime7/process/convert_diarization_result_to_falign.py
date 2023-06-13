@@ -32,7 +32,10 @@ def main(diarization_dir: str, diarization_params: str, output_dir: str = "", su
             if not os.path.isdir(manifests_dir):
                 manifests_dir = os.path.join(scenario_subset_dir, f"pred_jsons_{diarization_params}")
 
-            manifests = glob.glob(manifests_dir + '/*.json')
+            manifests = list(glob.glob(manifests_dir + '/*.json'))
+            if len(manifests) == 0:
+                print(f'No manifests found in {manifests_dir}')
+                continue
             
             # Process each manifest
             for manifest in manifests:

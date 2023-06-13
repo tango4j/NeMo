@@ -18,3 +18,10 @@ In a terminal, start the optimization:
 python optimize.py --n_jobs -1 --n_trials 100 --study_name chime7
 ```
 Here `n_jobs=-1` will automatically set the number of parallel jobs to the number of GPUs.
+
+
+## Docker Image
+
+```bash
+DOCKER_BUILDKIT=1 docker build . -f Dockerfile -t nemo-chime7-gss
+```

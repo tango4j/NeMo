@@ -27,19 +27,19 @@ import optuna
 import wget
 from omegaconf import OmegaConf
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
-# from sqlalchemy import create_engine, MetaData
-# from sqlalchemy_utils import database_exists, create_database
+
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
-ESPNET_ROOT="/home/heh/github/espnet/egs2/chime7_task1/asr1"
-CHIME7_ROOT="/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"
-NEMO_CHIME7_ROOT="/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"
-ASR_MODEL_PATH="/media/data2/chime7-challenge/nemo_asr_chime6_finetuned_rnnt/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+NGC_WS_MOUNT="/ws"
+ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
+NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7"
+CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
+ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+DIAR_BASE_DIR=f"{NGC_WS_MOUNT}/chime7_diar_results"
 
 DIAR_CONFIG="system_B_V05_D03"
 DIAR_PARAM="T0.5"
-DIAR_BASE_DIR="/media/data2/chime7-challenge/chime7_diar_results"
 
 SCENARIOS = "chime6 dipco mixer6" # chime6 dipco mixer6
 
@@ -48,7 +48,7 @@ def scale_weights(r, K):
 
 def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
                     bss_iterations, dereverb_filter_length):
-    command = f"MAX_SEGMENT_LENGTH=200 MAX_BATCH_DURATION=200 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
+    command = f"MAX_SEGMENT_LENGTH=50 MAX_BATCH_DURATION=50 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
               f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
               f" {gpu_id} {diar_config} {diar_param} {diar_base_dir} {output_dir} " \
               f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
@@ -77,11 +77,6 @@ def objective_gss_asr(
     bss_iterations = trial.suggest_int("bss_iterations", 5, 30, 5)
     dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 20, 5)
     normalize_db = trial.suggest_int("normalize_db", -35, -20, 5)
-    print("-------------------------------------", flush=True)
-    print(f"Trial: {trial.number}", flush=True)
-    print(f"mc_mask_min_db: {mc_mask_min_db}, mc_postmask_min_db: {mc_postmask_min_db}, bss_iterations: {bss_iterations}, dereverb_filter_length: {dereverb_filter_length}, normalize_db: {normalize_db}", flush=True)
-    print("-------------------------------------", flush=True)
-
     with tempfile.TemporaryDirectory(dir=temp_dir, prefix=str(trial.number)) as output_dir:
         command_gss = get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,  bss_iterations, dereverb_filter_length)
         code = os.system(command_gss)
@@ -171,7 +166,7 @@ def objective_diar(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--study_name", help="Name of study.", type=str, default="optuna_chime7")
-    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna.db")
+    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///optuna.db).", type=str, default="sqlite:///optuna_ngc.db")
     parser.add_argument("--manifest_path", help="path to the manifest file", type=str)
     parser.add_argument(
         "--config_url",
@@ -240,14 +235,6 @@ if __name__ == "__main__":
     # if not os.path.exists(model_config):
     #     model_config = wget.download(args.config_url)
     # config = OmegaConf.load(model_config)
-
-    # postgresql_url = args.storage
-    # engine = create_engine(postgresql_url)
-    # if not database_exists(engine.url):
-    #     create_database(engine.url)
-    # metadata = MetaData(bind = engine)
-    # storage = optuna.storages.RDBStorage(url = postgresql_url, engine_kwargs = {'pool_size' : 20, 'max_overflow' : 0})
-    # MetaData.reflect(metadata)  
 
     func = lambda trial, gpu_id: objective_gss_asr(
         trial,
