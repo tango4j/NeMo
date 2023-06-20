@@ -80,6 +80,9 @@ coverage.xml
 # Translations
 *.mo
 *.pot
+*.json
+debug*
+manifests_*/
 
 # Django stuff:
 *.log

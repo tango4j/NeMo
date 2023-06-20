@@ -17,7 +17,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
+<<<<<<< HEAD
+import os
+from contextlib import contextmanager
+from pathlib import Path
+from unittest import mock
+
+=======
 import numpy as np
+>>>>>>> origin
 import pytest
 
 from nemo.collections.common.parts.preprocessing.manifest import get_full_path
@@ -180,6 +188,8 @@ class TestPreprocessingUtils:
                     get_full_path(audio_files_relative_path, manifest_file=ais_manifest_file) == audio_files_cache_path
                 )
                 assert get_full_path(audio_files_relative_path, data_dir=ais_data_dir) == audio_files_cache_path
+<<<<<<< HEAD
+=======
 
     @pytest.mark.unit
     def test_get_full_path_audio_file_len_limit(self):
@@ -237,3 +247,4 @@ class TestPreprocessingUtils:
         with pytest.raises(ValueError, match="Parameters manifest_file and data_dir cannot be used simultaneously."):
             # Using a relative path without both manifest_file or data_dir is not allowed
             get_full_path('relative/path', manifest_file='/manifest_dir/file.json', data_dir='/data/dir')
+>>>>>>> origin

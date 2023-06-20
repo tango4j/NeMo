@@ -42,14 +42,15 @@ RUN apt-get update && \
   libavdevice-dev && \
   rm -rf /var/lib/apt/lists/*
 
-WORKDIR /tmp/
+WORKDIR /workspace/
 
+WORKDIR /tmp/
 # TODO: Remove once this Apex commit (2/24/23) is included in PyTorch
 # container
-# RUN git clone https://github.com/NVIDIA/apex.git && \
-#   cd apex && \
-#   git checkout 03c9d80ed54c0eaa5b581bf42ceca3162f085327 && \
-#   pip3 install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" --global-option="--fast_layer_norm" --global-option="--distributed_adam" --global-option="--deprecated_fused_adam" ./
+RUN git clone https://github.com/NVIDIA/apex.git && \
+  cd apex && \
+  git checkout 57057e2fcf1c084c0fcc818f55c0ff6ea1b24ae2 && \
+  pip3 install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" --global-option="--fast_layer_norm" --global-option="--distributed_adam" --global-option="--deprecated_fused_adam" ./
 
 # uninstall stuff from base container
 RUN pip3 uninstall -y sacrebleu torchtext
@@ -88,7 +89,7 @@ COPY . .
 
 # start building the final container
 FROM nemo-deps as nemo
-ARG NEMO_VERSION=1.16.0
+ARG NEMO_VERSION=1.19.0
 
 # Check that NEMO_VERSION is set. Build will fail without this. Expose NEMO and base container
 # version information as runtime environment variable for introspection purposes

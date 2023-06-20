@@ -295,9 +295,7 @@ class SpeechLabel(_Collection):
             else:
                 data.sort(key=lambda entity: entity.duration)
 
-        logging.info(
-            "Filtered duration for loading collection is %f.", duration_filtered,
-        )
+        logging.info(f"Filtered duration for loading collection is {duration_filtered / 3600: .2f} hours.")
         logging.info(f"Dataset loaded with {len(data)} items, total duration of {total_duration / 3600: .2f} hours.")
         self.uniq_labels = sorted(set(map(lambda x: x.label, data)))
         logging.info("# {} files loaded accounting to # {} labels".format(len(data), len(self.uniq_labels)))
@@ -313,6 +311,7 @@ class ASRSpeechLabel(SpeechLabel):
         manifests_files: Union[str, List[str]],
         is_regression_task=False,
         cal_labels_occurrence=False,
+        delimiter=None,
         *args,
         **kwargs,
     ):
@@ -323,24 +322,27 @@ class ASRSpeechLabel(SpeechLabel):
                 manifests to yield items from.
             is_regression_task: It's a regression task.
             cal_labels_occurrence: whether to calculate occurence of labels.
+            delimiter: separator for labels strings.
             *args: Args to pass to `SpeechLabel` constructor.
             **kwargs: Kwargs to pass to `SpeechLabel` constructor.
         """
         audio_files, durations, labels, offsets = [], [], [], []
-
+        all_labels = []
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item):
             audio_files.append(item['audio_file'])
             durations.append(item['duration'])
             if not is_regression_task:
                 label = item['label']
+                label_list = label.split() if not delimiter else label.split(delimiter)
             else:
                 label = float(item['label'])
+                label_list = [label]
 
             labels.append(label)
             offsets.append(item['offset'])
-
+            all_labels.extend(label_list)
         if cal_labels_occurrence:
-            self.labels_occurrence = collections.Counter(labels)
+            self.labels_occurrence = collections.Counter(all_labels)
 
         super().__init__(audio_files, durations, labels, offsets, *args, **kwargs)
 
@@ -516,12 +518,13 @@ class DiarizationLabel(_Collection):
 
     OUTPUT_TYPE = collections.namedtuple(
         typename='DiarizationLabelEntity',
-        field_names='audio_file duration rttm_file offset target_spks sess_spk_dict clus_spk_digits rttm_spk_digits',
+        field_names='audio_file uniq_id duration rttm_file offset target_spks sess_spk_dict clus_spk_digits rttm_spk_digits',
     )
 
     def __init__(
         self,
         audio_files: List[str],
+        uniq_ids: List[str],
         durations: List[float],
         rttm_files: List[str],
         offsets: List[float],
@@ -566,10 +569,11 @@ class DiarizationLabel(_Collection):
         data, duration_filtered = [], 0.0
 
         zipped_items = zip(
-            audio_files, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list
+            audio_files, uniq_ids, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list
         )
         for (
             audio_file,
+            uniq_id,
             duration,
             rttm_file,
             offset,
@@ -585,6 +589,7 @@ class DiarizationLabel(_Collection):
             data.append(
                 output_type(
                     audio_file,
+                    uniq_id,
                     duration,
                     rttm_file,
                     offset,
@@ -596,6 +601,12 @@ class DiarizationLabel(_Collection):
             )
 
             if index_by_file_id:
+                if isinstance(audio_file, list):
+                    if len(audio_file) == 0:
+                        raise ValueError(f"Empty audio file list: {audio_file}")
+                    audio_file_name = sorted(audio_file)[0]
+                else:
+                    audio_file_name = audio_file
                 file_id, _ = os.path.splitext(os.path.basename(audio_file))
                 self.mapping[file_id] = len(data) - 1
 
@@ -623,7 +634,7 @@ class DiarizationSpeechLabel(DiarizationLabel):
     def __init__(
         self,
         manifests_files: Union[str, List[str]],
-        emb_dict: Dict,
+        # emb_dict: Dict,
         clus_label_dict: Dict,
         round_digit=2,
         seq_eval_mode=False,
@@ -654,11 +665,12 @@ class DiarizationSpeechLabel(DiarizationLabel):
             **kwargs: Kwargs to pass to `SpeechLabel` constructor.
         """
         self.round_digit = round_digit
-        self.emb_dict = emb_dict
+        # self.emb_dict = emb_dict
         self.clus_label_dict = clus_label_dict
         self.seq_eval_mode = seq_eval_mode
         self.pairwise_infer = pairwise_infer
-        audio_files, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list = (
+        audio_files, uniq_ids, durations, rttm_files, offsets, target_spks_list, sess_spk_dicts, clus_spk_list, rttm_spk_list = (
+            [],
             [],
             [],
             [],
@@ -671,18 +683,19 @@ class DiarizationSpeechLabel(DiarizationLabel):
 
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item_rttm):
             # Inference mode
+            self.pairwise_infer = False
             if self.pairwise_infer:
                 clus_speaker_digits = sorted(list(set([x[2] for x in clus_label_dict[item['uniq_id']]])))
-                if item['rttm_file']:
-                    base_scale_index = max(self.emb_dict.keys())
-                    _sess_spk_dict = self.emb_dict[base_scale_index][item['uniq_id']]['mapping']
-                    sess_spk_dict = {int(v.split('_')[-1]): k for k, v in _sess_spk_dict.items()}
-                    rttm_speaker_digits = [int(v.split('_')[1]) for k, v in _sess_spk_dict.items()]
-                    if self.seq_eval_mode:
-                        clus_speaker_digits = rttm_speaker_digits
-                else:
-                    sess_spk_dict = None
-                    rttm_speaker_digits = None
+                # if item['rttm_file']:
+                #     base_scale_index = max(self.emb_dict.keys())
+                #     _sess_spk_dict = self.emb_dict[base_scale_index][item['uniq_id']]['mapping']
+                #     sess_spk_dict = {int(v.split('_')[-1]): k for k, v in _sess_spk_dict.items()}
+                #     rttm_speaker_digits = [int(v.split('_')[1]) for k, v in _sess_spk_dict.items()]
+                #     if self.seq_eval_mode:
+                #         clus_speaker_digits = rttm_speaker_digits
+                # else:
+                sess_spk_dict = None
+                rttm_speaker_digits = None
 
             # Training mode
             else:
@@ -700,24 +713,39 @@ class DiarizationSpeechLabel(DiarizationLabel):
                 target_spks = tuple(sess_spk_dict.keys())
                 clus_speaker_digits = target_spks
                 rttm_speaker_digits = target_spks
+            pairwise_msdd= False
+            # if pairwise_msdd:
+            #     if len(clus_speaker_digits) <= 2:
+            #         spk_comb_list = [(0, 1)]
+            #     else:
+            #         spk_comb_list = [x for x in combinations(clus_speaker_digits, 2)]
 
-            if len(clus_speaker_digits) <= 2:
-                spk_comb_list = [(0, 1)]
-            else:
-                spk_comb_list = [x for x in combinations(clus_speaker_digits, 2)]
+            #     import ipdb; ipdb.set_trace()
+            #     for target_spks in spk_comb_list:
+            #         audio_files.append(item['audio_file'])
+            #         uniq_ids.append(item['uniq_id'])
+            #         durations.append(item['duration'])
+            #         rttm_files.append(item['rttm_file'])
+            #         offsets.append(item['offset'])
+            #         target_spks_list.append(target_spks)
+            #         sess_spk_dicts.append(sess_spk_dict)
+            #         clus_spk_list.append(clus_speaker_digits)
+            #         rttm_spk_list.append(rttm_speaker_digits)
+            # else:
+            audio_files.append(item['audio_file'])
+            uniq_ids.append(item['uniq_id'])
+            durations.append(item['duration'])
+            rttm_files.append(item['rttm_file'])
+            offsets.append(item['offset'])
+            target_spks_list.append(target_spks)
+            sess_spk_dicts.append(sess_spk_dict)
+            clus_spk_list.append(clus_speaker_digits)
+            rttm_spk_list.append(rttm_speaker_digits)
 
-            for target_spks in spk_comb_list:
-                audio_files.append(item['audio_file'])
-                durations.append(item['duration'])
-                rttm_files.append(item['rttm_file'])
-                offsets.append(item['offset'])
-                target_spks_list.append(target_spks)
-                sess_spk_dicts.append(sess_spk_dict)
-                clus_spk_list.append(clus_speaker_digits)
-                rttm_spk_list.append(rttm_speaker_digits)
 
         super().__init__(
             audio_files,
+            uniq_ids,
             durations,
             rttm_files,
             offsets,
@@ -773,8 +801,16 @@ class DiarizationSpeechLabel(DiarizationLabel):
             raise ValueError(
                 f"Manifest file has invalid json line " f"structure: {line} without proper audio file key."
             )
-        item['audio_file'] = os.path.expanduser(item['audio_file'])
-        item['uniq_id'] = os.path.splitext(os.path.basename(item['audio_file']))[0]
+        if isinstance(item['audio_file'], list): 
+            item['audio_file'] = [os.path.expanduser(audio_file_path) for audio_file_path in item['audio_file']]
+        else:
+            item['audio_file'] = os.path.expanduser(item['audio_file'])
+
+        if not isinstance(item['audio_file'], list): 
+            item['uniq_id'] = os.path.splitext(os.path.basename(item['audio_file']))[0]
+        elif 'uniq_id' not in item:
+            raise ValueError(f"Manifest file has invalid json line " f"structure: {line} without proper uniq_id key.")
+
         if 'duration' not in item:
             raise ValueError(f"Manifest file has invalid json line " f"structure: {line} without proper duration key.")
         item = dict(
@@ -968,13 +1004,17 @@ class AudioCollection(Audio):
 class FeatureLabel(_Collection):
     """List of feature sequence and their label correspondence with preprocessing."""
 
-    OUTPUT_TYPE = collections.namedtuple(typename='FeatureLabelEntity', field_names='feature_file label',)
+    OUTPUT_TYPE = collections.namedtuple(typename='FeatureLabelEntity', field_names='feature_file label duration',)
 
     def __init__(
         self,
         feature_files: List[str],
         labels: List[str],
+        durations: List[float],
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
         max_number: Optional[int] = None,
+        do_sort_by_duration: bool = False,
         index_by_file_id: bool = False,
     ):
         """Instantiates feature-SequenceLabel manifest with filters and preprocessing.
@@ -988,16 +1028,26 @@ class FeatureLabel(_Collection):
 
         output_type = self.OUTPUT_TYPE
         data = []
-
+        duration_filtered = 0.0
+        total_duration = 0.0
         self.uniq_labels = set()
 
         if index_by_file_id:
             self.mapping = {}
 
-        for feature_file, label in zip(feature_files, labels):
+        for feature_file, label, duration in zip(feature_files, labels, durations):
+            # Duration filters.
+            if min_duration is not None and duration < min_duration:
+                duration_filtered += duration
+                continue
 
-            data.append(output_type(feature_file, label))
+            if max_duration is not None and duration > max_duration:
+                duration_filtered += duration
+                continue
+
+            data.append(output_type(feature_file, label, duration))
             self.uniq_labels |= set(label)
+            total_duration += duration
 
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(feature_file))
@@ -1007,6 +1057,14 @@ class FeatureLabel(_Collection):
             if len(data) == max_number:
                 break
 
+        if do_sort_by_duration:
+            if index_by_file_id:
+                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+            else:
+                data.sort(key=lambda entity: entity.duration)
+
+        logging.info(f"Filtered duration for loading collection is {duration_filtered / 2600:.2f} hours.")
+        logging.info(f"Dataset loaded with {len(data)} items, total duration of {total_duration / 3600: .2f} hours.")
         logging.info("# {} files loaded including # {} unique labels".format(len(data), len(self.uniq_labels)))
         super().__init__(data)
 
@@ -1015,7 +1073,13 @@ class ASRFeatureLabel(FeatureLabel):
     """`FeatureLabel` collector from asr structured json files."""
 
     def __init__(
-        self, manifests_files: Union[str, List[str]], max_number: Optional[int] = None, index_by_file_id: bool = False,
+        self,
+        manifests_files: Union[str, List[str]],
+        is_regression_task: bool = False,
+        cal_labels_occurrence: bool = False,
+        delimiter: Optional[str] = None,
+        *args,
+        **kwargs,
     ):
 
         """Parse lists of feature files and sequences of labels.
@@ -1027,12 +1091,25 @@ class ASRFeatureLabel(FeatureLabel):
             index_by_file_id: If True, saves a mapping from filename base (ID) to index in data; pass to `FeatureSequenceLabel` constructor.
         """
 
-        feature_files, labels = [], []
+        feature_files, labels, durations = [], [], []
+        all_labels = []
         for item in manifest.item_iter(manifests_files, parse_func=self._parse_item):
             feature_files.append(item['feature_file'])
-            labels.append(item['label'])
+            durations.append(item['duration'])
 
-        super().__init__(feature_files, labels, max_number, index_by_file_id)
+            if not is_regression_task:
+                label = item['label']
+                label_list = label.split() if not delimiter else label.split(delimiter)
+            else:
+                label = float(item['label'])
+                label_list = [label]
+
+            labels.append(label)
+            all_labels.extend(label_list)
+        if cal_labels_occurrence:
+            self.labels_occurrence = collections.Counter(all_labels)
+
+        super().__init__(feature_files, labels, durations, *args, **kwargs)
 
     def _parse_item(self, line: str, manifest_file: str) -> Dict[str, Any]:
         item = json.loads(line)
@@ -1046,7 +1123,7 @@ class ASRFeatureLabel(FeatureLabel):
             raise ValueError(
                 f"Manifest file has invalid json line " f"structure: {line} without proper 'feature_file' key."
             )
-        item['feature_file'] = os.path.expanduser(item['feature_file'])
+        item['feature_file'] = manifest.get_full_path(audio_file=item['feature_file'], manifest_file=manifest_file)
 
         # Label.
         if 'label' in item:
@@ -1054,7 +1131,7 @@ class ASRFeatureLabel(FeatureLabel):
         else:
             raise ValueError(f"Manifest file has invalid json line structure: {line} without proper 'label' key.")
 
-        item = dict(feature_file=item['feature_file'], label=item['label'],)
+        item = dict(feature_file=item['feature_file'], label=item['label'], duration=item['duration'])
 
         return item
 

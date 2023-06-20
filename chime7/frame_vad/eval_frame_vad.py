@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 from pyannote.core import Annotation, Segment
 from pyannote.metrics import detection
-from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
 
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.parts.utils.vad_utils import (
@@ -308,10 +308,6 @@ def calculate_detection_error(
         reference, hypothesis = vad_frame_construct_pyannote_object_per_file(pred_file, gt_file)
         metric(reference, hypothesis)  # accumulation
 
-    # delete tmp table files
-    # shutil.rmtree(pred_segment_dir, ignore_errors=True)
-    # shutil.rmtree(gt_segment_dir, ignore_errors=True)
-
     report = metric.report(display=False)
     DetER = report.iloc[[-1]][('detection error rate', '%')].item()
     FA = report.iloc[[-1]][('false alarm', '%')].item()
@@ -372,6 +368,33 @@ def find_paired_files(pred_dir, gt_dir):
         if key in pred_file_map:
             results.append((key, gt_file_map[key], pred_file_map[key]))
     return results
+
+def vad_frame_construct_pyannote_object_per_file(
+    pred_table_path: str, gt_table_path: str
+) -> Tuple[Annotation, Annotation]:
+    """
+    Construct a Pyannote object for evaluation.
+    Args:
+        pred_table_path(str) : path of vad rttm-like table.
+        gt_table_path(str): path of groundtruth rttm file.
+    Returns:
+        reference(pyannote.Annotation): groundtruth
+        hypothesis(pyannote.Annotation): prediction
+    """
+
+    pred = pd.read_csv(pred_table_path, sep=" ", header=None)
+    label = pd.read_csv(gt_table_path, sep=" ", header=None)
+
+    # construct reference
+    reference = Annotation()
+    for index, row in label.iterrows():
+        reference[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
+
+    # construct hypothsis
+    hypothesis = Annotation()
+    for index, row in pred.iterrows():
+        hypothesis[Segment(float(row[0]), float(row[0]) + float(row[1]))] = 'Speech'
+    return reference, hypothesis
 
 if __name__ == '__main__':
     main()

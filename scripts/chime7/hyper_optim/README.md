@@ -13,6 +13,17 @@ DIAR_PARAM="T0.5"
 DIAR_BASE_DIR="/media/data2/chime7-challenge/chime7_diar_results"
 ```
 
+Diarization Model (MSDD v2) 
+Access these files at:   
+lab@10.110.43.14:/disk_c  
+[PassWord](https://docs.google.com/document/d/1IT07_3YkgshtMGrBLW6vrUjRBl_LwaFlseQBjELhZAY/edit?usp=sharing)
+```
+CONFIG_URL=<dev/chime7 branch NeMo Path>/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml
+MSDD_MODEL_PATH=/disk_c/models/msdd_v2_models/msdd_v2_PALO_bs6_a003_version6_e53.ckpt
+VAD_MODEL_PATH=/disk_c/taejinp/gdrive/model/VAD_models/frame_vad_chime7_acrobat.nemo
+test_manifest=/disk_d/datasets/nemo_chime7_diar_manifests/chdipmixALL-dev-d03.json
+```
+
 In a terminal, start the optimization:
 ```bash
 python optimize.py --n_jobs -1 --n_trials 100 --study_name chime7
