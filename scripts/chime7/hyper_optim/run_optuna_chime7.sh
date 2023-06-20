@@ -40,7 +40,6 @@ pwd
 export PYTHONPATH=/media/data2/chime7-challenge/nemo-gitlab-chime7:$PYTHONPATH
 
 BATCH_SIZE=11
-MEMO="$emb_tag"
 echo "----BASEPATH" $BASEPATH
 
 
@@ -53,7 +52,6 @@ MSDD_MODEL_PATH="${WS_ROOT}/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e5
 VAD_MODEL_PATH="${WS_ROOT}/chime7/checkpoints/frame_vad_chime7_acrobat.nemo"
 TEMP_DIR="output/"
 OUTPUT_LOG="$STUDY_NAME".log
-COLLAR=0.25
 N_TRIALS=1000000
 N_JOBS=1
 TEMP_DIR="./temp_dir"

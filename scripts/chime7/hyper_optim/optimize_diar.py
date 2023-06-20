@@ -56,7 +56,7 @@ def diar_config_setup(
     vad_model_path: str,
     output_dir: str,
     speaker_output_dir: Optional[str] = None,
-    tune_vad: bool=False,
+    tune_vad: bool=True,
     ):
     
     config.diarizer.vad.model_path = vad_model_path
