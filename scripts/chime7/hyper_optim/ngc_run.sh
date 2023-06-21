@@ -17,6 +17,7 @@ DIAR_BATCH_SIZE=11
 
 read -r -d '' cmd <<EOF
 cd /ws/chime7_optuna \
+&& df -h \
 && export PYTHONPATH=${NEMO_ROOT}:${PYTHONPATH} \
 && echo "PYTHONPATH: ${PYTHONPATH}" \
 && python optimize_full_ngc.py --n_trials ${NUM_TRIALS} --n_jobs 6 --output_log ${OPTUNA_LOG} \
@@ -26,6 +27,7 @@ cd /ws/chime7_optuna \
 --msdd_model_path /ws/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt \
 --batch_size ${DIAR_BATCH_SIZE}          
 EOF
+
 
 echo "Launching evaluation job on NGC..."
 ngc batch run \

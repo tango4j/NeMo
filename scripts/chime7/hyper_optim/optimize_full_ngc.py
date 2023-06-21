@@ -111,6 +111,7 @@ def objective_chime7_mcmsasr(
     speaker_output_dir: str,
     gpu_id: int,
     temp_dir: str,
+    keep_mixer6: bool = False,
 ):
     """
     [Note] Diarizaiton out `outputs`
@@ -120,38 +121,39 @@ def objective_chime7_mcmsasr(
     """
     start_time = time.time()
     with tempfile.TemporaryDirectory(dir=temp_dir, prefix=str(trial.number)) as output_dir:
-        for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
-            logging.info(f"Start Diarization on {manifest_json}")
-            scenario = manifest_json.stem.split("-")[0]
-            curr_output_dir = os.path.join(output_dir, scenario)
-            Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir="/workspace", prefix=str(trial.number)) as local_output_dir:
+            for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
+                logging.info(f"Start Diarization on {manifest_json}")
+                scenario = manifest_json.stem.split("-")[0]
+                curr_output_dir = os.path.join(output_dir, scenario)
+                Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-            if "mixer6" in scenario:  # don't save speaker outputs for mixer6
-                curr_speaker_output_dir = os.path.join(output_dir, "speaker_outputs")
-            else:
-                curr_speaker_output_dir = speaker_output_dir
+                if "mixer6" in scenario and not keep_mixer6:  # don't save speaker outputs for mixer6
+                    curr_speaker_output_dir = os.path.join(local_output_dir, "speaker_outputs")
+                else:
+                    curr_speaker_output_dir = speaker_output_dir
 
-            config.device = f"cuda:{gpu_id}"
-            # Step:1-1 Configure Diarization
-            config = diar_config_setup(
-                trial, 
-                config,
-                str(manifest_json),
-                msdd_model_path,
-                vad_model_path,
-                output_dir=curr_output_dir,
-                speaker_output_dir=curr_speaker_output_dir,
-                tune_vad=True,
-            )
-            # Step:1-2 Run Diarization 
-            diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
-            outputs = diarizer_model.diarize(verbose=False)
-            move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
+                config.device = f"cuda:{gpu_id}"
+                # Step:1-1 Configure Diarization
+                config = diar_config_setup(
+                    trial, 
+                    config,
+                    str(manifest_json),
+                    msdd_model_path,
+                    vad_model_path,
+                    output_dir=curr_output_dir,
+                    speaker_output_dir=curr_speaker_output_dir,
+                    tune_vad=True,
+                )
+                # Step:1-2 Run Diarization 
+                diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
+                outputs = diarizer_model.diarize(verbose=False)
+                move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
 
-            metric = outputs[0][0]
-            DER = abs(metric)
-            logging.info(f"[optuna] Diarization DER: {DER}")
-            del diarizer_model
+                metric = outputs[0][0]
+                DER = abs(metric)
+                logging.info(f"[optuna] Diarization DER: {DER}")
+                del diarizer_model
 
         WER = objective_gss_asr(
             trial,
@@ -193,7 +195,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_trials", help="Number of trials to run optuna", type=int, default=100)
     parser.add_argument("--n_jobs", help="Number of parallel jobs to run, set -1 to use all GPUs", type=int, default=-1)
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)
-
+    parser.add_argument("--keep_mixer6", help="Keep mixer6 in the evaluation", action="store_true")
     args = parser.parse_args()
     os.makedirs(args.temp_dir, exist_ok=True)
 
@@ -212,6 +214,7 @@ if __name__ == "__main__":
         msdd_model_path=args.msdd_model_path,
         vad_model_path=args.vad_model_path,
         speaker_output_dir=args.output_dir,
+        keep_mixer6=args.keep_mixer6,
     )
 
     def optimize(gpu_id=0):

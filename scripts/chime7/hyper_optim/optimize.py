@@ -100,7 +100,7 @@ def objective_gss_asr(
 
 
 def move_diar_results(diar_out_dir, system_name, scenario="chime6"):
-    curr_diar_out_dir = Path(diar_out_dir, f"{scenario}-dev", system_name, "pred_jsons_T")
+    curr_diar_out_dir = Path(diar_out_dir, scenario, system_name, "pred_jsons_T")
     new_diar_out_dir = Path(diar_out_dir, system_name, scenario, "pred_jsons_T")
     new_diar_out_dir.mkdir(parents=True, exist_ok=True)
     for json_file in curr_diar_out_dir.glob("*.json"):
@@ -123,15 +123,19 @@ def objective_chime7_mcmsasr(
     outputs = (metric, mapping_dict, itemized_erros)
     itemized_errors = (DER, CER, FA, MISS)
     """
-    gpu_id = 1
-    output_dir = temp_dir
-    # with tempfile.TemporaryDirectory(dir=temp_dir, prefix=str(trial.number)) as output_dir:
-    if True:
+    with tempfile.TemporaryDirectory(dir=temp_dir, prefix=str(trial.number)) as output_dir:
         # Step:1-1 Configure Diarization
-        for manifest_json in Path(diarizer_manifest_path).glob("mixer6-dev.json"):
+        for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
+            scenario = manifest_json.stem.split("-")[0]
             print(f"Start Diarization on {manifest_json}")
-            curr_output_dir = os.path.join(output_dir, manifest_json.stem)
+            curr_output_dir = os.path.join(output_dir, scenario)
             Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
+
+            if "mixer6" in scenario:  # don't save speaker outputs for mixer6
+                curr_speaker_output_dir = os.path.join(output_dir, "speaker_outputs")
+            else:
+                curr_speaker_output_dir = speaker_output_dir
+
             config = diar_config_setup(
                 trial, 
                 config,
@@ -139,7 +143,7 @@ def objective_chime7_mcmsasr(
                 msdd_model_path,
                 vad_model_path,
                 output_dir=curr_output_dir,
-                speaker_output_dir=speaker_output_dir,
+                speaker_output_dir=curr_speaker_output_dir,
                 tune_vad=True,
             )
             # Step:1-2 Run Diarization 
@@ -150,7 +154,7 @@ def objective_chime7_mcmsasr(
             DER = abs(metric)
             logging.info(f"[optuna] Diarization DER: {DER}")
             print(json_output_folder)
-            move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=manifest_json.stem.split("-")[0])
+            move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
             if "mixer6" in manifest_json.stem:
                 diarizer_model.clustering_embedding.clus_diar_model.delete_mc_embeddings()
             del diarizer_model
