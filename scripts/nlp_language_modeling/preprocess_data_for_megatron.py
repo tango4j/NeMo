@@ -236,6 +236,7 @@ def get_args():
     group = parser.add_argument_group(title='output data')
     group.add_argument('--output-prefix', type=str, required=True, help='Path to binary output file without suffix')
     group.add_argument('--dataset-impl', type=str, default='mmap', choices=['lazy', 'cached', 'mmap', 'retmmap'])
+    group.add_argument('--min_num_tokens', type=int, default=-1, help='Keep only documents with the minimum number of tokens, -1 to use all documents')
 
     group = parser.add_argument_group(title='runtime')
     group.add_argument('--workers', type=int, default=1, help='Number of worker processes to launch')
@@ -320,6 +321,8 @@ def main():
     total_bytes_processed = 0
     print("Time to startup:", startup_end - startup_start)
 
+    skipped = 0
+    added = 0
     pool = multiprocessing.Pool(args.workers, initializer=encoder.initializer)
 
     for idx, json_file in enumerate(json_files):
@@ -336,9 +339,17 @@ def main():
             for key, sentences in doc.items():
                 if len(sentences) == 0:
                     continue
+                doc_added = False
                 for sentence in sentences:
-                    builders[key].add_item(torch.IntTensor(sentence))
-                builders[key].end_document()
+                    if args.min_num_tokens > 0 and len(sentence) >= args.min_num_tokens:
+                        builders[key].add_item(torch.IntTensor(sentence))
+                        doc_added = True
+                        added += 1
+                    else:
+                        skipped += 1
+
+                if doc_added:
+                    builders[key].end_document()
             if i % args.log_interval == 0:
                 current = time.time()
                 elapsed = current - proc_start
@@ -348,6 +359,7 @@ def main():
     for key in args.json_keys:
         builders[key].finalize(output_idx_files[key])
 
+    print(f"Min num tokens: {args.min_num_tokens} -- added: {added} ({round(skipped/(added+skipped))}%) -- skipped - {skipped}({round(skipped/(added+skipped))}%)")
 
 if __name__ == '__main__':
     main()

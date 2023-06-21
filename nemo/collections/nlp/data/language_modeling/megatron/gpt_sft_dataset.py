@@ -38,6 +38,7 @@ class GPTSFTDataset(Dataset):
         seed: int = 1234,
         context_key: str = "text",
         label_key: str = "answer",
+        question_key: str = None,
         separate_prompt_and_response_with_newline: bool = False,
         answer_only_loss: bool = True,
         truncation_field: str = "answer",
@@ -80,6 +81,7 @@ class GPTSFTDataset(Dataset):
         self.seed = seed
         self.context_key = context_key
         self.label_key = label_key
+        self.question_key = question_key
         self.separate_prompt_and_response_with_newline = separate_prompt_and_response_with_newline
         self.answer_only_loss = answer_only_loss
         self.truncation_field = truncation_field
@@ -145,22 +147,34 @@ class GPTSFTDataset(Dataset):
         """
         context = example[self.context_key]
         output = example[self.label_key]
-
+        question = example[self.question_key] if self.question_key is not None else ""
+        
+       
+        
         if self.prompt_template is not None:
             assert '{input}' in self.prompt_template
             assert '{output}' in self.prompt_template
             # Make sure that '{output}' always occurs at the end of the prompt template string
             assert self.prompt_template.index('{output}') == len(self.prompt_template) - len('{output}')
+
             # Get the context by replacing only the input
             original_context = context
             context = self.prompt_template.replace('{input}', context).replace('{output}', '').strip(' ')
+            
             # Replace the input and output placeholders with the actual input and output
             text = self.prompt_template.replace('{input}', original_context).replace('{output}', output)
 
+            if self.question_key is not None:
+                assert self.question_key in self.prompt_template
+                context = context.replace('{' + self.question_key + '}', '').strip(' ')
+                text = text.replace('{' + self.question_key + '}', question)
+
         if self.separate_prompt_and_response_with_newline and self.prompt_template is None:
-            text = context + '\n' + output
+            question_sep = '\n' + question if question else ''
+            text = context + question_sep + '\n' + output
         elif not self.separate_prompt_and_response_with_newline and self.prompt_template is None:
-            text = context + ' ' + output
+            question_sep = ' ' + question if question else ''
+            text = context + question_sep + ' ' + output
 
         if self.virtual_tokens:
             # (@adithyare) we are going to insert "pad/eos" tokens in the beginning of the text and context
@@ -168,12 +182,13 @@ class GPTSFTDataset(Dataset):
             pre_pad = [self.tokenizer.eos_id] * self.virtual_tokens
         else:
             pre_pad = []
+        
         tokenized_text = pre_pad + self.tokenizer.text_to_ids(text)
         context_ids = pre_pad + self.tokenizer.text_to_ids(context)
-        answer_ids = tokenized_text[len(context_ids) :]
+        question_ids = self.tokenizer.text_to_ids(question) if self.question_key is not None else []
+        answer_ids = tokenized_text[len(context_ids) + len(question_ids):]
+        total_ids = len(context_ids) + len(question_ids) + max(len(answer_ids), self.tokens_to_generate)
 
-        # for the long context cases, collate_fn includes self.tokens_to_generate for padding
-        total_ids = len(context_ids) + max(len(answer_ids), self.tokens_to_generate)
         if self.add_bos:
             total_ids += 1
         if self.add_sep:
@@ -189,8 +204,7 @@ class GPTSFTDataset(Dataset):
             elif self.truncation_field == "context":
                 context_ids = context_ids[: -min(truncation_length, len(context_ids))]
 
-        if len(context_ids) > self.max_seq_length:
-            context_ids = context_ids[: self.max_seq_length]
+        context_ids += question_ids
 
         assert len(context_ids) <= self.max_seq_length
         input_ids = context_ids
@@ -209,16 +223,23 @@ class GPTSFTDataset(Dataset):
         if self.add_eos:
             input_ids = input_ids + [self.tokenizer.eos_id]
 
-        if len(input_ids) < self.min_seq_length or len(input_ids) > self.max_seq_length:
-            input_ids = input_ids[: self.max_seq_length]
-
         processed_example = {
             'input_ids': input_ids,
             'answer_start_idx': answer_start_idx,
             'context_ids': context_ids,
             'context_length': len(context_ids),
         }
-
+        # import pdb; pdb.set_trace()
+        """ 
+        (Pdb) self.tokenizer.ids_to_tokens(input_ids)
+        ['▁\\', 'n', '\\', 'n', 'Introduction', '\\', 'n', 'Although', '▁', '<extra_id_1>', 'which', '▁multilingual', '▁approaches', '▁do', '▁they', '▁compare', '▁with', '?', '<extra_id_2>', 'BRE', 'F', '1', '9', ',', '▁BIB', 'REF', '2', '0', '<extra_id_1>', '</s>']
+        (Pdb) self.tokenizer.ids_to_tokens(context_ids)
+        ['▁\\', 'n', '\\', 'n', 'Introduction', '\\', 'n', 'Although', '▁', '<extra_id_1>', 'which', '▁multilingual', '▁approaches', '▁do', '▁they', '▁compare', '▁with', '?', '<extra_id_2>']
+        (Pdb) len(context_ids)
+        19
+        (Pdb) answer_start_idx
+        19
+        """
         return processed_example
 
     def _maybe_cast_to_list(self, x):

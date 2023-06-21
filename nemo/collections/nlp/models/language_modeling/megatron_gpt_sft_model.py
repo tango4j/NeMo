@@ -253,6 +253,7 @@ class MegatronGPTSFTModel(MegatronGPTModel):
                 seed=data_cfg.get('seed', 1234),
                 context_key=data_cfg.get('context_key', 'text'),
                 label_key=data_cfg.get('label_key', 'answer'),
+                question_key=data_cfg.get('question_key', None),
                 separate_prompt_and_response_with_newline=data_cfg.get(
                     'separate_prompt_and_response_with_newline', True
                 ),

@@ -206,6 +206,10 @@ def main(cfg) -> None:
             pretrained_cfg.precision = trainer.precision
             if trainer.precision == "16":
                 pretrained_cfg.megatron_amp_O2 = False
+            pretrained_cfg.encoder_seq_length = cfg.model.encoder_seq_length
+            if cfg.model.get("use_flash_attention", False):
+                pretrained_cfg.use_flash_attention = cfg.model.use_flash_attention
+
         model = MegatronGPTModel.restore_from(
             restore_path=cfg.gpt_model_file,
             trainer=trainer,
