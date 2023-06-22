@@ -229,6 +229,7 @@ class GPTSFTDataset(Dataset):
             'context_ids': context_ids,
             'context_length': len(context_ids),
         }
+        # print(question_ids)
         # import pdb; pdb.set_trace()
         """ 
         (Pdb) self.tokenizer.ids_to_tokens(input_ids)
@@ -240,6 +241,12 @@ class GPTSFTDataset(Dataset):
         (Pdb) answer_start_idx
         19
         """
+        print("=="*40)
+        print("INPUT:", self.tokenizer.ids_to_tokens(input_ids))
+        print("CONTEXT:", self.tokenizer.ids_to_tokens(context_ids))
+        print(len(context_ids))
+        print(answer_start_idx)
+        print("=="*40)
         return processed_example
 
     def _maybe_cast_to_list(self, x):
