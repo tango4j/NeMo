@@ -65,11 +65,11 @@ def objective_gss_asr(
         diar_base_dir: str,
         diar_param: str = "T",
 ):
-    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -60, -5, 10)
-    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -9, 0, 3)
-    bss_iterations = trial.suggest_int("bss_iterations", 5, 30, 5)
-    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 20, 5)
-    normalize_db = trial.suggest_int("normalize_db", -35, -20, 5)
+    mc_mask_min_db = -60 #trial.suggest_int("mc_mask_min_db", -60, -5, 10)
+    mc_postmask_min_db = -6 # trial.suggest_int("mc_postmask_min_db", -9, 0, 3)
+    bss_iterations = 5 #trial.suggest_int("bss_iterations", 5, 30, 5)
+    dereverb_filter_length = 5 # trial.suggest_int("dereverb_filter_length", 5, 20, 5)
+    normalize_db = -30 # trial.suggest_int("normalize_db", -35, -20, 5)
     
     command_gss = get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,  bss_iterations, dereverb_filter_length)
     code = os.system(command_gss)
@@ -166,7 +166,7 @@ def objective_chime7_mcmsasr(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--study_name", help="Name of study.", type=str, default="optuna_chime7")
-    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna-msdd-gss-asr.db")
+    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna-msdd.db")
     parser.add_argument("--manifest_path", help="path to the manifest file", type=str)
     parser.add_argument(
         "--config_url",

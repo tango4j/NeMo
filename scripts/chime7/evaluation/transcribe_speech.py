@@ -21,12 +21,12 @@ from typing import Optional, Union
 
 import pytorch_lightning as pl
 import torch
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
 from nemo.collections.asr.metrics.rnnt_wer import RNNTDecodingConfig
 from nemo.collections.asr.metrics.wer import CTCDecodingConfig
-from nemo.collections.asr.models.ctc_models import EncDecCTCModel
+from nemo.collections.asr.models import EncDecCTCModel, EncDecHybridRNNTCTCModel
 from nemo.collections.asr.modules.conformer_encoder import ConformerChangeConfig
 from nemo.collections.asr.parts.utils.transcribe_utils import (
     compute_output_filename,
@@ -256,6 +256,15 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
 
     output_dir = os.path.dirname(cfg.output_filename) if cfg.output_filename else None
 
+    # Setup decoding config based on model type and decoder_type
+    with open_dict(cfg):
+        if isinstance(asr_model, EncDecCTCModel) or (
+            isinstance(asr_model, EncDecHybridRNNTCTCModel) and cfg.decoder_type == "ctc"
+        ):
+            cfg.decoding = cfg.ctc_decoding
+        else:
+            cfg.decoding = cfg.rnnt_decoding
+    
     for input_manifest in all_input_manifests:
         cfg.output_filename = Path(output_dir) / Path(input_manifest).name if output_dir else None
         cfg.dataset_manifest = input_manifest
@@ -269,7 +278,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                 for idx in range(len(manifest)):
                     manifest[idx]["text"] = "infer"
                 write_manifest(cfg.dataset_manifest, manifest)
-        
+
         # prepare audio filepaths and decide wether it's partical audio
         filepaths, partial_audio = prepare_audio_data(cfg)
 

@@ -20,12 +20,13 @@ cd /ws/chime7_optuna \
 && df -h \
 && export PYTHONPATH=${NEMO_ROOT}:${PYTHONPATH} \
 && echo "PYTHONPATH: ${PYTHONPATH}" \
-&& python optimize_full_ngc.py --n_trials ${NUM_TRIALS} --n_jobs 6 --output_log ${OPTUNA_LOG} \
+&& python optimize_full_ngc.py --n_trials ${NUM_TRIALS} --n_jobs 5 --output_log ${OPTUNA_LOG} \
 --manifest_path /ws/manifests_dev_ngc \
 --config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
 --vad_model_path /ws/chime7/checkpoints/frame_vad_chime7_acrobat.nemo \
 --msdd_model_path /ws/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt \
---batch_size ${DIAR_BATCH_SIZE}          
+--batch_size ${DIAR_BATCH_SIZE} \
+--temp_dir /raid/temp         
 EOF
 
 
