@@ -13,8 +13,9 @@ NUM_WORKERS=${9:-"8"}
 CHIME7_ROOT=${10:-"/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"} # For example, /data/chime7/chime7_official_cleaned
 NEMO_CHIME7_ROOT=${11:-"/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"} # For example, /media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7
 GPU_ID=${12:-"1"}
+ASR_MODEL_TAG=${13:-"_chime6_ft_rnnt"}
 
-asr_output_dir="${OUTPUT_DIR}/nemo_${SYSTEM}_chime6_ft_rnnt_ln${NORMALIZE_DB}"
+asr_output_dir="${OUTPUT_DIR}/nemo_${SYSTEM}_${ASR_MODEL_TAG}_ln${NORMALIZE_DB}"
 
 echo "************************************************************"
 echo "SCENARIOS:            $SCENARIOS"

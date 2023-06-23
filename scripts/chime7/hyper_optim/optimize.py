@@ -150,10 +150,10 @@ def objective_chime7_mcmsasr(
             diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
             outputs = diarizer_model.diarize(verbose=False)
             json_output_folder = os.path.join(curr_output_dir, config.diarizer.msdd_model.parameters.system_name, "pred_jsons_T")
-            metric = outputs[0][0]
-            DER = abs(metric)
-            logging.info(f"[optuna] Diarization DER: {DER}")
-            print(json_output_folder)
+            # metric = outputs[0][0]
+            # DER = abs(metric)
+            # logging.info(f"[optuna] Diarization DER: {DER}")
+            # print(json_output_folder)
             move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
             if "mixer6" in manifest_json.stem:
                 diarizer_model.clustering_embedding.clus_diar_model.delete_mc_embeddings()

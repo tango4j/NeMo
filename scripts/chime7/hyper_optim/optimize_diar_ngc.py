@@ -148,9 +148,9 @@ def objective_chime7_mcmsasr(
                 outputs = diarizer_model.diarize(verbose=False)
                 move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
 
-                metric = outputs[0][0]
-                DER = abs(metric)
-                logging.info(f"[optuna] Diarization DER: {DER}")
+                # metric = outputs[0][0]
+                # DER = abs(metric)
+                # logging.info(f"[optuna] Diarization DER: {DER}")
                 del diarizer_model
 
         WER = objective_gss_asr(

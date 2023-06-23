@@ -30,7 +30,7 @@ from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 from optimize_diar import diar_config_setup
 
-
+# NGC workspace: nemo_asr_eval
 NGC_WS_MOUNT="/ws"
 ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
 NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
@@ -120,6 +120,7 @@ def objective_chime7_mcmsasr(
     with tempfile.TemporaryDirectory(dir=temp_dir, prefix=f"trial-{trial.number}") as output_dir:
         logging.info(f"Start Trial {trial.number} with output_dir: {output_dir}")
         with tempfile.TemporaryDirectory(dir=temp_dir, prefix=f"trial-{trial.number}-diar") as local_output_dir:
+            start_time2 = time.time()
             for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
                 logging.info(f"Start Diarization on {manifest_json}")
                 scenario = manifest_json.stem.split("-")[0]
@@ -145,13 +146,11 @@ def objective_chime7_mcmsasr(
                 )
                 # Step:1-2 Run Diarization 
                 diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
-                outputs = diarizer_model.diarize(verbose=False)
+                diarizer_model.diarize(verbose=False)
                 move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
 
-                metric = outputs[0][0]
-                DER = abs(metric)
-                logging.info(f"[optuna] Diarization DER: {DER}")
                 del diarizer_model
+            logging.info(f"Diarization time taken for trial {trial.number}: {(time.time() - start_time2)/60:.2f} mins")
 
         WER = objective_gss_asr(
             trial,

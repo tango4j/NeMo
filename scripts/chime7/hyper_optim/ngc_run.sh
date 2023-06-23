@@ -6,8 +6,8 @@ CONTAINER=nvcr.io/nv-maglev/nemo:chime7-gss
 NGC_WORKSPACE=nemo_asr_eval
 NGC_JOB_NAME=optuna-msdd-gss-asr
 NGC_JOB_LABEL="ml___conformer"
-NGC_NODE_TYPE="dgx1v.32g.8.norm"
-NUM_TRIALS=100000
+NGC_NODE_TYPE="dgx1v.32g.2.norm"
+NUM_TRIALS=1000000
 
 NEMO_ROOT=/ws/nemo-gitlab-chime7
 OPTUNA_JOB_NAME=optuna-msdd-gss-asr
@@ -20,7 +20,7 @@ cd /ws/chime7_optuna \
 && df -h \
 && export PYTHONPATH=${NEMO_ROOT}:${PYTHONPATH} \
 && echo "PYTHONPATH: ${PYTHONPATH}" \
-&& python optimize_full_ngc.py --n_trials ${NUM_TRIALS} --n_jobs 5 --output_log ${OPTUNA_LOG} \
+&& python optimize_full_ngc.py --n_trials ${NUM_TRIALS} --n_jobs 1 --output_log ${OPTUNA_LOG} \
 --manifest_path /ws/manifests_dev_ngc \
 --config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
 --vad_model_path /ws/chime7/checkpoints/frame_vad_chime7_acrobat.nemo \
