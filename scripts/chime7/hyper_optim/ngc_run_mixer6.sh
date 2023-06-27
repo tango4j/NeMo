@@ -11,8 +11,8 @@ NUM_TRIALS=1000000
 
 NEMO_ROOT=/ws/nemo-gitlab-chime7
 
-OPTUNA_JOB_NAME=optuna-msdd-gss-asr2
-SCRIPT_NAME=optimize_full_ngc.py
+OPTUNA_JOB_NAME=optuna-msdd-gss-asr-mixer6
+SCRIPT_NAME=optimize_full_mixer6_ngc.py
 
 OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
 STORAGE=sqlite:///${OPTUNA_JOB_NAME}.db
@@ -23,7 +23,7 @@ cd /ws/chime7_optuna \
 && df -h \
 && export PYTHONPATH=${NEMO_ROOT}:${PYTHONPATH} \
 && echo "PYTHONPATH: ${PYTHONPATH}" \
-&& python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 6 --output_log ${OPTUNA_LOG} --storage ${STORAGE} \
+&& python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 6 --output_log ${OPTUNA_LOG} --storage ${STORAGE}\
 --manifest_path /ws/manifests_dev_ngc \
 --config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
 --vad_model_path /ws/chime7/checkpoints/frame_vad_chime7_acrobat.nemo \

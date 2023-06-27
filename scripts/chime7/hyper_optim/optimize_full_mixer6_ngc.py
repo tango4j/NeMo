@@ -37,8 +37,8 @@ NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
 CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
 ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
 
-SCENARIOS = "chime6 dipco mixer6"
-
+SCENARIOS = "mixer6"
+MANIFEST_PATTERN = "mixer6-dev.json"
 
 def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
                     bss_iterations, dereverb_filter_length):
@@ -171,7 +171,7 @@ def objective_chime7_mcmsasr(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--study_name", help="Name of study.", type=str, default="optuna_chime7")
-    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna-msdd-gss-asr.db")
+    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna-msdd-gss-asr-mixer6.db")
     parser.add_argument("--manifest_path", help="path to the manifest file", type=str)
     parser.add_argument(
         "--config_url",
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="temp/")
     parser.add_argument("--output_dir", help="path to store temporary files", type=str, default="speaker_outputs/")
-    parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="output.log")
+    parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="optuna-msdd-gss-asr-mixer6.log")
     parser.add_argument("--n_trials", help="Number of trials to run optuna", type=int, default=100)
     parser.add_argument("--n_jobs", help="Number of parallel jobs to run, set -1 to use all GPUs", type=int, default=-1)
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)

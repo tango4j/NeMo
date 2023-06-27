@@ -39,7 +39,7 @@ ESPNET_ROOT = "/home/heh/github/espnet/egs2/chime7_task1/asr1"
 CHIME7_ROOT = "/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"
 NEMO_CHIME7_ROOT = "/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"
 
-ASR_MODEL_PATH = "/media/data2/chime7-challenge/nemo_asr_chime6_finetuned_rnnt/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+ASR_MODEL_PATH = "/home/heh/nemo_asr_eval/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
 MSDD_MODEL_PATH = "/home/heh/nemo_asr_eval/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt"
 VAD_MODEL_PATH = "/home/heh/nemo_asr_eval/chime7/checkpoints/frame_vad_chime7_acrobat.nemo"
 
@@ -55,7 +55,7 @@ ASR_TAG="asr"
 
 def get_gss_command(gpu_id, diar_config, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
                     bss_iterations, dereverb_filter_length):
-    command = f"MAX_SEGMENT_LENGTH=200 MAX_BATCH_DURATION=200 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
+    command = f"MAX_SEGMENT_LENGTH=40 MAX_BATCH_DURATION=40 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
               f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
               f" {gpu_id} {diar_config} {DIAR_PARAM} {diar_base_dir} {output_dir} " \
               f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
@@ -136,28 +136,29 @@ def run_chime7_mcmsasr(
     speaker_output_dir = os.path.join(output_dir, "speaker_outputs")
     Path(speaker_output_dir).mkdir(parents=True, exist_ok=True)
     
+    # Step:1-1 Configure Diarization
+    config.diarizer.vad.model_path = vad_model_path
+    config.diarizer.msdd_model.model_path = msdd_model_path
+    config.diarizer.oracle_vad = False
+    config.diarizer.msdd_model.parameters.diar_eval_settings = [
+        (config.diarizer.collar, config.diarizer.ignore_overlap),
+    ]
+    config.diarizer.speaker_out_dir = speaker_output_dir if speaker_output_dir else output_dir # Directory to store speaker embeddings
+    config.diarizer.clustering.parameters.oracle_num_speakers = False
+    r_value = config.diarizer.speaker_embeddings.parameters.r_value
+    scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
+    config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
+
     for manifest_json in Path(diarizer_manifest_path).glob(manifest_pattern):
         scenario = manifest_json.stem.split("-")[0]
         print(f"Start Diarization on {manifest_json}")
         curr_output_dir = os.path.join(output_dir, scenario)
         Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-        # Step:1-1 Configure Diarization
-        config.diarizer.vad.model_path = vad_model_path
-        config.diarizer.msdd_model.model_path = msdd_model_path
-        config.diarizer.oracle_vad = False
-        config.diarizer.msdd_model.parameters.diar_eval_settings = [
-            (config.diarizer.collar, config.diarizer.ignore_overlap),
-        ]
-        config.diarizer.manifest_filepath = diarizer_manifest_path
         config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
-        config.diarizer.speaker_out_dir = speaker_output_dir if speaker_output_dir else output_dir # Directory to store speaker embeddings
-        config.prepared_manifest_vad_input = os.path.join(output_dir, 'manifest_vad.json')
-        config.diarizer.clustering.parameters.oracle_num_speakers = False
-        r_value = config.diarizer.speaker_embeddings.parameters.r_value
-        scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
-        config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
-
+        config.prepared_manifest_vad_input = os.path.join(curr_output_dir, 'manifest_vad.json')
+        config.diarizer.manifest_filepath = str(manifest_json)
+        
         # Step:1-2 Run Diarization 
         diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
         diarizer_model.diarize(verbose=False)
@@ -188,7 +189,7 @@ def run_chime7_mcmsasr(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
    
-    parser.add_argument("--manifest_path", help="path to the manifest dir", type=str)
+    parser.add_argument("--manifest_path", help="path to the manifest dir", type=str, default="./manifests_dev")
     parser.add_argument(
         "--config_url",
         help="path to the config yaml file to use",
@@ -213,10 +214,10 @@ if __name__ == "__main__":
         type=str,
         default=ASR_MODEL_PATH,
     )
-    parser.add_argument("--output_dir", help="path to store output files", type=str, default="./outputs")
-    parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)
+    parser.add_argument("--output_dir", help="path to store output files", type=str, default="/media/data3/chime7_outputs")
+    parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=11)
     parser.add_argument("--gpu", help="GPU ID to use", type=int, default=0)
-    parser.add_arguement("--pattern", help="manfiest patterns for glob", type=str, default=MANIFEST_PATTERN)
+    parser.add_argument("--pattern", help="manfiest patterns for glob", type=str, default=MANIFEST_PATTERN)
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -230,18 +231,16 @@ if __name__ == "__main__":
     wer = run_chime7_mcmsasr(
         config=config,
         gpu_id=args.gpu,
-        temp_dir=args.temp_dir,
         diarizer_manifest_path=args.manifest_path,
         msdd_model_path=args.msdd_model_path,
         vad_model_path=args.vad_model_path,
         asr_model_path=args.asr_model_path,
-        speaker_output_dir=args.output_dir,
+        output_dir=args.output_dir,
         mc_mask_min_db=config.gss.mc_mask_min_db,
         mc_postmask_min_db=config.gss.mc_postmask_min_db,
         bss_iterations=config.gss.bss_iterations,
         dereverb_filter_length=config.gss.dereverb_filter_length,
         normalize_db=config.diarizer.asr.parameters.normalize_db,
-        keep_speaker_output=config.keep_speaker_output,
         manifest_pattern=args.pattern,
     )
 

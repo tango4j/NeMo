@@ -54,7 +54,7 @@ done
 
 
 if [ $EVAL_CHIME == "True" ]; then
-    eval_results_dir="${OUTPUT_DIR}/eval_results_${SYSTEM}_chime6_ft_rnnt_ln${NORMALIZE_DB}"
+    eval_results_dir="${OUTPUT_DIR}/eval_results_${SYSTEM}_${ASR_MODEL_TAG}_ln${NORMALIZE_DB}"
     python ${NEMO_CHIME7_ROOT}/evaluation/evaluate_nemo_asr.py \
         --hyp_folder $asr_output_dir \
         --dasr_root $CHIME7_ROOT \
