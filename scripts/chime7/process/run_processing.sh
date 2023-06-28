@@ -3,7 +3,7 @@
 # This script aims to use diarization output, convert it to appropriate format,
 # run multichannel processing and prepare NeMo manifests for the outputs.
 #
-set -eou pipefail
+set -eo pipefail
 
 # Arguments
 # =========
@@ -75,6 +75,11 @@ then
     MAX_BATCH_DURATION=100
 fi
 
+if [ -z "$TOP_K" ]
+then
+    TOP_K=80
+fi
+
 
 # Diarization output
 # ==================
@@ -94,7 +99,7 @@ num_workers=4
 # parameters for channel selection
 sel_nj=16
 # select top 80% channels
-top_k=80
+top_k=$TOP_K
 # tunings to evaluate
 tunings=nemo_v1
 

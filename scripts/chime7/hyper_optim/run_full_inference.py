@@ -94,7 +94,7 @@ def run_gss_asr(
     eval_results = os.path.join(output_dir, f"eval_results_{diar_config}-{DIAR_PARAM}_{ASR_TAG}_ln{normalize_db}/macro_wer.txt")
     with open(eval_results, "r") as f:
         wer = float(f.read().strip())
-    print(f"Time taken for GSS-ASR: {time.time() - start_time:.2f}s")
+    print(f"Time taken for GSS-ASR: {(time.time() - start_time)/60:.2f}mins")
 
     return wer
 
@@ -148,7 +148,7 @@ def run_chime7_mcmsasr(
     r_value = config.diarizer.speaker_embeddings.parameters.r_value
     scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
     config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
-
+    start_time = time.time()
     for manifest_json in Path(diarizer_manifest_path).glob(manifest_pattern):
         scenario = manifest_json.stem.split("-")[0]
         print(f"Start Diarization on {manifest_json}")
@@ -168,7 +168,8 @@ def run_chime7_mcmsasr(
         del diarizer_model
         if not keep_speaker_output:
             shutil.rmtree(speaker_output_dir)
-    
+    print(f"Time taken for Diar: {(time.time() - start_time)/60:.2f}mins")
+
     print("Start GSS-ASR")
     WER = run_gss_asr(
         gpu_id=gpu_id,

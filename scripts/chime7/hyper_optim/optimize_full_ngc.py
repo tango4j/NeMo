@@ -14,21 +14,21 @@
 
 """Optimize the Neural Diarizer hyper-parameters onto your dev set using Optuna."""
 
-from pathlib import Path
 import argparse
 import logging
 import os
 import tempfile
 import time
+from pathlib import Path
 from multiprocessing import Process
-import torch
+from typing import Optional
 
+import torch
 import optuna
 from omegaconf import OmegaConf
 
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
-from optimize_diar import diar_config_setup
 
 # NGC workspace: nemo_asr_eval
 NGC_WS_MOUNT="/ws"
@@ -39,10 +39,63 @@ ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSet
 
 SCENARIOS = "chime6 dipco mixer6"
 
+def scale_weights(r, K):
+    return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
+
+def diar_config_setup(
+    trial, 
+    config,
+    diarizer_manifest_path: str,
+    msdd_model_path: str,
+    vad_model_path: str,
+    output_dir: str,
+    speaker_output_dir: Optional[str] = None,
+    tune_vad: bool=True,
+    ):
+    
+    config.diarizer.vad.model_path = vad_model_path
+    config.diarizer.msdd_model.model_path = msdd_model_path
+    config.diarizer.oracle_vad = False
+    config.diarizer.msdd_model.parameters.diar_eval_settings = [
+        (config.diarizer.collar, config.diarizer.ignore_overlap),
+    ]
+    config.diarizer.manifest_filepath = diarizer_manifest_path
+    config.diarizer.out_dir = output_dir  # Directory to store intermediate files and prediction outputs
+    config.diarizer.speaker_out_dir = speaker_output_dir if speaker_output_dir else output_dir # Directory to store speaker embeddings
+    config.prepared_manifest_vad_input = os.path.join(output_dir, 'manifest_vad.json')
+    
+    config.diarizer.clustering.parameters.oracle_num_speakers = False
+    
+    # VAD Optimization
+    config.diarizer.vad.model_path = vad_model_path
+    if tune_vad: 
+        config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.2, 1.2, step=0.05)
+        config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.0, 0.2, step=0.05), 3)
+        config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.0, 0.5, step=0.05), 3)
+        config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.0, 0.5, step=0.05), 2)
+        config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.0, 1.2, step=0.05), 2)
+    else: 
+        config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.04, 0.04, step=0.005)
+        config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.1, 0.1, step=0.01), 2)
+        config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.1, 0.1, step=0.01), 2)
+        config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.2, 0.2, step=0.05), 2)
+        config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.25, 0.25, step=0.05), 2)
+
+    # MSDD Optimization
+    config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.2, high=0.9, step=0.05)]
+    
+    # Clustering Optimization
+    config.diarizer.clustering.parameters.max_rp_threshold = round(trial.suggest_float("max_rp_threshold", low=0.05, high=0.25, step=0.01), 2)
+    config.diarizer.clustering.parameters.sparse_search_volume = trial.suggest_int("sparse_search_volume", low=25, high=25, step=1)
+    r_value = round(trial.suggest_float("r_value", 0.05, 2.25, step=0.05), 4)
+    scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
+    config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
+    return config
+
 
 def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
-                    bss_iterations, dereverb_filter_length):
-    command = f"MAX_SEGMENT_LENGTH=40 MAX_BATCH_DURATION=40 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
+                    bss_iterations, dereverb_filter_length, top_k):
+    command = f"MAX_SEGMENT_LENGTH=40 MAX_BATCH_DURATION=40 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} TOP_K={top_k}" \
               f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
               f" {gpu_id} {diar_config} {diar_param} {diar_base_dir} {output_dir} " \
               f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
@@ -70,8 +123,9 @@ def objective_gss_asr(
     bss_iterations = trial.suggest_int("bss_iterations", 5, 30, 5)
     dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 20, 5)
     normalize_db = trial.suggest_int("normalize_db", -35, -20, 5)
-    
-    command_gss = get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,  bss_iterations, dereverb_filter_length)
+    top_k = trial.suggest_int("top_k", 40, 100, 20)
+
+    command_gss = get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,  bss_iterations, dereverb_filter_length, top_k)
     code = os.system(command_gss)
     if code != 0:
         raise RuntimeError(f"command failed: {command_gss}")
