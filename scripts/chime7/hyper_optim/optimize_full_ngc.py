@@ -118,7 +118,7 @@ def objective_gss_asr(
         diar_base_dir: str,
         diar_param: str = "T",
 ):
-    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -60, -5, 10)
+    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -100, -60, 20)
     mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -9, 0, 3)
     bss_iterations = trial.suggest_int("bss_iterations", 5, 30, 5)
     dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 20, 5)
