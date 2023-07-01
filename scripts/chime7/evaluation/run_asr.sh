@@ -13,7 +13,11 @@ subset=dev
 
 for tuning in $tunings
 do
-    data_dir=${PWD}/../process/processed/${diarization_config}/${scenario}/${subset}/${tuning}/
+    data_dir=$(dirname ${PWD})/process/processed_0626/${diarization_config}/${scenario}/${subset}/${tuning}
+
+    # Prepare manifests
+    python ../process/prepare_nemo_manifests_for_processed.py --data-dir $data_dir
+
     echo "--"
     echo "Transcribe"
     echo "data_dir: ${data_dir}"
