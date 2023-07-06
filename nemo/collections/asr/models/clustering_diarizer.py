@@ -30,7 +30,6 @@ from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
 
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.parts.utils.vad_utils import (
-    MultichannelVADProcessor,
     generate_vad_frame_pred,
     generate_vad_segment_table,
     prepare_manifest,

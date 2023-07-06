@@ -135,7 +135,10 @@ def create_multichannel_manifest(
         duration = None
         audio_duration_list = []
         for audio_line in tqdm.tqdm(audio_line_list, desc=f"Measuring multichannel audio duration for {uid} {count}/{total_file_count}", unit=" files"):
-            duration = sox.file_info.duration(audio_line)
+            try:
+                duration = sox.file_info.duration(audio_line)
+            except:
+                import ipdb; ipdb.set_trace()
             audio_duration_list.append(duration)
         min_duration, max_duration = min(audio_duration_list), max(audio_duration_list)
         if min_duration < (uem_abs_end - uem_abs_stt):
@@ -326,6 +329,8 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
         datasets = ['chime6']
     elif subset in ['train_intv', 'train_call']:
         datasets = ['mixer6']
+    elif subset == 'eval':
+        datasets = ['chime6', 'dipco', 'mixer6']
         
     for dataset in datasets:
         dataset_dir = os.path.join(data_dir, dataset)
@@ -486,7 +491,7 @@ if __name__ == '__main__':
         '--data-dir', type=str, required=True, help='Directory with CHiME-7 data',
     )
     parser.add_argument(
-        '--subset', choices=['dev', 'train', 'train_intv', 'train_call'], default='dev', help='Data subset',
+        '--subset', choices=['dev', 'train', 'train_intv', 'train_call', 'eval'], default='dev', help='Data subset',
     )
     parser.add_argument(
         '--output-dir', type=str, required=True, help='Output dir',
