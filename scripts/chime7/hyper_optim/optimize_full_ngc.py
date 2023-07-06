@@ -69,7 +69,7 @@ def diar_config_setup(
     # VAD Optimization
     config.diarizer.vad.model_path = vad_model_path
     if tune_vad: 
-        config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.2, 1.2, step=0.05)
+        config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.03, 0.25, step=0.01)
         config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.0, 0.2, step=0.05), 3)
         config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.0, 0.5, step=0.05), 3)
         config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.0, 0.5, step=0.05), 2)
@@ -83,6 +83,7 @@ def diar_config_setup(
 
     # MSDD Optimization
     config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.2, high=0.9, step=0.05)]
+    config.diarizer.msdd_model.parameters.global_average_mix_ratio = trial.suggest_float("global_average_mix_ratio", low=0.6, high=1.0, step=0.05)
     
     # Clustering Optimization
     config.diarizer.clustering.parameters.max_rp_threshold = round(trial.suggest_float("max_rp_threshold", low=0.05, high=0.25, step=0.01), 2)
