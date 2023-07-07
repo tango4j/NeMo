@@ -49,6 +49,11 @@ def enhance_cuts(
     mc_mask_min_db: float = -60,
     mc_postmask_min_db: float = 0,
     dereverb_filter_length: int = 10,
+    dereverb_prediction_delay: int = 2,
+    dereverb_num_iterations: int = 3,
+    mc_filter_type: str = 'pmwf',
+    mc_filter_num_iterations: int = 5,
+    mc_filter_postfilter: Optional[str] = 'ban',
 ):
     logger.info('Enhance cuts')
     logger.info('\tenhancer_impl:      %s', enhancer_impl)
@@ -71,6 +76,11 @@ def enhance_cuts(
     logger.info('\tmc_mask_min_db:     %f', mc_mask_min_db)
     logger.info('\tmc_postmask_min_db: %f', mc_postmask_min_db)
     logger.info('\tdereverb_filter_length: %d', dereverb_filter_length)
+    logger.info('\tdereverb_prediction_delay: %d', dereverb_prediction_delay)
+    logger.info('\tdereverb_num_iterations:   %d', dereverb_num_iterations)
+    logger.info('\tmc_filter_type:            %s', mc_filter_type)
+    logger.info('\tmc_filter_num_iterations:  %d', mc_filter_num_iterations)
+    logger.info('\tmc_filter_postfilter:      %s', mc_filter_postfilter)
 
     # ########################################
     # Setup as in gss.bin.modes.enhance.cuts_
@@ -113,14 +123,15 @@ def enhance_cuts(
         enhancer = FrontEnd_v1(
             stft_fft_length=1024,
             stft_hop_length=256,
-            dereverb_prediction_delay=2,
+            dereverb_prediction_delay=dereverb_prediction_delay,
             dereverb_filter_length=dereverb_filter_length,
-            dereverb_num_iterations=3,
+            dereverb_num_iterations=dereverb_num_iterations,
             bss_iterations=bss_iterations,
-            mc_filter_type='pmwf',
+            mc_filter_type=mc_filter_type,
             mc_filter_beta=0,
             mc_filter_rank='one',
-            mc_filter_postfilter='ban',
+            mc_filter_num_iterations=mc_filter_num_iterations,
+            mc_filter_postfilter=mc_filter_postfilter,
             mc_ref_channel='max_snr',
             mc_mask_min_db=mc_mask_min_db,
             mc_postmask_min_db=mc_postmask_min_db,
@@ -224,7 +235,12 @@ if __name__ == '__main__':
     )
     parser.add_argument('--dereverb-filter-length', type=int, default=10, help='Dereverb filter length')
     parser.add_argument('--mc-mask-min-db', type=float, default=-60, help='Minimum mask value in dB')
-    parser.add_argument('--mc-postmask-min-db', type=float, default=0, help='Minimum postmask value in dB')
+    parser.add_argument('--mc-postmask-min-db', type=float, default=0, help='Minimum postmask value in dB')    
+    parser.add_argument('--dereverb-prediction-delay', type=int, default=2, help='Prediction delay for dereverb')
+    parser.add_argument('--dereverb-num-iterations', type=int, default=3, help='Number of iterations for dereverb')
+    parser.add_argument('--mc-filter-type', type=str, default='pmwf', help='Filter type')
+    parser.add_argument('--mc-filter-num-iterations', type=int, default=5, help='Number of iterations for iterative filters')
+    parser.add_argument('--mc-filter-postfilter', type=lambda s: None if s == 'None' else str(s), default='ban', help='Postfilter type')
     args = parser.parse_args()
 
     enhance_cuts(
@@ -248,4 +264,9 @@ if __name__ == '__main__':
         dereverb_filter_length=args.dereverb_filter_length,
         mc_mask_min_db=args.mc_mask_min_db,
         mc_postmask_min_db=args.mc_postmask_min_db,
+        dereverb_prediction_delay=args.dereverb_prediction_delay,
+        dereverb_num_iterations=args.dereverb_num_iterations,
+        mc_filter_type=args.mc_filter_type,
+        mc_filter_num_iterations=args.mc_filter_num_iterations,
+        mc_filter_postfilter=args.mc_filter_postfilter,
     )
