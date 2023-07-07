@@ -3,19 +3,19 @@
 # This script aims to use diarization output, convert it to appropriate format,
 # run multichannel processing and prepare NeMo manifests for the outputs.
 #
-set -eo pipefail
+set -eou pipefail
 
 # Arguments
 # =========
 SCENARIOS=${1:-"chime6 dipco mixer6"} # select scenarios to run
 GPU_ID=${2:-1} # for example, 0 or 1
 DIARIZATION_CONFIG=${3:-system_B_V05_D03} # for example, system_vA01, system_vA04D, 
-DIARIZATION_PARAMS=${4:-"T0.5"}
-DIARIZATION_BASE_DIR=${5:-"/media/data2/chime7-challenge/chime7_diar_results"} # for example, ${HOME}/scratch/chime7/chime7_diar_results
+DIARIZATION_PARAMS=${4:-"pred_jsons_T"}
+DIARIZATION_BASE_DIR=${5:-"/home/ajukic/scratch/chime7/chime7_diar_results"} # for example, ${HOME}/scratch/chime7/chime7_diar_results
 OUTPUT_ROOT=${6:-"."}
-ESPNET_ROOT=${7:-"/home/heh/github/espnet/egs2/chime7_task1/asr1"}  # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
-CHIME7_ROOT=${8:-"/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"}  # For example, /data/chime7/chime7_official_cleaned
-NEMO_CHIME7_ROOT=${9:-"/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"} # For example, /media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7
+ESPNET_ROOT=${7:-"/home/ajukic/work/repos/espnet-mirror/egs2/chime7_task1/asr1"}  # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
+CHIME7_ROOT=${8:-"/data/chime7/chime7_official_cleaned"}  # For example, /data/chime7/chime7_official_cleaned
+NEMO_CHIME7_ROOT=${9:-"/home/ajukic/work/repos/nemo-taejin/scripts/chime7"} # For example, /media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7
 
 echo "************************************************************"
 echo "SCENARIOS:            $SCENARIOS"
@@ -48,38 +48,61 @@ fi
 if [ -z "$BSS_ITERATION" ]
 then
     BSS_ITERATION=5
+else
+    echo "BSS_ITERATION: already set to $BSS_ITERATION"
 fi
 
 if [ -z "$MC_MASK_MIN_DB" ]
 then
     MC_MASK_MIN_DB=-60
+else
+    echo "MC_MASK_MIN_DB: already set to $MC_MASK_MIN_DB"
 fi
 
 if [ -z "$MC_POSTMASK_MIN_DB" ]
 then
     MC_POSTMASK_MIN_DB=-9
+else
+    echo "MC_POSTMASK_MIN_DB: already set to $MC_POSTMASK_MIN_DB"
 fi
 
 if [ -z "$DEREVERB_FILTER_LENGTH" ]
 then
     DEREVERB_FILTER_LENGTH=5
+else
+    echo "DEREVERB_FILTER_LENGTH: already set to $DEREVERB_FILTER_LENGTH"
 fi
 
 if [ -z "$MAX_SEGMENT_LENGTH" ]
 then
     MAX_SEGMENT_LENGTH=100
+else
+    echo "MAX_SEGMENT_LENGTH: already set to $MAX_SEGMENT_LENGTH"
 fi
 
 if [ -z "$MAX_BATCH_DURATION" ]
 then
     MAX_BATCH_DURATION=100
+else
+    echo "MAX_BATCH_DURATION: already set to $MAX_BATCH_DURATION"
 fi
 
 if [ -z "$TOP_K" ]
 then
     TOP_K=80
+else
+    echo "TOP_K: already set to $TOP_K"
 fi
 
+echo ""
+echo ""
+echo "BSS_ITERATION:          ${BSS_ITERATION}"
+echo "MC_MASK_MIN_DB:         ${MC_MASK_MIN_DB}"
+echo "MC_POSTMASK_MIN_DB:     ${MC_POSTMASK_MIN_DB}"
+echo "DEREVERB_FILTER_LENGTH: ${DEREVERB_FILTER_LENGTH}"
+echo "MAX_SEGMENT_LENGTH:     ${MAX_SEGMENT_LENGTH}"
+echo "MAX_BATCH_DURATION:     ${MAX_BATCH_DURATION}"
+echo "TOP_K:                  ${TOP_K}"
 
 # Diarization output
 # ==================
@@ -101,7 +124,7 @@ sel_nj=16
 # select top 80% channels
 top_k=$TOP_K
 # tunings to evaluate
-tunings=nemo_v1
+tunings="nemo_v1_wmpdr nemo_v1"
 
 # Alignment
 # =========

@@ -14,9 +14,11 @@ def main(diarization_dir: str, diarization_params: str, output_dir: str = "", su
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
     diarization_system = diarization_dir.split('/')[-1]
+    print('diarization_dir:', diarization_dir)
 
     if output_dir == "":
         output_dir = f'./alignments/{diarization_system}-{diarization_params}'
+    print('output_dir:', output_dir)
 
     scenario_dirs = glob.glob(diarization_dir + '/*')
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'

@@ -25,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-ENHANCER_IMPL_CHOICES = ['gss', 'nemo_v1']
+ENHANCER_IMPL_CHOICES = ['gss', 'nemo_v1', 'nemo_v1_wmpdr']
 
 
 def enhance_cuts(
@@ -119,6 +119,26 @@ def enhance_cuts(
             bss_iterations=bss_iterations,
             mc_filter_type='pmwf',
             mc_filter_beta=0,
+            mc_filter_rank='one',
+            mc_filter_postfilter='ban',
+            mc_ref_channel='max_snr',
+            mc_mask_min_db=mc_mask_min_db,
+            mc_postmask_min_db=mc_postmask_min_db,
+            use_dtype=torch.cfloat,
+            cuts=cuts,
+            context_duration=context_duration,
+            activity_garbage_class=use_garbage_class,
+        )
+    elif enhancer_impl == 'nemo_v1_wmpdr':
+        enhancer = FrontEnd_v1(
+            stft_fft_length=1024,
+            stft_hop_length=256,
+            dereverb_prediction_delay=2,
+            dereverb_filter_length=dereverb_filter_length,
+            dereverb_num_iterations=3,
+            bss_iterations=bss_iterations,
+            mc_filter_type='wmpdr',
+            mc_filter_num_iterations=5,
             mc_filter_rank='one',
             mc_filter_postfilter='ban',
             mc_ref_channel='max_snr',
