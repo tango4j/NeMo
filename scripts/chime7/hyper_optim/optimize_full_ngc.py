@@ -83,7 +83,6 @@ def diar_config_setup(
     # MSDD Optimization
     config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.2, high=0.9, step=0.05)]
     config.diarizer.msdd_model.parameters.global_average_mix_ratio = trial.suggest_float("global_average_mix_ratio", low=0.6, high=1.0, step=0.05)
-
     # Clustering Optimization
     config.diarizer.clustering.parameters.max_rp_threshold = round(trial.suggest_float("max_rp_threshold", low=0.05, high=0.25, step=0.01), 2)
     config.diarizer.clustering.parameters.sparse_search_volume = trial.suggest_int("sparse_search_volume", low=25, high=25, step=1)
