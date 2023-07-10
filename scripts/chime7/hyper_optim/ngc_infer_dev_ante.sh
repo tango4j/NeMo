@@ -4,15 +4,16 @@ set -x
 
 CONTAINER=nvcr.io/nv-maglev/nemo:chime7-gss
 NGC_WORKSPACE=nemo_asr_eval
-NGC_JOB_NAME=optuna-msdd-gss-as5-t221
 NGC_JOB_LABEL="ml___conformer"
 NGC_NODE_TYPE="dgx1v.32g.8.norm"
 NUM_TRIALS=1
 
 NEMO_ROOT=/ws/nemo-gitlab-chime7
 
-OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-t315
-SCRIPT_NAME=optimize_full_ngc_debug.py
+NUMBER=3
+NGC_JOB_NAME=optuna-msdd-gss-as5-t221-ante${NUMBER}
+OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-t221-ante${NUMBER}
+SCRIPT_NAME=optimize_full_ngc_debug_ante${NUMBER}.py
 
 OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
 STORAGE=sqlite:///${OPTUNA_JOB_NAME}.db

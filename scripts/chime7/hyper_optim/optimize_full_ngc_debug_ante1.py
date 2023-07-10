@@ -30,7 +30,7 @@ from omegaconf import OmegaConf
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
-OUTPUT_DIR = "/ws/chime7_outputs/optuna-msdd-gss-asr5-trial221"
+OUTPUT_DIR = "/ws/chime7_outputs/optuna-msdd-gss-asr5-trial221-ante1"
 
 # NGC workspace: nemo_asr_eval
 NGC_WS_MOUNT="/ws"
@@ -118,16 +118,16 @@ def objective_gss_asr(
         scenarios: str = SCENARIOS,
         subsets: str = SUBSETS,
     ):
-    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -160, -160, 20)
+    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -60, -60, 20)
     mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -12, -12, 3)
     bss_iterations = trial.suggest_int("bss_iterations", 5, 5, 5)
-    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 5, 5)
+    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 10, 10, 5)
     normalize_db = trial.suggest_int("normalize_db", -20, -20, 5)
-    top_k = trial.suggest_int("top_k", 60, 60, 20)
+    top_k = trial.suggest_int("top_k", 100, 100, 20)
 
     # New parameters
-    dereverb_prediction_delay = trial.suggest_categorical("dereverb_prediction_delay", choices=[3])
-    dereverb_num_iterations = trial.suggest_categorical("dereverb_num_iterations", choices=[5])
+    dereverb_prediction_delay = trial.suggest_categorical("dereverb_prediction_delay", choices=[2])
+    dereverb_num_iterations = trial.suggest_categorical("dereverb_num_iterations", choices=[3])
     mc_filter_type = trial.suggest_categorical("mc_filter_type", choices=['pmwf'])
     mc_filter_postfilter = trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
 
@@ -185,8 +185,6 @@ def objective_chime7_mcmsasr(
     temp_dir: str,
     keep_mixer6: bool = False,
     tune_vad: bool = True,
-    subset: str = SUBSETS,
-    pattern: str = "*-dev.json",
 ):
     """
     [Note] Diarizaiton out `outputs`
@@ -195,7 +193,7 @@ def objective_chime7_mcmsasr(
     itemized_errors = (DER, CER, FA, MISS)
     """
     start_time = time.time()
-    output_dir = temp_dir
+    output_dir = OUTPUT_DIR
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     if True:
         logging.info(f"Start Trial {trial.number} with output_dir: {output_dir}")
@@ -213,7 +211,7 @@ def objective_chime7_mcmsasr(
         )
         if True:
             start_time2 = time.time()
-            for manifest_json in Path(diarizer_manifest_path).glob(pattern):
+            for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
                 logging.info(f"Start Diarization on {manifest_json}")
                 scenario = manifest_json.stem.split("-")[0]
                 curr_output_dir = os.path.join(output_dir, scenario)
@@ -246,7 +244,6 @@ def objective_chime7_mcmsasr(
             output_dir,
             diar_base_dir=output_dir,
             diar_config=config.diarizer.msdd_model.parameters.system_name,
-            subsets=subset,
         )
     logging.info(f"Time taken for trial {trial.number}: {(time.time() - start_time)/60:.2f} mins")    
     return WER
@@ -275,7 +272,7 @@ if __name__ == "__main__":
         type=str,
         default="diar_msdd_telephonic",
     )
-    parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default=OUTPUT_DIR)
+    parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="temp/")
     parser.add_argument("--output_dir", help="path to store temporary files", type=str, default="speaker_outputs/")
     parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="output.log")
     parser.add_argument("--n_trials", help="Number of trials to run optuna", type=int, default=100)
@@ -283,8 +280,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)
     parser.add_argument("--keep_mixer6", help="Keep mixer6 in the evaluation", action="store_true")
     parser.add_argument("--tune_vad", help="whether to tune VAD", type=bool, default=True)
-    parser.add_argument("--subsets", help="Subsets to run on", type=str, default=SUBSETS)
-    parser.add_argument("--pattern", help="Pattern to match manifest files", type=str, default="*-dev.json")
 
     args = parser.parse_args()
     os.makedirs(args.temp_dir, exist_ok=True)
@@ -306,8 +301,6 @@ if __name__ == "__main__":
         speaker_output_dir=args.output_dir,
         keep_mixer6=args.keep_mixer6,
         tune_vad=args.tune_vad,
-        subset=args.subsets,
-        pattern=args.pattern,
     )
 
     def optimize(gpu_id=0):
