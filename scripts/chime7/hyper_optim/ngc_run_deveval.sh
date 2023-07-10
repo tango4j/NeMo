@@ -2,32 +2,38 @@
 
 set -x
 
-CONTAINER=nvcr.io/nv-maglev/nemo:chime7-gss
+CONTAINER=nvcr.io/nvidia/nemo:22.12
 NGC_WORKSPACE=nemo_asr_eval
-NGC_JOB_NAME=optuna-msdd-gss-as5-t221
 NGC_JOB_LABEL="ml___conformer"
 NGC_NODE_TYPE="dgx1v.32g.8.norm"
-NUM_TRIALS=1
+NUM_TRIALS=1000000
 
 NEMO_ROOT=/ws/nemo-gitlab-chime7
 
-OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-t315
-SCRIPT_NAME=optimize_full_ngc_debug.py
+dereberb_version="d03"
+OPTUNA_JOB_NAME="optuna-full-dev-d03-deveval-${dereberb_version}"
+NGC_JOB_NAME=optuna-full-deveval-${dereberb_version}
 
+SCRIPT_NAME=optimize_full_ngc_deveval.py
+
+PATTERN="*-eval-${dereberb_version}.json"  # dev is handled by the python script with "*-dev.json"
 OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
 STORAGE=sqlite:///${OPTUNA_JOB_NAME}.db
 DIAR_BATCH_SIZE=11
-
-# --msdd_model_path /ws/chime7/checkpoints/mc-finetune-MSDDv2-chime6-train_firefly_e57.ckpt \
-# --msdd_model_path /ws/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt \
 
 read -r -d '' cmd <<EOF
 cd /ws/chime7_optuna \
 && df -h \
 && export PYTHONPATH=${NEMO_ROOT}:${PYTHONPATH} \
-&& echo "PYTHONPATH: ${PYTHONPATH}" \
-&& python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 1 --output_log ${OPTUNA_LOG} --storage ${STORAGE} \
---manifest_path /ws/manifests_dev_ngc \
+&& pip install espnet \
+&& git clone https://github.com/espnet/espnet.git /workspace/espnet \
+&& pip uninstall -y 'cupy-cuda118' \
+&& pip install --no-cache-dir -f https://pip.cupy.dev/pre/ "cupy-cuda11x[all]==12.1.0" \
+&& pip install git+http://github.com/desh2608/gss \
+&& pip install optuna \
+&& pip install lhotse==1.14.0 \
+&& pip install --upgrade jiwer \
+&& python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 4 --output_log ${OPTUNA_LOG} --storage ${STORAGE} --pattern ${PATTERN} \
 --config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
 --vad_model_path /ws/chime7/checkpoints/frame_vad_chime7_acrobat.nemo \
 --msdd_model_path /ws/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt \

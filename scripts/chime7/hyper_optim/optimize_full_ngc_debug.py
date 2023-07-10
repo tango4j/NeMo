@@ -14,21 +14,23 @@
 
 """Optimize the Neural Diarizer hyper-parameters onto your dev set using Optuna."""
 
-from pathlib import Path
 import argparse
 import logging
 import os
 import tempfile
 import time
+from pathlib import Path
 from multiprocessing import Process
-import torch
+from typing import Optional
 
+import torch
 import optuna
 from omegaconf import OmegaConf
 
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
-from optimize_diar import diar_config_setup
+
+OUTPUT_DIR = "/ws/chime7_outputs/optuna-msdd-gss-asr5-trial221r2"
 
 # NGC workspace: nemo_asr_eval
 NGC_WS_MOUNT="/ws"
@@ -37,21 +39,70 @@ NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
 CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
 ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
 
-SCENARIOS = "mixer6"
-MANIFEST_PATTERN = "mixer6-dev.json"
+SCENARIOS = "chime6 dipco mixer6"
+SUBSETS = "dev"
+
+def scale_weights(r, K):
+    return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
+
+def diar_config_setup(
+    trial, 
+    config,
+    diarizer_manifest_path: str,
+    msdd_model_path: str,
+    vad_model_path: str,
+    output_dir: str,
+    speaker_output_dir: Optional[str] = None,
+    tune_vad: bool=True,
+    ):
+    
+    config.diarizer.vad.model_path = vad_model_path
+    config.diarizer.msdd_model.model_path = msdd_model_path
+    config.diarizer.oracle_vad = False
+    config.diarizer.msdd_model.parameters.diar_eval_settings = []
+    config.diarizer.manifest_filepath = diarizer_manifest_path
+    config.diarizer.out_dir = output_dir  # Directory to store intermediate files and prediction outputs
+    config.diarizer.speaker_out_dir = speaker_output_dir if speaker_output_dir else output_dir # Directory to store speaker embeddings
+    config.prepared_manifest_vad_input = os.path.join(output_dir, 'manifest_vad.json')
+    
+    config.diarizer.clustering.parameters.oracle_num_speakers = False
+    
+    # VAD Optimization
+    config.diarizer.vad.model_path = vad_model_path
+   
+    config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.23, 0.23, step=0.005)
+    config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.15, 0.15, step=0.01), 2)
+    config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.35, 0.35, step=0.01), 2)
+    config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.4, 0.4, step=0.05), 2)
+    config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.95, 0.95, step=0.05), 2)
+
+    # MSDD Optimization
+    config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.85, high=0.85, step=0.05)]
+    config.diarizer.msdd_model.parameters.global_average_mix_ratio = trial.suggest_float("global_average_mix_ratio", low=0.75, high=0.75, step=0.05)
+
+    # Clustering Optimization
+    config.diarizer.clustering.parameters.max_rp_threshold = round(trial.suggest_float("max_rp_threshold", low=0.05, high=0.05, step=0.01), 2)
+    config.diarizer.clustering.parameters.sparse_search_volume = trial.suggest_int("sparse_search_volume", low=25, high=25, step=1)
+    r_value = round(trial.suggest_float("r_value", 1.7, 1.7, step=0.05), 4)
+    scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
+    config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
+    return config
+
 
 def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
-                    bss_iterations, dereverb_filter_length):
-    command = f"MAX_SEGMENT_LENGTH=40 MAX_BATCH_DURATION=40 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
-              f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
+                    bss_iterations, dereverb_filter_length, top_k, scenarios=SCENARIOS, subsets=SUBSETS, 
+                    dereverb_prediction_delay=2, dereverb_num_iterations=3, mc_filter_type="pmwf", mc_filter_postfilter="ban"):
+    command = f"MAX_SEGMENT_LENGTH=1000 MAX_BATCH_DURATION=20 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} TOK_K={top_k}" \
+              f" dereverb_prediction_delay={dereverb_prediction_delay} dereverb_num_iterations={dereverb_num_iterations} mc_filter_type={mc_filter_type} mc_filter_postfilter={mc_filter_postfilter} " \
+              f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{scenarios}' " \
               f" {gpu_id} {diar_config} {diar_param} {diar_base_dir} {output_dir} " \
-              f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
+              f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT} '{subsets}'"
               
     return command
 
 
-def get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir):
-    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{SCENARIOS}' dev " \
+def get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir, scenarios=SCENARIOS, subsets=SUBSETS):
+    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{scenarios}' '{subsets}' " \
               f"{diar_config}-{diar_param} {output_dir}/processed {output_dir} {normalize_db} {ASR_MODEL_PATH} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id}"
 
     return command
@@ -64,18 +115,44 @@ def objective_gss_asr(
         diar_config: str,
         diar_base_dir: str,
         diar_param: str = "T",
-):
-    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -60, -5, 10)
-    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -9, 0, 3)
-    bss_iterations = trial.suggest_int("bss_iterations", 5, 30, 5)
-    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 20, 5)
-    normalize_db = trial.suggest_int("normalize_db", -35, -20, 5)
-    
-    command_gss = get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,  bss_iterations, dereverb_filter_length)
+        scenarios: str = SCENARIOS,
+        subsets: str = SUBSETS,
+    ):
+    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -160, -160, 20)
+    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -12, -12, 3)
+    bss_iterations = trial.suggest_int("bss_iterations", 5, 5, 5)
+    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 5, 5)
+    normalize_db = trial.suggest_int("normalize_db", -20, -20, 5)
+    top_k = trial.suggest_int("top_k", 60, 60, 20)
+
+    # New parameters
+    dereverb_prediction_delay = trial.suggest_categorical("dereverb_prediction_delay", choices=[3])
+    dereverb_num_iterations = trial.suggest_categorical("dereverb_num_iterations", choices=[5])
+    mc_filter_type = trial.suggest_categorical("mc_filter_type", choices=['pmwf'])
+    mc_filter_postfilter = trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
+
+    command_gss = get_gss_command(
+        gpu_id, 
+        diar_config, 
+        diar_param, 
+        diar_base_dir, 
+        output_dir, 
+        mc_mask_min_db, 
+        mc_postmask_min_db,  
+        bss_iterations, 
+        dereverb_filter_length, 
+        top_k, 
+        scenarios, 
+        subsets, 
+        dereverb_prediction_delay, 
+        dereverb_num_iterations, 
+        mc_filter_type, 
+        mc_filter_postfilter
+    )    
     code = os.system(command_gss)
     if code != 0:
         raise RuntimeError(f"command failed: {command_gss}")
-    command_asr = get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir)
+    command_asr = get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir, scenarios, subsets)
     code = os.system(command_asr)
     if code != 0:
         raise RuntimeError(f"command failed: {command_asr}")
@@ -83,9 +160,8 @@ def objective_gss_asr(
     with open(eval_results, "r") as f:
         wer = float(f.read().strip())
     
-    logging.info(f"-------------WER={wer:.4f}--------------------")
-    logging.info(f"Trial: {trial.number}")
-    logging.info(f"mc_mask_min_db: {mc_mask_min_db}, mc_postmask_min_db: {mc_postmask_min_db}, bss_iterations: {bss_iterations}, dereverb_filter_length: {dereverb_filter_length}, normalize_db: {normalize_db}")
+    logging.info(f"----------------------------------------------")
+    logging.info(f"Trial: {trial.number}, WER={wer:.4f}")
     logging.info("-----------------------------------------------")
 
     return wer
@@ -117,7 +193,9 @@ def objective_chime7_mcmsasr(
     itemized_errors = (DER, CER, FA, MISS)
     """
     start_time = time.time()
-    with tempfile.TemporaryDirectory(dir=temp_dir, prefix=f"trial-{trial.number}") as output_dir:
+    output_dir = OUTPUT_DIR
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    if True:
         logging.info(f"Start Trial {trial.number} with output_dir: {output_dir}")
         config.device = f"cuda:{gpu_id}"
         # Step:1-1 Configure Diarization
@@ -131,8 +209,7 @@ def objective_chime7_mcmsasr(
             speaker_output_dir=output_dir,
             tune_vad=tune_vad,
         )
-
-        with tempfile.TemporaryDirectory(dir=temp_dir, prefix=f"trial-{trial.number}-diar") as local_output_dir:
+        if True:
             start_time2 = time.time()
             for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
                 logging.info(f"Start Diarization on {manifest_json}")
@@ -140,10 +217,13 @@ def objective_chime7_mcmsasr(
                 curr_output_dir = os.path.join(output_dir, scenario)
                 Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-                if "mixer6" in scenario and not keep_mixer6:  # don't save speaker outputs for mixer6
-                    curr_speaker_output_dir = os.path.join(local_output_dir, "speaker_outputs")
-                else:
-                    curr_speaker_output_dir = speaker_output_dir
+                # if "mixer6" in scenario and not keep_mixer6:  # don't save speaker outputs for mixer6
+                #     curr_speaker_output_dir = os.path.join(local_output_dir, "speaker_outputs")
+                # else:
+                # curr_speaker_output_dir = os.path.join(output_dir, "speaker_outputs")
+                curr_speaker_output_dir = "/ws/chime7_optuna/speaker_outputs"
+                # if "mixer6" in scenario:
+                #     curr_speaker_output_dir = "/raid/temp"
 
                 config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
                 config.diarizer.speaker_out_dir = curr_speaker_output_dir
@@ -171,7 +251,7 @@ def objective_chime7_mcmsasr(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--study_name", help="Name of study.", type=str, default="optuna_chime7")
-    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna-msdd-gss-asr-mixer6.db")
+    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///testDB.db).", type=str, default="sqlite:///optuna-msdd-gss-asr-debug.db")
     parser.add_argument("--manifest_path", help="path to the manifest file", type=str)
     parser.add_argument(
         "--config_url",
@@ -194,7 +274,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="temp/")
     parser.add_argument("--output_dir", help="path to store temporary files", type=str, default="speaker_outputs/")
-    parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="optuna-msdd-gss-asr-mixer6.log")
+    parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="output.log")
     parser.add_argument("--n_trials", help="Number of trials to run optuna", type=int, default=100)
     parser.add_argument("--n_jobs", help="Number of parallel jobs to run, set -1 to use all GPUs", type=int, default=-1)
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)

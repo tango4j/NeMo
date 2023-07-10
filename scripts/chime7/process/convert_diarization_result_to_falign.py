@@ -19,6 +19,7 @@ def main(diarization_dir: str, diarization_params: str, output_dir: str = "", su
         output_dir = f'./alignments/{diarization_system}-{diarization_params}'
 
     scenario_dirs = glob.glob(diarization_dir + '/*')
+
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
     none_useful_fields = ['audio_filepath', 'words', 'text', 'duration', 'offset']
     for scenario in ['chime6', 'dipco', 'mixer6']:
@@ -45,7 +46,7 @@ def main(diarization_dir: str, diarization_params: str, output_dir: str = "", su
             # Process each manifest
             for manifest in manifests:
                 manifest_name = os.path.basename(manifest)
-                session_name = manifest_name.replace(scenario, '').replace('dev', '').replace('.json', '').strip('-')
+                session_name = manifest_name.replace(scenario, '').replace('dev', '').replace('eval', '').replace('.json', '').strip('-')
                 new_manifest = os.path.join(output_dir, scenario, subset, session_name + '.json')
                 
                 if not os.path.isdir(os.path.dirname(new_manifest)):
@@ -91,6 +92,12 @@ if __name__ == '__main__':
         default='',
         help='Directory to store the output',
     )
+    parser.add_argument(
+        '--subsets',
+        type=str,
+        default='dev',
+        help='Subsets to process',
+    )
     args = parser.parse_args()
 
-    main(diarization_dir=args.diarization_dir, diarization_params=args.diarization_params, output_dir=args.output_dir)
+    main(diarization_dir=args.diarization_dir, diarization_params=args.diarization_params, output_dir=args.output_dir, subsets=args.subsets.split())

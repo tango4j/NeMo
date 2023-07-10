@@ -1,9 +1,9 @@
 #!/bin/bash
 # model_path="./rno_chime7_chime6_ft_ptDataSetasrset3_nr_prec32_layers24_heads8_conv5_d1024_bs128_adamw_CosineAnnealing_lr0.00007_wd1e-2_spunigram128.nemo"
 
-SCENARIOS=${1:-"chime6 dipco mixer6"} # select scenarios to run
-SUBSETS=${2:-"dev"} # select subsets to run
-SYSTEM=${3:-"system_B_V05_D03-T0.5"} # select system to run, e.g., system_vA04D, system_vA01, system_B_V05_D03-T0.5
+SCENARIOS=${1:-"mixer6"} # select scenarios to run, chime6 dipco mixer6
+SUBSETS=${2:-"eval"} # select subsets to run, dev eval
+SYSTEM=${3:-"chime7_gt_diar_segs-eval"} # select system to run, e.g., system_vA04D, system_vA01, system_B_V05_D03-T0.5
 MANIFEST_DIR_ROOT=${4:-"/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7/process/processed"}
 OUTPUT_DIR=${5:-"nemo_experiments"}
 NORMALIZE_DB=${6:-"-30"}
@@ -51,7 +51,6 @@ do
         normalize_db=$NORMALIZE_DB
 done
 done
-
 
 for subset in $SUBSETS
 do

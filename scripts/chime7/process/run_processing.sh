@@ -16,6 +16,7 @@ OUTPUT_ROOT=${6:-"."}
 ESPNET_ROOT=${7:-"/home/heh/github/espnet/egs2/chime7_task1/asr1"}  # For example, ${HOME}/work/repos/espnet-mirror/egs2/chime7_task1/asr1
 CHIME7_ROOT=${8:-"/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"}  # For example, /data/chime7/chime7_official_cleaned
 NEMO_CHIME7_ROOT=${9:-"/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"} # For example, /media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7
+SUBSETS=${10:-"dev"} # for example, "dev eval"
 
 echo "************************************************************"
 echo "SCENARIOS:            $SCENARIOS"
@@ -80,6 +81,26 @@ then
     TOP_K=80
 fi
 
+if [ -z "$dereverb_prediction_delay" ]
+then
+    dereverb_prediction_delay=2
+fi
+
+if [ -z "$dereverb_num_iterations" ]
+then
+    dereverb_num_iterations=5
+fi
+
+if [ -z "$mc_filter_type" ]
+then
+    mc_filter_type="pmwf"
+fi
+
+if [ -z "$mc_filter_postfilter" ]
+then
+    mc_filter_postfilter="ban"
+fi
+
 
 # Diarization output
 # ==================
@@ -106,13 +127,13 @@ tunings=nemo_v1
 # Alignment
 # =========
 # Convert diarization output to falign format
-python ${NEMO_CHIME7_ROOT}/process/convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir --diarization-params $DIARIZATION_PARAMS --output-dir $alignments_output_dir
+python ${NEMO_CHIME7_ROOT}/process/convert_diarization_result_to_falign.py --diarization-dir $diarization_output_dir --diarization-params $DIARIZATION_PARAMS --output-dir $alignments_output_dir --subsets $SUBSETS
 
 # Process all scenarios
 # =====================
 for scenario in $SCENARIOS
 do
-for subset in dev
+for subset in $SUBSETS
 do
     echo "--"
     echo $scenario/$subset
@@ -191,6 +212,10 @@ do
             --mc-postmask-min-db ${MC_POSTMASK_MIN_DB} \
             --max-segment-length ${MAX_SEGMENT_LENGTH} \
             --max-batch-duration ${MAX_BATCH_DURATION} \
+            --dereverb-prediction-delay ${dereverb_prediction_delay} \
+            --dereverb-num-iterations ${dereverb_num_iterations} \
+            --mc-filter-type ${mc_filter_type} \
+            --mc-filter-postfilter ${mc_filter_postfilter} \
             --use-garbage-class
 
         # Prepare manifests

@@ -25,29 +25,38 @@ import time
 from typing import List
 from multiprocessing import Process
 import torch
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 from pathlib import Path
 import numpy as np
 import optuna
 import wget
 from omegaconf import OmegaConf
 
+import nemo
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
 
 ESPNET_ROOT = "/home/heh/github/espnet/egs2/chime7_task1/asr1"
 CHIME7_ROOT = "/media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2"
+# CHIME7_ROOT = "/home/heh/nemo_asr_eval/chime7_official_cleaned_v2"
 NEMO_CHIME7_ROOT = "/media/data2/chime7-challenge/nemo-gitlab-chime7/scripts/chime7"
+# NEMO_CHIME7_ROOT = "/home/heh/nemo_asr_eval/nemo-gitlab-chime7/scripts/chime7"
 
-ASR_MODEL_PATH = "/home/heh/nemo_asr_eval/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
-MSDD_MODEL_PATH = "/home/heh/nemo_asr_eval/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt"
-VAD_MODEL_PATH = "/home/heh/nemo_asr_eval/chime7/checkpoints/frame_vad_chime7_acrobat.nemo"
+# ASR_MODEL_PATH = "/home/heh/nemo_asr_eval/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+# MSDD_MODEL_PATH = "/home/heh/nemo_asr_eval/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt"
+# VAD_MODEL_PATH = "/home/heh/nemo_asr_eval/chime7/checkpoints/frame_vad_chime7_acrobat.nemo"
 
+ASR_MODEL_PATH = "/media/data2/chime7-challenge/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+MSDD_MODEL_PATH = "/media/data2/chime7-challenge/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt"
+VAD_MODEL_PATH = "/media/data2/chime7-challenge/checkpoints/frame_vad_chime7_acrobat.nemo"
+
+# MSDD_MODEL_PATH = "/media/data2/chime7-challenge/checkpoints/mc-finetune-MSDDv2-chime6-train_firefly_e57.ckpt"
 
 ###### Default ######
 MANIFEST_PATTERN = "*-dev.json"
 SCENARIOS = "chime6 dipco mixer6" 
-DIAR_CONFIG="system_B_V05_D03"
 DIAR_PARAM="T"
 ASR_TAG="asr"
 ####################
@@ -55,7 +64,7 @@ ASR_TAG="asr"
 
 def get_gss_command(gpu_id, diar_config, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
                     bss_iterations, dereverb_filter_length):
-    command = f"MAX_SEGMENT_LENGTH=40 MAX_BATCH_DURATION=40 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
+    command = f"MAX_SEGMENT_LENGTH=1000 MAX_BATCH_DURATION=20 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
               f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
               f" {gpu_id} {diar_config} {DIAR_PARAM} {diar_base_dir} {output_dir} " \
               f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
@@ -133,23 +142,24 @@ def run_chime7_mcmsasr(
     outputs = (metric, mapping_dict, itemized_erros)
     itemized_errors = (DER, CER, FA, MISS)
     """
-    speaker_output_dir = os.path.join(output_dir, "speaker_outputs")
+    speaker_output_dir = os.path.join(str(Path(output_dir).parent), "speaker_outputs_debug")
     Path(speaker_output_dir).mkdir(parents=True, exist_ok=True)
     
     # Step:1-1 Configure Diarization
     config.diarizer.vad.model_path = vad_model_path
     config.diarizer.msdd_model.model_path = msdd_model_path
     config.diarizer.oracle_vad = False
-    config.diarizer.msdd_model.parameters.diar_eval_settings = [
-        (config.diarizer.collar, config.diarizer.ignore_overlap),
-    ]
+    config.diarizer.msdd_model.parameters.diar_eval_settings = []
     config.diarizer.speaker_out_dir = speaker_output_dir if speaker_output_dir else output_dir # Directory to store speaker embeddings
     config.diarizer.clustering.parameters.oracle_num_speakers = False
     r_value = config.diarizer.speaker_embeddings.parameters.r_value
     scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
     config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
     start_time = time.time()
-    for manifest_json in Path(diarizer_manifest_path).glob(manifest_pattern):
+    all_manifests = list(Path(diarizer_manifest_path).glob(manifest_pattern))
+    print(all_manifests)
+    print(config.diarizer.vad.model_path)
+    for manifest_json in all_manifests:
         scenario = manifest_json.stem.split("-")[0]
         print(f"Start Diarization on {manifest_json}")
         curr_output_dir = os.path.join(output_dir, scenario)
@@ -158,7 +168,9 @@ def run_chime7_mcmsasr(
         config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
         config.prepared_manifest_vad_input = os.path.join(curr_output_dir, 'manifest_vad.json')
         config.diarizer.manifest_filepath = str(manifest_json)
-        
+        # if "mixer6" in str(manifest_json.stem):
+        #     config.diarizer.speaker_out_dir = os.path.join(curr_output_dir, "speaker_outputs")
+
         # Step:1-2 Run Diarization 
         diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
         diarizer_model.diarize(verbose=False)
@@ -166,8 +178,9 @@ def run_chime7_mcmsasr(
         move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
         
         del diarizer_model
-        if not keep_speaker_output:
-            shutil.rmtree(speaker_output_dir)
+        # if "mixer6" in str(manifest_json.stem):
+        #     shutil.rmtree(config.diarizer.speaker_out_dir)
+        
     print(f"Time taken for Diar: {(time.time() - start_time)/60:.2f}mins")
 
     print("Start GSS-ASR")
@@ -188,6 +201,9 @@ def run_chime7_mcmsasr(
 
 
 if __name__ == "__main__":
+    print("-------------------------------")
+    print(nemo.__file__)
+    print("-------------------------------")
     parser = argparse.ArgumentParser()
    
     parser.add_argument("--manifest_path", help="path to the manifest dir", type=str, default="./manifests_dev")

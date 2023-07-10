@@ -22,44 +22,44 @@ import time
 from multiprocessing import Process
 import torch
 
-import numpy as np
 import optuna
-import wget
-from omegaconf import OmegaConf
-from pytorch_lightning.utilities.exceptions import MisconfigurationException
 
-from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
 
 # NGC workspace: nemo_asr_eval
 NGC_WS_MOUNT="/ws"
 ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
-NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7"
+NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
 CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
 ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
-DIAR_BASE_DIR=f"{NGC_WS_MOUNT}/chime7_diar_results"
+# DIAR_BASE_DIR=f"{NGC_WS_MOUNT}/chime7_diar_results"
+DIAR_BASE_DIR=f"{NGC_WS_MOUNT}/chime7_outputs/optuna-msdd-gss-asr2-trial315"
 
-DIAR_CONFIG="system_B_V05_D03"
-DIAR_PARAM="T0.5"
+# DIAR_CONFIG="system_B_V05_D03"
+DIAR_CONFIG="sys-B-V07"
+DIAR_PARAM="T"
 
 SCENARIOS = "chime6 dipco mixer6" # chime6 dipco mixer6
+SUBSETS = "dev"
 
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
 
 def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,
-                    bss_iterations, dereverb_filter_length):
-    command = f"MAX_SEGMENT_LENGTH=50 MAX_BATCH_DURATION=50 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
-              f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
+                    bss_iterations, dereverb_filter_length, top_k, scenarios=SCENARIOS, subsets=SUBSETS, 
+                    dereverb_prediction_delay=2, dereverb_num_iterations=3, mc_filter_type="pmwf", mc_filter_postfilter="ban"):
+    command = f"MAX_SEGMENT_LENGTH=1000 MAX_BATCH_DURATION=20 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} TOK_K={top_k}" \
+              f" dereverb_prediction_delay={dereverb_prediction_delay} dereverb_num_iterations={dereverb_num_iterations} mc_filter_type={mc_filter_type} mc_filter_postfilter={mc_filter_postfilter} " \
+              f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{scenarios}' " \
               f" {gpu_id} {diar_config} {diar_param} {diar_base_dir} {output_dir} " \
-              f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
+              f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT} '{subsets}'"
               
     return command
 
 
-def get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir):
-    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{SCENARIOS}' dev " \
+def get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir, scenarios=SCENARIOS, subsets=SUBSETS):
+    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{scenarios}' '{subsets}' " \
               f"{diar_config}-{diar_param} {output_dir}/processed {output_dir} {normalize_db} {ASR_MODEL_PATH} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id}"
 
     return command
@@ -72,34 +72,63 @@ def objective_gss_asr(
         diar_config: str = DIAR_CONFIG,
         diar_param: str = DIAR_PARAM,
         diar_base_dir: str = DIAR_BASE_DIR,
+        scenarios: str = SCENARIOS,
+        subsets: str = SUBSETS,
 ):
-    start_time = time.time()
-    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -60, -5, 10)
-    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -9, 0, 3)
-    bss_iterations = trial.suggest_int("bss_iterations", 5, 30, 5)
-    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 20, 5)
+    # Existing parameters
+    mc_mask_min_db = trial.suggest_categorical("mc_mask_min_db", choices=[-200, -60])
+    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -18, 0, 3)
+    bss_iterations = trial.suggest_int("bss_iterations", 5, 20, 5)
+    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 15, 5)
     normalize_db = trial.suggest_int("normalize_db", -35, -20, 5)
+    top_k = trial.suggest_int("top_k", 50, 100, 10)
+
+    # New parameters
+    dereverb_prediction_delay = trial.suggest_categorical("dereverb_prediction_delay", choices=[2, 3])
+    dereverb_num_iterations = trial.suggest_categorical("dereverb_num_iterations", choices=[3, 5, 10])
+    mc_filter_type = trial.suggest_categorical("mc_filter_type", choices=['pmwf', 'wmpdr'])
+    mc_filter_postfilter = trial.suggest_categorical("mc_filter_postfilter", choices=['ban', 'None'])
+    start_time = time.time()
+
     with tempfile.TemporaryDirectory(dir=temp_dir, prefix=str(trial.number)) as output_dir:
-        command_gss = get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, mc_mask_min_db, mc_postmask_min_db,  bss_iterations, dereverb_filter_length)
+        command_gss = get_gss_command(
+            gpu_id, 
+            diar_config, 
+            diar_param, 
+            diar_base_dir, 
+            output_dir, 
+            mc_mask_min_db, 
+            mc_postmask_min_db,  
+            bss_iterations, 
+            dereverb_filter_length, 
+            top_k, 
+            scenarios, 
+            subsets, 
+            dereverb_prediction_delay, 
+            dereverb_num_iterations, 
+            mc_filter_type, 
+            mc_filter_postfilter
+        )
         code = os.system(command_gss)
         if code != 0:
             raise RuntimeError(f"command failed: {command_gss}")
-        command_asr = get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir)
+        command_asr = get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir, scenarios, subsets)
         code = os.system(command_asr)
         if code != 0:
             raise RuntimeError(f"command failed: {command_asr}")
         eval_results = os.path.join(output_dir, f"eval_results_{diar_config}-{diar_param}_chime6_ft_rnnt_ln{normalize_db}/macro_wer.txt")
         with open(eval_results, "r") as f:
             wer = float(f.read().strip())
-        print(f"Time taken for trial: {time.time() - start_time:.2f}s")
+        print(f"WER={wer}. Time taken for trial {trial.number}: {time.time() - start_time:.2f}s")
+        print(f"mc_mask_min_db={mc_mask_min_db}, mc_postmask_min_db={mc_postmask_min_db}, bss_iterations={bss_iterations}, dereverb_filter_length={dereverb_filter_length}, normalize_db={normalize_db}, top_k={top_k}")
     return wer
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--study_name", help="Name of study.", type=str, default="optuna_chime7")
-    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///optuna.db).", type=str, default="sqlite:///optuna-gss.db")
-    parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="optuna_output/")
+    parser.add_argument("--storage", help="Shared storage (i.e sqlite:///optuna.db).", type=str, default="sqlite:///optuna-gss-dev.db")
+    parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="/raid/temp")
     parser.add_argument("--output_log", help="Where to store optuna output log", type=str, default="output.log")
     parser.add_argument(
         "--collar",
@@ -109,7 +138,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n_trials", help="Number of trials to run optuna", type=int, default=100)
     parser.add_argument("--n_jobs", help="Number of parallel jobs to run, set -1 to use all GPUs", type=int, default=-1)
-    
+    parser.add_argument("--scenarios", help="Scenarios to run on", type=str, default=SCENARIOS)
+    parser.add_argument("--subsets", help="Subsets to run on", type=str, default=SUBSETS)
 
     args = parser.parse_args()
 
@@ -121,6 +151,8 @@ if __name__ == "__main__":
         trial,
         gpu_id,
         temp_dir=args.temp_dir,
+        scenarios=args.scenarios,
+        subsets=args.subsets,
     )
 
     def optimize(gpu_id=0):
@@ -146,6 +178,7 @@ if __name__ == "__main__":
         p = Process(target=optimize, args=(i,))
         processes.append(p)
         p.start()
+        time.sleep(5)
 
     for t in processes:
         t.join()

@@ -351,8 +351,13 @@ def score(
             lines = f.readlines()
         lines = [x.rstrip("\n") for x in lines]
         uem2sess = {}
+
         for x in lines:
-            sess_id, _, start, stop = x.split(" ")
+            items = x.split(" ")
+            if len(items) == 3:
+                sess_id, start, stop = items
+            else:
+                sess_id, _, start, stop = items
             uem2sess[sess_id] = (float(start), float(stop))
 
     # load all reference jsons
@@ -365,9 +370,6 @@ def score(
                     if "session_id" not in segments[i]:
                         segments[i]["session_id"] = Path(j).stem # add session id if not exists
             refs.extend(segments)
-
-    # with open(hyp_json, "r") as f:
-    #     hyps = json.load(f)
 
     split_tag = "_" if scenario_tag != "mixer6" else None
     hyps = []

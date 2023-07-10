@@ -152,7 +152,7 @@ class EncDecMultiClassificationModel(EncDecClassificationModel):
             shuffle = False
         else:
             if 'manifest_filepath' in config and config['manifest_filepath'] is None:
-                raise ValueError(f"Could not load dataset as `manifest_filepath` is None. Provided cfg : {cfg}")
+                raise ValueError(f"Could not load dataset as `manifest_filepath` is None. Provided cfg : {config}")
             dataset = get_audio_multi_label_dataset(config)
 
         return torch.utils.data.DataLoader(

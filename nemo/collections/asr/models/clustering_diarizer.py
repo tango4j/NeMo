@@ -973,7 +973,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
 
         return mc_embeddings, mc_time_stamps, mono_vad_probs, mc_session_clus_labels
     
-    def _run_clustering(self, embeddings, time_stamps, vad_probs, scale_mapping, evaluate=True):
+    def _run_clustering(self, embeddings, time_stamps, vad_probs, scale_mapping, evaluate=False):
         """
         Run clustering algorithm on embeddings and time stamps
         """
@@ -993,15 +993,15 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
             device=self._diarizer_model.device,
         )
         # if evaluate:
-        for ignore_overlap in [False, True]:
-            score_labels(
-                self.AUDIO_RTTM_MAP,
-                all_ref,
-                all_hyp,
-                collar=self._diarizer_params.collar,
-                ignore_overlap=ignore_overlap,
-                verbose=self.verbose,
-            )      
+        # for ignore_overlap in [False, True]:
+        #     score_labels(
+        #         self.AUDIO_RTTM_MAP,
+        #         all_ref,
+        #         all_hyp,
+        #         collar=self._diarizer_params.collar,
+        #         ignore_overlap=ignore_overlap,
+        #         verbose=self.verbose,
+        #     )      
         return uniq_clus_embs
 
     def diarize(self, paths2audio_files: List[str] = None, batch_size: int = 0):

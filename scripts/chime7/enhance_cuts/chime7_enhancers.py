@@ -5,6 +5,9 @@ from abc import ABCMeta, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+from nemo.collections.asr.modules.audio_modules import MaskBasedBeamformer, MaskBasedDereverbWPE, MaskEstimatorGSS
+from nemo.collections.asr.modules.audio_preprocessing import AudioToSpectrogram, SpectrogramToAudio
+
 import numpy as np
 import soundfile as sf
 import torch
@@ -15,8 +18,6 @@ from lhotse import CutSet, Recording, RecordingSet, SupervisionSegment, Supervis
 from lhotse.utils import add_durations, compute_num_samples
 from torch.utils.data import DataLoader
 
-from nemo.collections.asr.modules.audio_modules import MaskBasedBeamformer, MaskBasedDereverbWPE, MaskEstimatorGSS
-from nemo.collections.asr.modules.audio_preprocessing import AudioToSpectrogram, SpectrogramToAudio
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -214,7 +215,7 @@ class CutEnhancer(metaclass=ABCMeta):
                         logging.info("All files already exist. Skipping this batch.")
                         continue
 
-                num_chunks = 1
+                num_chunks = 1  # TODO
                 # If hitting OOM, split the batch into smaller chunks
                 while True:
                     try:
