@@ -435,6 +435,7 @@ def getAffinityGraphMat(affinity_mat_raw: torch.Tensor, p_value: int) -> torch.T
     # X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value)
     # X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value, mask_method='drop')
     X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value, mask_method='sigmoid')
+    X = X.float()
     symm_affinity_mat = 0.5 * (X + X.T)
     return symm_affinity_mat
 
@@ -763,8 +764,8 @@ def eigDecompose(laplacian: torch.Tensor, cuda: bool, device: torch.device) -> T
         laplacian = laplacian.float().to(device)
     else:
         laplacian = laplacian.float().to(torch.device('cpu'))
-    lambdas, diffusion_map = eigh(laplacian)
-    return lambdas, diffusion_map
+    lambdas, diffusion_map = eigh(laplacian.double())
+    return lambdas.float(), diffusion_map.float()
 
 
 def eigValueSh(laplacian: torch.Tensor, cuda: bool, device: torch.device) -> torch.Tensor:

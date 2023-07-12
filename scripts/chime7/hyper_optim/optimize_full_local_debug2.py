@@ -35,16 +35,27 @@ TRIAL_NAME = "optuna-msdd-gss-asr5-trial221"
 
 
 # NGC workspace: nemo_asr_eval
-NGC_WS_MOUNT="/home/lab"
-ESPNET_ROOT="/home/lab/github/espnet/egs2/chime7_task1/asr1"
+# NGC_WS_MOUNT="/home/lab"
+# ESPNET_ROOT="/home/lab/github/espnet/egs2/chime7_task1/asr1"
 # ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
 # NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
 # CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
 
-NEMO_CHIME7_ROOT = "/home/lab/chime7/nemo-gitlab-chime7/scripts/chime7"
-CHIME7_ROOT = "/disk_d/datasets/chime7_official_cleaned_v2"
+# NEMO_CHIME7_ROOT = "/home/lab/chime7/nemo-gitlab-chime7/scripts/chime7"
+# CHIME7_ROOT = "/disk_d/datasets/chime7_official_cleaned_v2"
 
-ASR_MODEL_PATH=f"/home/lab/chime7/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+# ASR_MODEL_PATH=f"/home/lab/chime7/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
+
+# SCENARIOS = "chime6 dipco mixer6"
+# SUBSETS = "dev"
+
+# NGC workspace: nemo_asr_eval
+NGC_WS_MOUNT="/home/heh/nemo_asr_eval"
+ESPNET_ROOT="/home/heh/github/espnet/egs2/chime7_task1/asr1"
+# ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
+NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
+CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
+ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
 
 SCENARIOS = "chime6 dipco mixer6"
 SUBSETS = "dev"
@@ -176,7 +187,8 @@ def objective_chime7_mcmsasr(
     start_time = time.time()
     output_dir = os.path.join(temp_dir, TRIAL_NAME)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    if True:
+    with tempfile.TemporaryDirectory() as temp_dir2:
+        speaker_output_dir = temp_dir
         logging.info(f"Start Trial {trial.number} with output_dir: {output_dir}")
         config.device = f"cuda:{gpu_id}"
         # Step:1-1 Configure Diarization
@@ -187,22 +199,24 @@ def objective_chime7_mcmsasr(
             msdd_model_path,
             vad_model_path,
             output_dir=output_dir,
-            speaker_output_dir=output_dir,
+            speaker_output_dir=speaker_output_dir,
             tune_vad=tune_vad,
         )
         if True:
             start_time2 = time.time()
-            for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
+            manifest_list = sorted(list(Path(diarizer_manifest_path).glob("*-debug2.json")))
+            print(manifest_list)
+            for manifest_json in manifest_list:
                 logging.info(f"Start Diarization on {manifest_json}")
                 scenario = manifest_json.stem.split("-")[0]
                 curr_output_dir = os.path.join(output_dir, scenario)
                 Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-                curr_speaker_output_dir = "/home/heh/nemo_asr_eval/chime7_optuna/speaker_outputs/"
+                # curr_speaker_output_dir = "/home/heh/nemo_asr_eval/chime7_optuna/speaker_outputs/"
                 # curr_speaker_output_dir = output_dir
 
                 config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
-                config.diarizer.speaker_out_dir = curr_speaker_output_dir
+                # config.diarizer.speaker_out_dir = curr_speaker_output_dir
                 config.prepared_manifest_vad_input = os.path.join(curr_output_dir, 'manifest_vad.json')
                 config.diarizer.manifest_filepath = str(manifest_json)
 

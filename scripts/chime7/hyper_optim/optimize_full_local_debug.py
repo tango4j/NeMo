@@ -31,7 +31,7 @@ from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
 
-TRIAL_NAME = "optuna-msdd-gss-asr5-trial221"
+TRIAL_NAME = "optuna-msdd-gss-asr5-trial221-eval"
 
 
 # NGC workspace: nemo_asr_eval
@@ -190,6 +190,8 @@ def objective_chime7_mcmsasr(
     temp_dir: str,
     keep_mixer6: bool = False,
     tune_vad: bool = True,
+    subset: str = SUBSETS,
+    pattern: str = "*-dev.json",
 ):
     """
     [Note] Diarizaiton out `outputs`
@@ -214,19 +216,19 @@ def objective_chime7_mcmsasr(
             speaker_output_dir=output_dir,
             tune_vad=tune_vad,
         )
-        with tempfile.TemporaryDirectory(prefix='/media/data3/tmp') as tempdir:
+        with tempfile.TemporaryDirectory(prefix='/media/data3/tmp') as dummy_dir:
             start_time2 = time.time()
-            for manifest_json in Path(diarizer_manifest_path).glob("*-dev.json"):
+            for manifest_json in Path(diarizer_manifest_path).glob(pattern):
                 logging.info(f"Start Diarization on {manifest_json}")
                 scenario = manifest_json.stem.split("-")[0]
                 curr_output_dir = os.path.join(output_dir, scenario)
                 Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-                curr_speaker_output_dir = "/home/heh/nemo_asr_eval/chime7_optuna/speaker_outputs/"
-                # if "mixer6" in scenario:
-                #     curr_speaker_output_dir = tempdir
-                # else:
-                #     curr_speaker_output_dir = "/home/heh/nemo_asr_eval/chime7_optuna/speaker_outputs/"
+                # curr_speaker_output_dir = "/home/heh/nemo_asr_eval/chime7_optuna/speaker_outputs/"
+                if "mixer6" in scenario:
+                    curr_speaker_output_dir = dummy_dir
+                else:
+                    curr_speaker_output_dir = temp_dir
 
                 config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
                 config.diarizer.speaker_out_dir = curr_speaker_output_dir
@@ -247,6 +249,7 @@ def objective_chime7_mcmsasr(
             output_dir,
             diar_base_dir=output_dir,
             diar_config=config.diarizer.msdd_model.parameters.system_name,
+            subsets=subset,
         )
     logging.info(f"Time taken for trial {trial.number}: {(time.time() - start_time)/60:.2f} mins")    
     return WER
@@ -283,6 +286,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)
     parser.add_argument("--keep_mixer6", help="Keep mixer6 in the evaluation", action="store_true")
     parser.add_argument("--tune_vad", help="whether to tune VAD", type=bool, default=True)
+    parser.add_argument("--subsets", help="Subsets to run on", type=str, default=SUBSETS)
+    parser.add_argument("--pattern", help="Pattern to match manifest files", type=str, default="*-dev.json")
 
     args = parser.parse_args()
     os.makedirs(args.temp_dir, exist_ok=True)
@@ -304,6 +309,8 @@ if __name__ == "__main__":
         speaker_output_dir=args.output_dir,
         keep_mixer6=args.keep_mixer6,
         tune_vad=args.tune_vad,
+        subset=args.subsets,
+        pattern=args.pattern,
     )
 
     def optimize(gpu_id=0):
@@ -319,19 +326,7 @@ if __name__ == "__main__":
         optuna.logging.enable_propagation()  # Propagate logs to the root logger.
         study.optimize(worker_func, n_trials=args.n_trials, show_progress_bar=True)
 
-    processes = []
-    if args.n_jobs == -1:
-        args.n_jobs = torch.cuda.device_count()
-    n_jobs = min(args.n_jobs, torch.cuda.device_count())
-    logging.info(f"Running {args.n_trials} trials on {n_jobs} GPUs")
-
-    for i in range(0, n_jobs):
-        p = Process(target=optimize, args=(i,))
-        processes.append(p)
-        p.start()
-
-    for t in processes:
-        t.join()
+    optimize(1)
 
     study = optuna.load_study(
         study_name=args.study_name,

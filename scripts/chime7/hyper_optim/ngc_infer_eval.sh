@@ -10,7 +10,7 @@ NUM_TRIALS=1
 
 NEMO_ROOT=/ws/nemo-gitlab-chime7
 
-NGC_JOB_NAME=optuna-msdd-gss-as5-t221-eval
+NGC_JOB_NAME=chime7-infer-t221-eval
 OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-t221
 SCRIPT_NAME=optimize_full_ngc_debug.py
 
