@@ -30,7 +30,7 @@ from omegaconf import OmegaConf
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
-OUTPUT_DIR = "/ws/chime7_outputs/optuna-msdd-gss-asr5-trial221"
+OUTPUT_DIR = "/ws/chime7_outputs/optuna-msdd-gss-asr5-trial221-eval-chime6p2"
 
 # NGC workspace: nemo_asr_eval
 NGC_WS_MOUNT="/ws"
@@ -39,8 +39,8 @@ NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
 CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
 ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
 
-SCENARIOS = "chime6 dipco mixer6"
-SUBSETS = "dev"
+SCENARIOS = "chime6" # dipco mixer6
+SUBSETS = "eval"
 
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
@@ -223,7 +223,7 @@ def objective_chime7_mcmsasr(
                 #     curr_speaker_output_dir = os.path.join(local_output_dir, "speaker_outputs")
                 # else:
                 # curr_speaker_output_dir = os.path.join(output_dir, "speaker_outputs")
-                curr_speaker_output_dir = "/ws/chime7_optuna/speaker_outputs"
+                curr_speaker_output_dir = "/ws/chime7_optuna/speaker_outputs_v3"
                 # if "mixer6" in scenario:
                 #     curr_speaker_output_dir = "/raid/temp"
 

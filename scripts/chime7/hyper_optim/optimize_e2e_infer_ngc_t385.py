@@ -13,6 +13,22 @@
 # limitations under the License.
 
 """Optimize the Neural Diarizer hyper-parameters onto your dev set using Optuna."""
+"""
+frame_vad_threshold: 0.37, 
+global_average_mix_ratio: 0.30000000000000004, 
+global_average_window_count: 190, 
+lm_alpha: 0.0, 
+lm_beam_size: 8, 
+maes_expansion_gamma: 2.8, 
+max_rp_threshold: 0.06, 
+mc_postmask_min_db: -10, 
+min_duration_off: 0.55, 
+min_duration_on: 0.4, 
+pad_offset: 0.17, 
+pad_onset: 0.14, 
+r_value: 2.1500000000000004, 
+sigmoid_threshold: 0.55	
+"""
 
 import argparse
 import logging
@@ -72,21 +88,21 @@ def diar_config_setup(
     # VAD Optimization
     config.diarizer.vad.model_path = vad_model_path
     
-    config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.15, 0.7, step=0.01)
-    config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.0, 0.2, step=0.01), 2)
-    config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.0, 0.2, step=0.01), 2)
-    config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.2, 0.4, step=0.01), 2)
-    config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.5, 0.95, step=0.01), 2)
+    config.diarizer.vad.parameters.frame_vad_threshold = 0.37 #trial.suggest_float("frame_vad_threshold", 0.15, 0.7, step=0.02)
+    config.diarizer.vad.parameters.pad_onset = 0.14 #round(trial.suggest_float("pad_onset", 0.0, 0.2, step=0.01), 2)
+    config.diarizer.vad.parameters.pad_offset = 0.17 #round(trial.suggest_float("pad_offset", 0.0, 0.2, step=0.01), 2)
+    config.diarizer.vad.parameters.min_duration_on = 0.4 #round(trial.suggest_float("min_duration_on", 0.2, 0.4, step=0.05), 2)
+    config.diarizer.vad.parameters.min_duration_off = 0.55 #round(trial.suggest_float("min_duration_off", 0.5, 0.95, step=0.05), 2)
 
     # MSDD Optimization
-    config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.5, high=0.95, step=0.05)]
-    config.diarizer.msdd_model.parameters.global_average_mix_ratio = trial.suggest_float("global_average_mix_ratio", low=0.1, high=0.95, step=0.05)
-    config.diarizer.msdd_model.parameters.global_average_window_count = trial.suggest_int("global_average_window_count", low=10, high=500, step=20)
+    config.diarizer.msdd_model.parameters.sigmoid_threshold = [0.55]
+    config.diarizer.msdd_model.parameters.global_average_mix_ratio = 0.3 #trial.suggest_float("global_average_mix_ratio", low=0.1, high=0.95, step=0.05)
+    config.diarizer.msdd_model.parameters.global_average_window_count = 190 #trial.suggest_int("global_average_window_count", low=10, high=500, step=20)
 
     # Clustering Optimization
-    config.diarizer.clustering.parameters.max_rp_threshold = round(trial.suggest_float("max_rp_threshold", low=0.03, high=0.1, step=0.01), 2)
+    config.diarizer.clustering.parameters.max_rp_threshold = 0.06 #round(trial.suggest_float("max_rp_threshold", low=0.03, high=0.1, step=0.01), 2)
     config.diarizer.clustering.parameters.sparse_search_volume = 25 #trial.suggest_int("sparse_search_volume", low=25, high=25, step=1)
-    r_value = round(trial.suggest_float("r_value", 0.5, 2.5, step=0.05), 4)
+    r_value = 2.15  #round(trial.suggest_float("r_value", 0.5, 2.5, step=0.05), 4)
     scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
     config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
     return config
@@ -123,7 +139,7 @@ def objective_gss_asr(
         subsets: str = SUBSETS,
 ):
     mc_mask_min_db = -160 # trial.suggest_int("mc_mask_min_db", -160, -160, 20)
-    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -25, -5, 3)
+    mc_postmask_min_db = -10 #trial.suggest_int("mc_postmask_min_db", -25, -5, 3)
     bss_iterations = 5 #trial.suggest_int("bss_iterations", 5, 5, 5)
     dereverb_filter_length = 5 #trial.suggest_int("dereverb_filter_length", 5, 5, 5)
     normalize_db = -20 #trial.suggest_int("normalize_db", -20, -20, 5)
@@ -133,13 +149,13 @@ def objective_gss_asr(
     dereverb_prediction_delay = 3 #trial.suggest_categorical("dereverb_prediction_delay", choices=[3])
     dereverb_num_iterations = 5 #trial.suggest_categorical("dereverb_num_iterations", choices=[5])
     mc_filter_type = "pmwf" #trial.suggest_categorical("mc_filter_type", choices=['pmwf'])
-    mc_filter_postfilter = "ban" #trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
+    mc_filter_postfilter = trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
 
-    lm_alpha = trial.suggest_float(name='lm_alpha', low=0, high=0.1, step=0.01)
-    lm_beam_size = trial.suggest_int(name='lm_beam_size', low=6, high=8, step=1)
+    lm_alpha = 0.0 #trial.suggest_float(name='lm_alpha', low=0, high=0.4, step=0.1)
+    lm_beam_size = 8 # trial.suggest_int(name='lm_beam_size', low=6, high=8, step=1)
     maes_num_steps = 5
     maes_alpha = 3
-    maes_gamma = trial.suggest_float(name="maes_expansion_gamma", low=0.3, high=5.3, step=0.1)
+    maes_gamma = 2.8 #trial.suggest_float(name="maes_expansion_gamma", low=0.3, high=5.3, step=0.5)
     maes_beta = 5
 
     command_gss = get_gss_command(
@@ -163,25 +179,24 @@ def objective_gss_asr(
     code = os.system(command_gss)
     if code != 0:
         raise RuntimeError(f"command failed: {command_gss}")
-    
-    with tempfile.TemporaryDirectory(dir=output_dir, prefix=f"nemo-system-trial-{trial.number}") as asr_output_dir:
-        with tempfile.TemporaryDirectory(dir=output_dir, prefix=f"eval-results-trial-{trial.number}") as eval_results_dir:
-            logging.info(f"Start Trial {trial.number} with asr_output_dir: {asr_output_dir} and eval_results_dir: {eval_results_dir}")
+    asr_output_dir = os.path.join(output_dir, "nemo_asr_output")
+    eval_results_dir = os.path.join(output_dir, "eval_results_output")
+    logging.info(f"Start Trial {trial.number} with asr_output_dir: {asr_output_dir} and eval_results_dir: {eval_results_dir}")
 
-            command_asr = get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir, lm_alpha, lm_beam_size, maes_num_steps, maes_alpha, maes_gamma, maes_beta, asr_output_dir, eval_results_dir)
-            code = os.system(command_asr)
-            if code != 0:
-                raise RuntimeError(f"command failed: {command_asr}")
+    command_asr = get_asr_eval_command(gpu_id, diar_config, diar_param, normalize_db, output_dir, lm_alpha, lm_beam_size, maes_num_steps, maes_alpha, maes_gamma, maes_beta, asr_output_dir, eval_results_dir, scenarios, subsets)
+    code = os.system(command_asr)
+    if code != 0:
+        raise RuntimeError(f"command failed: {command_asr}")
 
-            eval_results = os.path.join(eval_results_dir, "macro_wer.txt")
-            with open(eval_results, "r") as f:
-                wer = float(f.read().strip())
+    eval_results = os.path.join(eval_results_dir, "macro_wer.txt")
+    with open(eval_results, "r") as f:
+        wer = float(f.read().strip())
 
-                logging.info(f"-------------WER={wer:.4f}--------------------")
-                logging.info(f"Trial: {trial.number}")
-                logging.info(f"mc_mask_min_db: {mc_mask_min_db}, mc_postmask_min_db: {mc_postmask_min_db}, bss_iterations: {bss_iterations}, dereverb_filter_length: {dereverb_filter_length}, normalize_db: {normalize_db}")
-                logging.info(f"lm_alpha: {lm_alpha}, lm_beam_size: {lm_beam_size}, maes_num_steps: {maes_num_steps}, maes_alpha: {maes_alpha}, maes_gamma: {maes_gamma}, maes_beta: {maes_beta}")
-                logging.info("-----------------------------------------------")
+        logging.info(f"-------------WER={wer:.4f}--------------------")
+        logging.info(f"Trial: {trial.number}")
+        logging.info(f"mc_mask_min_db: {mc_mask_min_db}, mc_postmask_min_db: {mc_postmask_min_db}, bss_iterations: {bss_iterations}, dereverb_filter_length: {dereverb_filter_length}, normalize_db: {normalize_db}")
+        logging.info(f"lm_alpha: {lm_alpha}, lm_beam_size: {lm_beam_size}, maes_num_steps: {maes_num_steps}, maes_alpha: {maes_alpha}, maes_gamma: {maes_gamma}, maes_beta: {maes_beta}")
+        logging.info("-----------------------------------------------")
 
     return wer   
 
@@ -214,8 +229,10 @@ def objective_chime7_mcmsasr(
     outputs = (metric, mapping_dict, itemized_erros)
     itemized_errors = (DER, CER, FA, MISS)
     """
+    output_dir = temp_dir
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     start_time = time.time()
-    with tempfile.TemporaryDirectory(dir=temp_dir, prefix=f"trial-{trial.number}") as output_dir:
+    if True:
         logging.info(f"Start Trial {trial.number} with output_dir: {output_dir}")
         config.device = f"cuda:{gpu_id}"
         # Step:1-1 Configure Diarization
@@ -226,7 +243,7 @@ def objective_chime7_mcmsasr(
             msdd_model_path,
             vad_model_path,
             output_dir=output_dir,
-            speaker_output_dir=output_dir,
+            speaker_output_dir=speaker_output_dir,
             tune_vad=tune_vad,
         )
 
@@ -238,13 +255,13 @@ def objective_chime7_mcmsasr(
                 curr_output_dir = os.path.join(output_dir, scenario)
                 Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-                if "mixer6" in scenario and not keep_mixer6:  # don't save speaker outputs for mixer6
-                    curr_speaker_output_dir = os.path.join(local_output_dir, "speaker_outputs")
-                else:
-                    curr_speaker_output_dir = speaker_output_dir
+                # if "mixer6" in scenario and not keep_mixer6:  # don't save speaker outputs for mixer6
+                #     curr_speaker_output_dir = os.path.join(local_output_dir, "speaker_outputs")
+                # else:
+                #     curr_speaker_output_dir = speaker_output_dir
 
                 config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
-                config.diarizer.speaker_out_dir = curr_speaker_output_dir
+                # config.diarizer.speaker_out_dir = curr_speaker_output_dir
                 config.prepared_manifest_vad_input = os.path.join(curr_output_dir, 'manifest_vad.json')
                 config.diarizer.manifest_filepath = str(manifest_json)
 
@@ -373,5 +390,7 @@ if __name__ == "__main__":
         study_name=args.study_name,
         storage=args.storage,
     )
+    os.system(f"rm -rf {args.storage}")
+    os.system(f"rm -rf {args.output_log}")
     logging.info(f"Best SA-WER {study.best_value}")
     logging.info(f"Best Parameter Set: {study.best_params}")

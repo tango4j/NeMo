@@ -20,6 +20,9 @@ manifests/
 processed/
 *_heh*
 optuna_output*
+decoders/
+optuna_asr_lm/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
