@@ -69,6 +69,7 @@ def get_default_sampling_params():
         "add_BOS": True,
         "all_probs": False,
         "compute_logprob": False,
+        "end_strings": ["<|endoftext|>", "<extra_id_1>"],
     }
 
     return sampling_params
@@ -104,7 +105,9 @@ def megatron_gpt_generate(model, inputs, tokenizer, length_params, sampling_para
             top_p=sampling_params['top_p'],
             greedy=sampling_params['use_greedy'],
             repetition_penalty=sampling_params['repetition_penalty'],
+            end_strings=sampling_params['end_strings'],
             min_tokens_to_generate=length_params['min_length'],
+            compute_attention_mask=sampling_params.get("compute_attention_mask", True),
             **strategy_args,
         )
         compute_prob_response = get_computeprob_response(tokenizer, response, inputs)
@@ -124,6 +127,7 @@ def megatron_gpt_generate(model, inputs, tokenizer, length_params, sampling_para
                 top_p=sampling_params['top_p'],
                 greedy=sampling_params['use_greedy'],
                 repetition_penalty=sampling_params['repetition_penalty'],
+                end_strings=sampling_params['end_strings'],
                 min_tokens_to_generate=length_params['min_length'],
                 **strategy_args,
             )
@@ -376,10 +380,11 @@ def synced_generate(
     top_k=0,
     top_p=0.0,
     greedy=False,
+    compute_attention_mask=True,
     compute_logprob=False,
     repetition_penalty=1.2,
-    min_tokens_to_generate=0,
     end_strings=[],
+    min_tokens_to_generate=0,
 ):
     context_length = context_length_tensor.min().item()
     tokenizer = model.tokenizer
@@ -391,6 +396,7 @@ def synced_generate(
             context_length_tensor,
             tokens_to_generate,
             all_probs,
+            compute_attention_mask=compute_attention_mask,
             temperature=temperature,
         )
     else:
@@ -401,6 +407,7 @@ def synced_generate(
             context_length_tensor,
             tokens_to_generate,
             all_probs,
+            compute_attention_mask=compute_attention_mask,
             compute_logprob=compute_logprob,
             temperature=temperature,
             end_strings=end_strings,
@@ -469,10 +476,11 @@ def generate(
     top_k=0,
     top_p=0.0,
     greedy=False,
+    compute_attention_mask=True,
     compute_logprob=False,
     repetition_penalty=1.0,
-    min_tokens_to_generate=0,
     end_strings=['<|endoftext|>'],
+    min_tokens_to_generate=0,
     **strategy_args,
 ) -> OutputType:
     """
@@ -550,13 +558,14 @@ def generate(
         tokens_to_generate,
         all_probs,
         temperature,
+        compute_attention_mask=compute_attention_mask,
         compute_logprob=compute_logprob,
         top_k=top_k,
         top_p=top_p,
         greedy=greedy,
         repetition_penalty=repetition_penalty,
-        min_tokens_to_generate=min_tokens_to_generate,
         end_strings=end_strings,
+        min_tokens_to_generate=min_tokens_to_generate,
     )
     special_tokens = set()
     if hasattr(tokenizer, 'pad_token') and tokenizer.pad_token is not None:
@@ -635,6 +644,7 @@ def sample_sequence_batch(
     context_lengths,
     tokens_to_generate,
     all_probs=False,
+    compute_attention_mask=True,
     compute_logprob=False,
     type_ids=None,
     temperature=None,
@@ -666,7 +676,7 @@ def sample_sequence_batch(
     # initialize the batch
     with torch.no_grad():
         context_length = context_lengths.min().item()
-        inference_strategy.init_batch(context_tokens, context_length)
+        inference_strategy.init_batch(context_tokens, context_length, compute_attention_mask)
         # added eos_id to support the function generate_samples_eval that passes
         # eos_id as an argument and needs termination when that id id found.
         eod_id = tokenizer.eos_id
@@ -685,7 +695,7 @@ def sample_sequence_batch(
         lengths = torch.ones([batch_size]).long().cuda() * maxlen
         while context_length < maxlen:
             batch, tensor_shape = inference_strategy.prepare_batch_at_step(
-                tokens, maxlen, micro_batch_size, counter, context_length
+                tokens, maxlen, micro_batch_size, counter, context_length, compute_attention_mask
             )
             output = inference_strategy.forward_step(batch, tensor_shape)
 
@@ -816,6 +826,7 @@ def tab_sample_sequence_batch(
     context_lengths,
     tokens_to_generate,
     all_probs=True,
+    compute_attention_mask=True,
     type_ids=None,
     temperature=None,
 ):
@@ -839,7 +850,7 @@ def tab_sample_sequence_batch(
     # initialize the batch
     with torch.no_grad():
         context_length = context_lengths.min().item()
-        inference_strategy.init_batch(context_tokens, context_length)
+        inference_strategy.init_batch(context_tokens, context_length, compute_attention_mask)
         context = context_tokens[:, :context_length]
         # the context may start in the middle of the row,
         # calculate the offset according to the position of '\n' or '<|endoftext|>'
@@ -873,7 +884,7 @@ def tab_sample_sequence_batch(
 
         while context_length < maxlen:
             batch, tensor_shape = inference_strategy.prepare_batch_at_step(
-                tokens, maxlen, micro_batch_size, counter, context_length
+                tokens, maxlen, micro_batch_size, counter, context_length, compute_attention_mask
             )
             output = inference_strategy.forward_step(batch, tensor_shape)
 
