@@ -30,6 +30,7 @@ ls $pred_dir || exit 1
 # python /home/taejinp/projects/fp32_dev_chime7/
 python ./text_normalize_krishna.py --input_dir $pred_dir  --sub_json_foldername $sub_json_foldername || exit 1
 
+# exit 1
 # eval_log_path="/disk_b/datasets/chime7_final_submission/sa_wer_no_text_norm"
 # pred_dir_normalized=$pred_dir
 

@@ -2,10 +2,10 @@
 
 eval_log_path="/disk_b/datasets/chime7_final_submission/sa_wer_output_dir"
 
-# track="subtrack"
-track="main"
-# split=("dev" "eval")
-split=("dev")
+track="subtrack"
+# track="main"
+split=("dev" "eval")
+# split=("dev")
 system_num=("1" "2" "3")
 
 # Loop over the array variables
@@ -24,7 +24,7 @@ for s in "${split[@]}"; do
         #     echo "File not found: ${eval_results_dir}/macro_wer.txt"
         # fi
         echo ${track}_${s}_system${sn}
-        grep -A 7 "### Metrics for all Scenarios ###" ${eval_log_path}/${track}_${s}_system${sn}/${track}_${s}_system${sn}_pyannote_eval.log | tail -5 | awk -F '|' '{print $3 $13 $21}'
+        grep -A 7 "### Metrics for all Scenarios ###" ${eval_log_path}/${track}_${s}_system${sn}/${track}_${s}_system${sn}_pyannote_eval.log | tail -5 | awk -F '|' '{print $3 $13 $16 $21}'
         echo ""
     done
 done

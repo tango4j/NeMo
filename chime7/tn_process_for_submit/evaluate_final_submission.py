@@ -41,6 +41,30 @@ def compute_der(df_or_dict):
 
     return der
 
+jiwer_chime7_scoring = jiwer.Compose(
+    [
+        jiwer.SubstituteRegexes(
+            {
+                "(?:^|(?<= ))(hm|hmm|mhm|mmh|mmm)(?:(?= )|$)": "hmmm",
+                "(?:^|(?<= ))(uhm|um|umm|umh|ummh)(?:(?= )|$)": "ummm",
+                "(?:^|(?<= ))(uh|uhh)(?:(?= )|$)": "uhhh",
+            }
+        ),
+        jiwer.RemoveEmptyStrings(),
+        jiwer.RemoveMultipleSpaces(),
+    ]
+)
+def chime6_norm_scoring(txt):
+    return jiwer_chime6_scoring(normalize_text_chime6(txt, normalize="kaldi"))
+
+
+
+def chime7_norm_scoring(txt):
+    return jiwer_chime7_scoring(
+        jiwer_chime6_scoring(
+            normalize_text_chime6(txt, normalize="kaldi")
+        )  # noqa: E731
+    )  # noqa: E731
 
 def compute_jer(df_or_dict):
     if isinstance(df_or_dict, dict):
@@ -162,6 +186,17 @@ def compute_wer(df_or_dict):
         raise NotImplementedError
 
     return wer
+
+def choose_txt_normalization(scoring_txt_normalization="chime7"):
+    if scoring_txt_normalization == "chime7":
+        scoring_txt_normalization = chime7_norm_scoring
+    elif scoring_txt_normalization == "chime6":
+        scoring_txt_normalization = chime6_norm_scoring
+    else:
+        raise NotImplementedError(
+            "scoring text normalization should be either 'chime7' or 'chime6'"
+        )
+    return scoring_txt_normalization
 
 
 def compute_diar_errors(hyp_segs, ref_segs, uem_boundaries=None, collar=0.5):

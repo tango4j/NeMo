@@ -7,6 +7,45 @@ import json
 import argparse
 import glob
 import os
+import jiwer
+from jiwer.transforms import RemoveKaldiNonWords
+# from lhotse.recipes.chime6 import normalize_text_chime6
+
+# jiwer_chime6_scoring = jiwer.Compose(
+#     [
+#         RemoveKaldiNonWords(),
+#         jiwer.SubstituteRegexes({r"\"": " ", "^[ \t]+|[ \t]+$": "", r"\u2019": "'"}),
+#         jiwer.RemoveEmptyStrings(),
+#         jiwer.RemoveMultipleSpaces(),
+#     ]
+# )
+
+jiwer_chime7_scoring = jiwer.Compose(
+    [
+        jiwer.SubstituteRegexes(
+            {
+                "(?:^|(?<= ))(hm|hmm|mhm|mmh|mmm)(?:(?= )|$)": "hmmm",
+                "(?:^|(?<= ))(uhm|um|umm|umh|ummh)(?:(?= )|$)": "ummm",
+                "(?:^|(?<= ))(uh|uhh)(?:(?= )|$)": "uhhh",
+            }
+        ),
+        jiwer.RemoveEmptyStrings(),
+        jiwer.RemoveMultipleSpaces(),
+    ]
+)
+
+# def chime6_norm_scoring(txt):
+#     return jiwer_chime6_scoring(normalize_text_chime6(txt, normalize="kaldi"))
+
+
+
+# def chime7_norm_scoring(txt):
+#     return jiwer_chime7_scoring(
+#         jiwer_chime6_scoring(
+#             normalize_text_chime6(txt, normalize="kaldi")
+#         )  # noqa: E731
+#     )  # noqa: E731
+
 def read_manifest(manifest):
     data = []
     # try:
@@ -58,10 +97,12 @@ def norm_text(input_fp, output_fp):
         item['words'] = item['words'].replace('\u2047', '')
         # replace isolated aw with oh
         item['words'] = item['words'].replace(' aw ', ' oh ')
-    
+        
+        item['words'] = jiwer_chime7_scoring(item['words'])
     # write manifest
     # write_manifest(output_fp, manifest_items)
     dump_json(output_fp, manifest_items)
+    return manifest_items
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="nemo chime7 output folder to final submission format")
@@ -77,10 +118,28 @@ if __name__ == '__main__':
     # glob folder to get the file list
     file_list = glob.glob(original_folder + "/**/*.json", recursive=True)
     # loop all the files
+    scenario_dict = {"chime6":[], "dipco":[], "mixer6":[]}
     for input_fp in file_list:
         # get basename from input_fp
         output_fp = input_fp.replace(original_folder, output_folder)
         up_folder = os.path.dirname(output_fp)
         os.makedirs(up_folder,  exist_ok=True)
+        scenario = input_fp.split('/')[-2]
         print(f"Normalizing \n {input_fp} \n to \n {output_fp}")
-        norm_text(input_fp, output_fp)
+        list_of_dicts = norm_text(input_fp, output_fp)
+        
+        if scenario in  scenario_dict:
+            scenario_dict[scenario].extend(list_of_dicts)
+        else:
+            scenario_dict[scenario] = list_of_dicts
+    track = original_folder.split('/')[-3]
+    system = original_folder.split('/')[-2]
+    split = original_folder.split('/')[-1]
+    original_folder.split() 
+    for scenario, list_of_dicts in scenario_dict.items():
+        submit_folder = original_folder.replace(f"{args.sub_json_foldername}", f"{args.sub_json_foldername}_norm_for_submit") 
+        base_dir = "/".join(submit_folder.split('/')[:-3]) 
+        submit_category_folder = os.path.join(base_dir, f"{track}_{system}", split)
+        os.makedirs(submit_category_folder,  exist_ok=True)
+        submit_category_fullpath = os.path.join(base_dir, f"{track}_{system}", split, f"{scenario}.json")
+        dump_json(submit_category_fullpath, list_of_dicts)
