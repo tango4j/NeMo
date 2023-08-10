@@ -57,6 +57,7 @@ VAD_MODEL_PATH = "/media/data2/chime7-challenge/checkpoints/frame_vad_chime7_acr
 ###### Default ######
 MANIFEST_PATTERN = "*-dev.json"
 SCENARIOS = "chime6 dipco mixer6" 
+SUBSETS = "eval"
 DIAR_PARAM="T"
 ASR_TAG="asr"
 ####################
@@ -67,13 +68,13 @@ def get_gss_command(gpu_id, diar_config, diar_base_dir, output_dir, mc_mask_min_
     command = f"MAX_SEGMENT_LENGTH=1000 MAX_BATCH_DURATION=20 BSS_ITERATION={bss_iterations} MC_MASK_MIN_DB={mc_mask_min_db} MC_POSTMASK_MIN_DB={mc_postmask_min_db} DEREVERB_FILTER_LENGTH={dereverb_filter_length} " \
               f" {NEMO_CHIME7_ROOT}/process/run_processing.sh '{SCENARIOS}' " \
               f" {gpu_id} {diar_config} {DIAR_PARAM} {diar_base_dir} {output_dir} " \
-              f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT}"
+              f" {ESPNET_ROOT} {CHIME7_ROOT} {NEMO_CHIME7_ROOT} '{SUBSETS}'"
               
     return command
 
 
 def get_asr_eval_command(gpu_id, diar_config, normalize_db, output_dir, asr_model_path=ASR_MODEL_PATH):
-    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{SCENARIOS}' dev " \
+    command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr.sh '{SCENARIOS}' '{SUBSETS}' " \
               f"{diar_config}-{DIAR_PARAM} {output_dir}/processed {output_dir} {normalize_db} {asr_model_path} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id} {ASR_TAG}"
 
     return command
@@ -142,7 +143,7 @@ def run_chime7_mcmsasr(
     outputs = (metric, mapping_dict, itemized_erros)
     itemized_errors = (DER, CER, FA, MISS)
     """
-    speaker_output_dir = os.path.join(str(Path(output_dir).parent), "speaker_outputs_debug")
+    speaker_output_dir = os.path.join(str(Path(output_dir).parent), "speaker_outputs")
     Path(speaker_output_dir).mkdir(parents=True, exist_ok=True)
     
     # Step:1-1 Configure Diarization
@@ -159,29 +160,29 @@ def run_chime7_mcmsasr(
     all_manifests = list(Path(diarizer_manifest_path).glob(manifest_pattern))
     print(all_manifests)
     print(config.diarizer.vad.model_path)
-    for manifest_json in all_manifests:
-        scenario = manifest_json.stem.split("-")[0]
-        print(f"Start Diarization on {manifest_json}")
-        curr_output_dir = os.path.join(output_dir, scenario)
-        Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
+    # for manifest_json in all_manifests:
+    #     scenario = manifest_json.stem.split("-")[0]
+    #     print(f"Start Diarization on {manifest_json}")
+    #     curr_output_dir = os.path.join(output_dir, scenario)
+    #     Path(curr_output_dir).mkdir(parents=True, exist_ok=True)
 
-        config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
-        config.prepared_manifest_vad_input = os.path.join(curr_output_dir, 'manifest_vad.json')
-        config.diarizer.manifest_filepath = str(manifest_json)
-        # if "mixer6" in str(manifest_json.stem):
-        #     config.diarizer.speaker_out_dir = os.path.join(curr_output_dir, "speaker_outputs")
+    #     config.diarizer.out_dir = curr_output_dir  # Directory to store intermediate files and prediction outputs
+    #     config.prepared_manifest_vad_input = os.path.join(curr_output_dir, 'manifest_vad.json')
+    #     config.diarizer.manifest_filepath = str(manifest_json)
+    #     # if "mixer6" in str(manifest_json.stem):
+    #     #     config.diarizer.speaker_out_dir = os.path.join(curr_output_dir, "speaker_outputs")
 
-        # Step:1-2 Run Diarization 
-        diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
-        diarizer_model.diarize(verbose=False)
+    #     # Step:1-2 Run Diarization 
+    #     diarizer_model = NeuralDiarizer(cfg=config).to(f"cuda:{gpu_id}")
+    #     diarizer_model.diarize(verbose=False)
         
-        move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
+    #     move_diar_results(output_dir, config.diarizer.msdd_model.parameters.system_name, scenario=scenario)
         
-        del diarizer_model
-        # if "mixer6" in str(manifest_json.stem):
-        #     shutil.rmtree(config.diarizer.speaker_out_dir)
+    #     del diarizer_model
+    #     # if "mixer6" in str(manifest_json.stem):
+    #     #     shutil.rmtree(config.diarizer.speaker_out_dir)
         
-    print(f"Time taken for Diar: {(time.time() - start_time)/60:.2f}mins")
+    # print(f"Time taken for Diar: {(time.time() - start_time)/60:.2f}mins")
 
     print("Start GSS-ASR")
     WER = run_gss_asr(
@@ -231,7 +232,7 @@ if __name__ == "__main__":
         type=str,
         default=ASR_MODEL_PATH,
     )
-    parser.add_argument("--output_dir", help="path to store output files", type=str, default="/media/data3/chime7_outputs")
+    parser.add_argument("--output_dir", help="path to store output files", type=str, default="/media/data3/chime7_outputs2")
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=11)
     parser.add_argument("--gpu", help="GPU ID to use", type=int, default=0)
     parser.add_argument("--pattern", help="manfiest patterns for glob", type=str, default=MANIFEST_PATTERN)

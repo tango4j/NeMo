@@ -27,6 +27,7 @@ def main(diarization_dir: str, diarization_params: str, output_dir: str = "", su
             # Currently, subdirectories don't have a uniform naming scheme
             # Therefore, we pick the subdirectory that has both scenario and subset in its name
             scenario_subset_dir = [sd for sd in scenario_dirs if scenario in sd]
+
             if len(scenario_subset_dir) == 0:
                 print(f'No subdirectory found for {scenario} and {subset}')
                 break

@@ -72,11 +72,11 @@ def diar_config_setup(
     # VAD Optimization
     config.diarizer.vad.model_path = vad_model_path
     
-    config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.15, 0.55, step=0.005)
-    config.diarizer.vad.parameters.pad_onset = 0.15 #round(trial.suggest_float("pad_onset", 0.0, 0.2, step=0.01), 2)
-    config.diarizer.vad.parameters.pad_offset = 0.35 #round(trial.suggest_float("pad_offset", 0.35, 0.35, step=0.01), 2)
-    config.diarizer.vad.parameters.min_duration_on = 0.4 # round(trial.suggest_float("min_duration_on", 0.4, 0.4, step=0.05), 2)
-    config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.5, 0.95, step=0.05), 2)
+    config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.15, 0.7, step=0.01)
+    config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.0, 0.2, step=0.01), 2)
+    config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.0, 0.2, step=0.01), 2)
+    config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.2, 0.4, step=0.01), 2)
+    config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.5, 0.95, step=0.01), 2)
 
     # MSDD Optimization
     config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.5, high=0.95, step=0.05)]
@@ -135,11 +135,11 @@ def objective_gss_asr(
     mc_filter_type = "pmwf" #trial.suggest_categorical("mc_filter_type", choices=['pmwf'])
     mc_filter_postfilter = "ban" #trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
 
-    lm_alpha = trial.suggest_float(name='lm_alpha', low=0, high=0.4, step=0.1)
+    lm_alpha = trial.suggest_float(name='lm_alpha', low=0, high=0.1, step=0.01)
     lm_beam_size = trial.suggest_int(name='lm_beam_size', low=6, high=8, step=1)
     maes_num_steps = 5
     maes_alpha = 3
-    maes_gamma = trial.suggest_float(name="maes_expansion_gamma", low=0.3, high=5.3, step=0.5)
+    maes_gamma = trial.suggest_float(name="maes_expansion_gamma", low=0.3, high=5.3, step=0.1)
     maes_beta = 5
 
     command_gss = get_gss_command(

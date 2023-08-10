@@ -43,7 +43,7 @@ CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
 ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
 
 SCENARIOS = "chime6 dipco mixer6"
-SUBSETS = "dev"
+SUBSETS = "eval"
 
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
@@ -75,20 +75,20 @@ def diar_config_setup(
     # VAD Optimization
     config.diarizer.vad.model_path = vad_model_path
    
-    config.diarizer.vad.parameters.frame_vad_threshold = trial.suggest_float("frame_vad_threshold", 0.23, 0.23, step=0.005)
-    config.diarizer.vad.parameters.pad_onset = round(trial.suggest_float("pad_onset", 0.15, 0.15, step=0.01), 2)
-    config.diarizer.vad.parameters.pad_offset = round(trial.suggest_float("pad_offset", 0.35, 0.35, step=0.01), 2)
-    config.diarizer.vad.parameters.min_duration_on = round(trial.suggest_float("min_duration_on", 0.4, 0.4, step=0.05), 2)
-    config.diarizer.vad.parameters.min_duration_off = round(trial.suggest_float("min_duration_off", 0.95, 0.95, step=0.05), 2)
+    config.diarizer.vad.parameters.frame_vad_threshold = 0.23 #trial.suggest_float("frame_vad_threshold", 0.23, 0.23, step=0.005)
+    config.diarizer.vad.parameters.pad_onset = 0.15 #round(trial.suggest_float("pad_onset", 0.15, 0.15, step=0.01), 2)
+    config.diarizer.vad.parameters.pad_offset = 0.35 #round(trial.suggest_float("pad_offset", 0.35, 0.35, step=0.01), 2)
+    config.diarizer.vad.parameters.min_duration_on = 0.4 #round(trial.suggest_float("min_duration_on", 0.4, 0.4, step=0.05), 2)
+    config.diarizer.vad.parameters.min_duration_off = 0.95 #round(trial.suggest_float("min_duration_off", 0.95, 0.95, step=0.05), 2)
 
     # MSDD Optimization
-    config.diarizer.msdd_model.parameters.sigmoid_threshold = [trial.suggest_float("sigmoid_threshold", low=0.85, high=0.85, step=0.05)]
-    config.diarizer.msdd_model.parameters.global_average_mix_ratio = trial.suggest_float("global_average_mix_ratio", low=0.75, high=0.75, step=0.05)
+    config.diarizer.msdd_model.parameters.sigmoid_threshold = [0.85]
+    config.diarizer.msdd_model.parameters.global_average_mix_ratio = 0.75 #trial.suggest_float("global_average_mix_ratio", low=0.75, high=0.75, step=0.05)
 
     # Clustering Optimization
-    config.diarizer.clustering.parameters.max_rp_threshold = round(trial.suggest_float("max_rp_threshold", low=0.05, high=0.05, step=0.01), 2)
-    config.diarizer.clustering.parameters.sparse_search_volume = trial.suggest_int("sparse_search_volume", low=25, high=25, step=1)
-    r_value = round(trial.suggest_float("r_value", 1.7, 1.7, step=0.05), 4)
+    config.diarizer.clustering.parameters.max_rp_threshold = 0.05 #round(trial.suggest_float("max_rp_threshold", low=0.05, high=0.05, step=0.01), 2)
+    config.diarizer.clustering.parameters.sparse_search_volume = 25  #trial.suggest_int("sparse_search_volume", low=25, high=25, step=1)
+    r_value = 1.7  #round(trial.suggest_float("r_value", 1.7, 1.7, step=0.05), 4)
     scale_n = len(config.diarizer.speaker_embeddings.parameters.multiscale_weights)
     config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
     return config
@@ -123,18 +123,18 @@ def objective_gss_asr(
         scenarios: str = SCENARIOS,
         subsets: str = SUBSETS,
     ):
-    mc_mask_min_db = trial.suggest_int("mc_mask_min_db", -160, -160, 20)
-    mc_postmask_min_db = trial.suggest_int("mc_postmask_min_db", -12, -12, 3)
-    bss_iterations = trial.suggest_int("bss_iterations", 5, 5, 5)
-    dereverb_filter_length = trial.suggest_int("dereverb_filter_length", 5, 5, 5)
-    normalize_db = trial.suggest_int("normalize_db", -20, -20, 5)
-    top_k = trial.suggest_int("top_k", 60, 60, 20)
+    mc_mask_min_db = -160 #trial.suggest_int("mc_mask_min_db", -160, -160, 20)
+    mc_postmask_min_db =  -12 #trial.suggest_int("mc_postmask_min_db", -12, -12, 3)
+    bss_iterations = 5 #trial.suggest_int("bss_iterations", 5, 5, 5)
+    dereverb_filter_length = 5 # trial.suggest_int("dereverb_filter_length", 5, 5, 5)
+    normalize_db = -20 #trial.suggest_int("normalize_db", -20, -20, 5)
+    top_k = 60 # trial.suggest_int("top_k", 60, 60, 20)
 
     # New parameters
-    dereverb_prediction_delay = trial.suggest_categorical("dereverb_prediction_delay", choices=[3])
-    dereverb_num_iterations = trial.suggest_categorical("dereverb_num_iterations", choices=[5])
-    mc_filter_type = trial.suggest_categorical("mc_filter_type", choices=['pmwf'])
-    mc_filter_postfilter = trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
+    dereverb_prediction_delay = 3 #trial.suggest_categorical("dereverb_prediction_delay", choices=[3])
+    dereverb_num_iterations = 5 #trial.suggest_categorical("dereverb_num_iterations", choices=[5])
+    mc_filter_type = "pmwf" # trial.suggest_categorical("mc_filter_type", choices=['pmwf'])
+    mc_filter_postfilter = "ban" #trial.suggest_categorical("mc_filter_postfilter", choices=['ban'])
 
     command_gss = get_gss_command(
         gpu_id, 
@@ -288,7 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("--tune_vad", help="whether to tune VAD", type=bool, default=True)
     parser.add_argument("--subsets", help="Subsets to run on", type=str, default=SUBSETS)
     parser.add_argument("--pattern", help="Pattern to match manifest files", type=str, default="*-dev.json")
-
+    parser.add_argument("--gpu_id", help="GPU ID to run on", type=int, default=0)
     args = parser.parse_args()
     os.makedirs(args.temp_dir, exist_ok=True)
 
@@ -326,7 +326,7 @@ if __name__ == "__main__":
         optuna.logging.enable_propagation()  # Propagate logs to the root logger.
         study.optimize(worker_func, n_trials=args.n_trials, show_progress_bar=True)
 
-    optimize(1)
+    optimize(args.gpu_id)
 
     study = optuna.load_study(
         study_name=args.study_name,

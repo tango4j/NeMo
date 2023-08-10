@@ -10,9 +10,10 @@ NUM_TRIALS=1
 
 NEMO_ROOT=/ws/nemo-gitlab-chime7
 
-NGC_JOB_NAME=chime7-infer-t221-eval
-OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-t221
-SCRIPT_NAME=optimize_full_ngc_debug.py
+TRIAL_ID=221
+NGC_JOB_NAME=chime7-infer-t${TRIAL_ID}-eval
+OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-eval-chime
+SCRIPT_NAME=optimize_full_ngc_debug.py  #_t${TRIAL_ID}
 
 OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
 STORAGE=sqlite:///${OPTUNA_JOB_NAME}.db
@@ -20,8 +21,8 @@ DIAR_BATCH_SIZE=11
 
 SUBSET="eval"
 DEREVERB="d03"
-PATTERN="*-eval-${DEREVERB}.json"
-OUTPUT_DIR="/ws/chime7_outputs/optuna-msdd-gss-asr5-trial221-eval-${DEREVERB}"
+PATTERN="*-evaladded-${DEREVERB}.json"
+OUTPUT_DIR="/ws/chime7_outputs/optuna-msdd-gss-asr5-trial${TRIAL_ID}-eval-${DEREVERB}-chime6p2"
 
 # --msdd_model_path /ws/chime7/checkpoints/mc-finetune-MSDDv2-chime6-train_firefly_e57.ckpt \
 # --msdd_model_path /ws/chime7/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt \
