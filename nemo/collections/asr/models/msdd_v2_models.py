@@ -1570,9 +1570,11 @@ class NeuralDiarizer(LightningModule):
         self.use_adaptive_thres = cfg.diarizer.msdd_model.parameters.get('use_adaptive_thres', True)
         self.max_pred_length = cfg.diarizer.msdd_model.parameters.get('max_pred_length', 0)
         self.diar_eval_settings = cfg.diarizer.msdd_model.parameters.get(
-            'diar_eval_settings', [(0.25, False), (0.25, True)]
+            'diar_eval_settings', [(0.25, False)]
+            # 'diar_eval_settings', [(0.25, False), (0.25, True)]
         )
             # 'diar_eval_settings', [(0.25, True), (0.25, False), (0.0, False)]
+        # self.diar_eval_settings = [(0.25,False)]
         if msdd_model is not None:
             self.msdd_model = msdd_model
             self._speaker_model = None
@@ -1703,8 +1705,21 @@ class NeuralDiarizer(LightningModule):
             mc_flag = False
         return mc_flag
     
+    def _get_diar_logits(self, rttm_map, preds_dict, clus_test_label_dict, params):
+        diar_logits_dict = {}
+        for uniq_id in rttm_map.keys():
+            dump_dict = {
+                'clus_label': clus_test_label_dict[uniq_id],
+                'pred_mat': preds_dict[uniq_id],
+                'params': params,
+            }
+            diar_logits_dict[uniq_id] = dump_dict
+        return diar_logits_dict
+        
+        
+    
     @torch.no_grad()
-    def diarize(self, verbose: bool=True) -> Optional[List[Optional[List[Tuple[DiarizationErrorRate, Dict]]]]]:
+    def diarize(self, verbose: bool=True, output_diar_hyp=False) -> Optional[List[Optional[List[Tuple[DiarizationErrorRate, Dict]]]]]:
         """
         Launch diarization pipeline which starts from VAD (or a oracle VAD stamp generation), 
         initialization clustering and multiscale diarization decoder (MSDD).
@@ -1727,10 +1742,12 @@ class NeuralDiarizer(LightningModule):
             preds, targets, ms_ts = self.run_sc_multiscale_decoder()
         
         thresholds = list(self._cfg.diarizer.msdd_model.parameters.sigmoid_threshold)
+        
         for threshold in thresholds:
             outputs = self.run_overlap_aware_eval(preds, ms_ts, threshold, verbose=verbose)
-        if verbose:
-            self.print_configs()
+            
+        # if verbose:
+        #     self.print_configs()
         return outputs
     
     def print_configs(self):
@@ -2060,17 +2077,22 @@ class NeuralDiarizer(LightningModule):
             hop_len_in_cs=int(self.feat_per_sec * self.msdd_model.cfg.interpolated_scale/2),
             ts_vad_threshold=self._cfg.diarizer.msdd_model.parameters.ts_vad_threshold,
         )
-
-        for k, (collar, ignore_overlap) in enumerate(self.diar_eval_settings):
-            output = score_labels(
-                rttm_map,
-                all_reference,
-                all_hypothesis,
-                collar=collar,
-                ignore_overlap=ignore_overlap,
-                verbose=self._cfg.verbose,
-            )
-            outputs.append(output)
+        try:
+            for k, (collar, ignore_overlap) in enumerate(self.diar_eval_settings):
+                output = score_labels(
+                    rttm_map,
+                    all_reference,
+                    all_hypothesis,
+                    collar=collar,
+                    ignore_overlap=ignore_overlap,
+                    verbose=self._cfg.verbose,
+                )
+        except:
+            import ipdb; ipdb.set_trace()
+        outputs.append(output)
+        params = {'hop_len_in_cs': int(self.feat_per_sec * self.msdd_model.cfg.interpolated_scale/2),}
+        diar_logits_dict = self._get_diar_logits(rttm_map, preds_dict, clus_test_label_dict, params)
+        outputs.append(diar_logits_dict)
         return outputs
 
     @classmethod

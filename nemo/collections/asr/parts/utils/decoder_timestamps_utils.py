@@ -324,7 +324,11 @@ class ASRDecoderTimeStamps:
         self.encdec_class = None
         self.AUDIO_RTTM_MAP = audio_rttm_map(self.manifest_filepath)
         self.audio_file_list = [value['audio_filepath'] for _, value in self.AUDIO_RTTM_MAP.items()]
-        self.channel_selector = cfg_diarizer.channel_selector
+        self.channel_selector = cfg_diarizer.get('channel_selector', None)
+        # if cfg_diarizer.get('channel_selector', None):
+        #     self.channel_selector = cfg_diarizer.channel_selector
+        # else:
+        #     self.channel_selector = None
 
     def set_asr_model(self):
         """
@@ -438,36 +442,51 @@ class ASRDecoderTimeStamps:
             dist_sync_on_step=True,
             log_prediction=asr_model._cfg.get("log_prediction", False),
         )
-
+        batch_beam_search_input = []
+        use_batch_beam = True
         with torch.cuda.amp.autocast():
             transcript_logits_list = asr_model.transcribe(
                 self.audio_file_list, batch_size=self.asr_batch_size, logprobs=True
             )
-            for idx, logit_np in enumerate(transcript_logits_list):
-                uniq_id = get_uniqname_from_filepath(self.audio_file_list[idx])
-                if self.beam_search_decoder:
-                    logging.info(
-                        f"Running beam-search decoder on {uniq_id} with LM {self.ctc_decoder_params['pretrained_language_model']}"
-                    )
-                    hyp_words, word_ts = self.run_pyctcdecode(logit_np)
-                else:
-                    log_prob = torch.from_numpy(logit_np)
-                    logits_len = torch.from_numpy(np.array([log_prob.shape[0]]))
-                    greedy_predictions = log_prob.argmax(dim=-1, keepdim=False).unsqueeze(0)
-                    text, char_ts = wer_ts.ctc_decoder_predictions_tensor_with_ts(
-                        greedy_predictions, predictions_len=logits_len
-                    )
-                    trans, char_ts_in_feature_frame_idx = self.clean_trans_and_TS(text[0], char_ts[0])
-                    spaces_in_sec, hyp_words = self._get_spaces(
-                        trans, char_ts_in_feature_frame_idx, self.model_stride_in_secs
-                    )
-                    word_ts = self.get_word_ts_from_spaces(
-                        char_ts_in_feature_frame_idx, spaces_in_sec, end_stamp=logit_np.shape[0]
-                    )
-                word_ts = self.align_decoder_delay(word_ts, self.decoder_delay_in_sec)
-                assert len(hyp_words) == len(word_ts), "Words and word timestamp list length does not match."
-                words_dict[uniq_id] = hyp_words
-                word_ts_dict[uniq_id] = word_ts
+            if self.beam_search_decoder and use_batch_beam:
+                for idx, logit_np in enumerate(transcript_logits_list):
+                    uniq_id = get_uniqname_from_filepath(self.audio_file_list[idx])
+                    if self.beam_search_decoder:
+                        logging.info(
+                            f"Running beam-search decoder on {uniq_id} with LM {self.ctc_decoder_params['pretrained_language_model']}"
+                        )
+                        if use_batch_beam:
+                            batch_beam_search_input.append(logit_np)
+                words_and_ts_list = self.run_pyctcdecode_batch(batch_beam_search_input)
+            else:        
+                for idx, logit_np in enumerate(transcript_logits_list):
+                    uniq_id = get_uniqname_from_filepath(self.audio_file_list[idx])
+                    if self.beam_search_decoder:
+                        logging.info(
+                            f"Running beam-search decoder on {uniq_id} with LM {self.ctc_decoder_params['pretrained_language_model']}"
+                        )
+                        if use_batch_beam:
+                            batch_beam_search_input.append(logit_np)
+                        else:
+                            hyp_words, word_ts = self.run_pyctcdecode(logit_np)
+                    else:
+                        log_prob = torch.from_numpy(logit_np)
+                        logits_len = torch.from_numpy(np.array([log_prob.shape[0]]))
+                        greedy_predictions = log_prob.argmax(dim=-1, keepdim=False).unsqueeze(0)
+                        text, char_ts = wer_ts.ctc_decoder_predictions_tensor_with_ts(
+                            greedy_predictions, predictions_len=logits_len
+                        )
+                        trans, char_ts_in_feature_frame_idx = self.clean_trans_and_TS(text[0], char_ts[0])
+                        spaces_in_sec, hyp_words = self._get_spaces(
+                            trans, char_ts_in_feature_frame_idx, self.model_stride_in_secs
+                        )
+                        word_ts = self.get_word_ts_from_spaces(
+                            char_ts_in_feature_frame_idx, spaces_in_sec, end_stamp=logit_np.shape[0]
+                        )
+                    word_ts = self.align_decoder_delay(word_ts, self.decoder_delay_in_sec)
+                    assert len(hyp_words) == len(word_ts), "Words and word timestamp list length does not match."
+                    words_dict[uniq_id] = hyp_words
+                    word_ts_dict[uniq_id] = word_ts
 
         return words_dict, word_ts_dict
 
@@ -764,6 +783,37 @@ class ASRDecoderTimeStamps:
             words_beam.append(word)
         hyp_words, word_ts = words_beam, word_ts_beam
         return hyp_words, word_ts
+    
+    def run_pyctcdecode_batch(
+        self, logprob_list: List[np.ndarray], onset_delay_in_sec: float = 0, beam_width: int = 32
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Launch pyctcdecode with the loaded pretrained language model.
+
+        Args:
+            logprob (np.ndarray):
+                The log probability from the ASR model inference in numpy array format.
+            onset_delay_in_sec (float):
+                The amount of delay that needs to be compensated for the timestamp outputs froM pyctcdecode.
+            beam_width (int):
+                The beam width parameter for beam search decodring.
+        Returns:
+            hyp_words (list):
+                List containing the words in the hypothesis.
+            word_ts (list):
+                List containing the word timestamps from the decoder.
+        """
+        beams_list = self.beam_search_decoder.decode_beams_batch(logprob_list, beam_width=self.ctc_decoder_params['beam_width'])
+        words_and_ts_list = [] 
+        for beams in beams_list:
+            word_ts_beam, words_beam = [], []
+            for idx, (word, _) in enumerate(beams[0][2]):
+                ts = self.get_word_ts_from_wordframes(idx, beams[0][2], self.model_stride_in_secs, onset_delay_in_sec)
+                word_ts_beam.append(ts)
+                words_beam.append(word)
+            hyp_words, word_ts = words_beam, word_ts_beam
+            words_and_ts_list.append((hyp_words, word_ts))
+        return words_and_ts_list
 
     @staticmethod
     def get_word_ts_from_wordframes(

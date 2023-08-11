@@ -21,6 +21,7 @@ from copy import deepcopy
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
+import pickle
 import omegaconf
 import soundfile as sf
 import torch
@@ -110,7 +111,10 @@ def audio_rttm_map(manifest, attach_dur=False):
         # logging.info("Number of files to diarize: {}".format(len(lines)))
         for line in lines:
             line = line.strip()
-            dic = json.loads(line)
+            try:
+                dic = json.loads(line)
+            except:
+                import ipdb; ipdb.set_trace()
 
             meta = {
                 'audio_filepath': dic['audio_filepath'],
@@ -405,7 +409,9 @@ def rttm_to_labels(rttm_filename):
     with open(rttm_filename, 'r') as f:
         for line in f.readlines():
             start, end, speaker = convert_rttm_line(line, round_digits=3)
-            labels.append('{} {} {}'.format(start, end, speaker))
+            if "speaker" in speaker:
+                speaker = "speaker_" + str(int(float(speaker.split('_')[1])))
+            labels.append('{:.3f} {:.3f} {}'.format(start, end, speaker))
     return labels
 
 
@@ -2077,10 +2083,13 @@ def change_output_dir_names(params, threshold, verbose=True):
     threshold = "" if not verbose else f"{threshold:.2f}"
     params['out_rttm_dir'] = os.path.join(head, params['system_name'], f"pred_rttms_T{threshold}")
     params['out_json_dir'] = os.path.join(head, params['system_name'], f"pred_jsons_T{threshold}")
+    params['out_logit_dir'] = os.path.join(head, params['system_name'], f"pred_logits")
     if not os.path.exists(params['out_rttm_dir']):
         os.makedirs(params['out_rttm_dir'], exist_ok=True)
     if not os.path.exists(params['out_json_dir']):
         os.makedirs(params['out_json_dir'], exist_ok=True)
+    if not os.path.exists(params['out_logit_dir']):
+        os.makedirs(params['out_logit_dir'], exist_ok=True)
     return params
 
 def mixdown_msdd_preds(clus_labels, msdd_preds, time_stamps, offset, threshold, vad_params, params):
@@ -2177,8 +2186,11 @@ def make_rttm_with_overlap(
             hypothesis = labels_to_pyannote_object(hyp_labels, uniq_name=uniq_id)
             if params['out_rttm_dir']:
                 labels_to_rttmfile(hyp_labels, uniq_id, params['out_rttm_dir'])
+                (hyp_labels, uniq_id, params['out_rttm_dir'])
             if params['out_json_dir']:
                 generate_json_output(hyp_labels, uniq_id, params['out_json_dir'], manifest_dic)
+            if params['out_logit_dir']:
+                save_pred_logits(uniq_id, hyp_labels, clus_label_dict[uniq_id], preds_dict[uniq_id], params['out_logit_dir'], params)
             all_hypothesis.append([uniq_id, hypothesis])
             rttm_file = manifest_dic.get('rttm_filepath', None)
             
@@ -2191,6 +2203,20 @@ def make_rttm_with_overlap(
                 no_references = True
                 all_reference = []
     return all_reference, all_hypothesis
+
+def write_logit_pickles(outfile_path, pickle_dump_dict):
+    with open(outfile_path, 'wb') as fp:
+        pickle.dump(pickle_dump_dict, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+def save_pred_logits(uniq_id, hyp_labels, clus_label, pred_mat, out_json_dir, params):
+    pickle_dump_dict = {
+        'clus_label': clus_label,
+        'pred_mat': pred_mat,
+        'params': params,
+        'diar_labels': hyp_labels,
+    }
+    write_logit_pickles(outfile_path=os.path.join(out_json_dir, uniq_id + '.pkl'), pickle_dump_dict=pickle_dump_dict)
+    
 
 def generate_json_output(hyp_labels, uniq_id, out_json_dir, manifest_dic, decimals=2):
     json_dict_list = []

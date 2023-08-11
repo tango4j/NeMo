@@ -4,12 +4,12 @@
 # The configurations in this YAML file is suitable for telephone recordings involving 2~8 speakers in a session and may not show the best performance on the other types of acoustic conditions or dialogues.
 # An example line in an input manifest file (`.json` format):
 # {"audio_filepath": "/path/to/audio_file", "offset": 0, "duration": null, "label": "infer", "text": "-", "num_speakers": null, "rttm_filepath": "/path/to/rttm/file", "uem_filepath": "/path/to/uem/file"}
-name: &name "ClusterDiarizer"
+name: &name "MSDD_V2_DB5_trial221_mono"
 
-num_workers: 1
+num_workers: 20
 sample_rate: 16000
-batch_size: 8
-device: null # can specify a specific device, i.e: cuda:1 (default cuda if cuda available, else cpu)
+batch_size: 12
+device: "cuda" # can specify a specific device, i.e: cuda:1 (default cuda if cuda available, else cpu)
 verbose: True # enable additional logging
 channel_selector: null
 
@@ -38,16 +38,16 @@ diarizer:
       shift_length_in_sec: 0.02 # Shift length in sec for generate frame level VAD prediction
       top_k_channels: 5 # If multi-channel audio files are provided, use top-k channels in terms of VAD logit values
       use_external_vad: True
-      frame_vad_threshold: 0.04
+      frame_vad_threshold: 0.4
       window_length_in_sec: 0.02  # Window length in sec for VAD context input 
       smoothing: "median" # False or type of smoothing method (eg: median)
       overlap: 0.5 # Overlap ratio for overlapped mean/median smoothing filter
       onset: 0.3 # Onset threshold for detecting the beginning and end of a speech 
       offset: 0.3 # Offset threshold for detecting the end of a speech
-      pad_onset: 0.1 # Adding durations before each speech segment 
-      pad_offset: 0.1 # Adding durations after each speech segment 
-      min_duration_on: 0.2 # Threshold for small non_speech deletion
-      min_duration_off: 0.25 # Threshold for short speech segment deletion
+      pad_onset: 0.15 # Adding durations before each speech segment 
+      pad_offset: 0.35 # Adding durations after each speech segment 
+      min_duration_on: 0.4 # Threshold for small non_speech deletion
+      min_duration_off: 0.95 # Threshold for short speech segment deletion
       filter_speech_first: True 
 
   speaker_embeddings:
@@ -55,7 +55,7 @@ diarizer:
     parameters:
       window_length_in_sec: [3.0,1.5,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
       shift_length_in_sec: [1.5,0.75,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
-      multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
+      multiscale_weights: [1.7,1.35,1.0]
       interpolate_scale: 0.1
       save_embeddings: True # If True, save speaker embeddings in pickle format. This should be True if clustering result is used for other models, such as `msdd_model`.
   
@@ -65,7 +65,7 @@ diarizer:
       max_num_speakers: 4 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       min_num_speakers: 2 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
-      max_rp_threshold: 0.15
+      max_rp_threshold: 0.05
       sparse_search_volume: 25 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
       clustering_scale_index: 2 # The index of scale to be used for clustering. 
@@ -82,7 +82,7 @@ diarizer:
       seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
       diar_window_length: 50 # The length of split short sequence when split_infer is True.
-      global_average_mix_ratio: 0.9
+      global_average_mix_ratio: 0.75
       global_average_window_count: 25 # The number of windos to calculate global average embedding for both left and right. If 3, 3+3+1 = 7 windows are used.
       overlap_infer_spk_limit: 0.3 # If the proportion of speaking time is lower than this, ignore those speakers for overlap detection.
       msdd_overlap_add: False
@@ -116,7 +116,7 @@ diarizer:
     
     ctc_decoder_parameters: # Optional beam search decoder (pyctcdecode)
       pretrained_language_model: null # KenLM model file: .arpa model file or .bin binary file.
-      beam_width: 32
+      beam_width: 128
       alpha: 0.5
       beta: 2.5
 
@@ -125,4 +125,9 @@ diarizer:
       min_number_of_words: 3 # Min number of words for the left context.
       max_number_of_words: 10 # Max number of words for the right context.
       logprob_diff_threshold: 1.2  # The threshold for the difference between two log probability values from two hypotheses.
+      parameters:
+        beam_width: 8
+        alpha: 0.5
+        beta: 0.5
+        max_words: 25
 
