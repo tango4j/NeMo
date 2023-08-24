@@ -162,7 +162,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         """
         model_path = self._cfg.diarizer.vad.model_path
         if model_path.endswith('.nemo'):
-            if 'frame_vad' in model_path:
+            if 'frame' in model_path:
                 self._vad_model = EncDecMultiClassificationModel.restore_from(restore_path=model_path, map_location=self._cfg.device)
             else:
                 self._vad_model = EncDecClassificationModel.restore_from(model_path, map_location=self._cfg.device)

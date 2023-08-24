@@ -16,6 +16,7 @@ channel_selector: null
 diarizer:
   use_saved_embeddings: True # True or False
   manifest_filepath: ???
+  uniq_id: null # If not null, only process the audio file with the given uniq_id
   out_dir: ???
   speaker_out_dir: speaker_outputs
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
@@ -104,7 +105,7 @@ diarizer:
     model_path: stt_en_conformer_ctc_large # Provide NGC cloud ASR model name. stt_en_conformer_ctc_* models are recommended for diarization purposes.
     parameters:
       asr_based_vad: False # if True, speech segmentation for diarization is based on word-timestamps from ASR inference.
-      asr_based_vad_threshold: 1.0 # Threshold (in sec) that caps the gap between two words when generating VAD timestamps using ASR based VAD.
+      asr_based_vad_threshold: 0.5 # Threshold (in sec) that caps the gap between two words when generating VAD timestamps using ASR based VAD.
       asr_batch_size: null # Batch size can be dependent on each ASR model. Default batch sizes are applied if set to null.
       decoder_delay_in_sec: null # Native decoder delay. null is recommended to use the default values for each ASR model.
       word_ts_anchor_offset: null # Offset to set a reference point from the start of the word. Recommended range of values is [-0.05  0.2]. 
@@ -120,9 +121,25 @@ diarizer:
       alpha: 0.5
       beta: 2.5
 
+    # realigning: # Experimental feature
+    #   model_path: null # Provide a KenLM language model in .arpa format.
+    #   parameters:
+    #     min_number_of_words: 3 # Min number of words for the left context.
+    #     max_number_of_words: 10 # Max number of words for the right context.
+    #     word_window: 25
+    #     logprob_diff_threshold: 1.2  # The threshold for the difference between two log probability values from two hypotheses.
     realigning_lm_parameters: # Experimental feature
       arpa_language_model: null # Provide a KenLM language model in .arpa format.
+      use_ngram: False
       min_number_of_words: 3 # Min number of words for the left context.
       max_number_of_words: 10 # Max number of words for the right context.
+      word_window: 25
       logprob_diff_threshold: 1.2  # The threshold for the difference between two log probability values from two hypotheses.
+      use_mp: True # If True, use multiprocessing for parallel decoding.
+      use_chunk_mp: True # If True, use multiprocessing for parallel chunking of each session.
+      parallel_chunk_word_len: 200 # The length of the parallel chunk in terms of the number of words.
+      beam_width: 32
+      alpha: 0.5
+      beta: 2.5
+      gamma: 0.5
 

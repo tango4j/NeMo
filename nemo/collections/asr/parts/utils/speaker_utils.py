@@ -2081,9 +2081,12 @@ def change_output_dir_names(params, threshold, verbose=True):
     if not os.path.exists(os.path.join(params['out_rttm_dir'], params['system_name'])):
         os.makedirs(os.path.join(head, params['system_name']), exist_ok=True)
     threshold = "" if not verbose else f"{threshold:.2f}"
-    params['out_rttm_dir'] = os.path.join(head, params['system_name'], f"pred_rttms_T{threshold}")
-    params['out_json_dir'] = os.path.join(head, params['system_name'], f"pred_jsons_T{threshold}")
-    params['out_logit_dir'] = os.path.join(head, params['system_name'], f"pred_logits")
+    # params['out_rttm_dir'] = os.path.join(head, params['system_name'], f"pred_rttms_T{threshold}")
+    # params['out_json_dir'] = os.path.join(head, params['system_name'], f"pred_jsons_T{threshold}")
+    # params['out_logit_dir'] = os.path.join(head, params['system_name'], f"pred_logits")
+    params['out_rttm_dir'] = os.path.join(head, f"pred_rttms")
+    params['out_json_dir'] = os.path.join(head, f"pred_jsons")
+    params['out_logit_dir'] = os.path.join(head, f"pred_logits")
     if not os.path.exists(params['out_rttm_dir']):
         os.makedirs(params['out_rttm_dir'], exist_ok=True)
     if not os.path.exists(params['out_json_dir']):

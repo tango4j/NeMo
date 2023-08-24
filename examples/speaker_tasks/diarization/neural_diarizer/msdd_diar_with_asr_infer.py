@@ -19,7 +19,7 @@ from nemo.collections.asr.parts.utils.decoder_timestamps_utils import ASRDecoder
 from nemo.collections.asr.parts.utils.diarization_utils import OfflineDiarWithASR
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
-
+from tqdm import tqdm
 
 """
 This script demonstrates how to run offline speaker diarization with asr.
@@ -45,16 +45,105 @@ import copy
 import os
 import json 
 import pickle
-
+import numpy as np
+import concurrent.futures
+from copy import deepcopy
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.parts.utils.speaker_utils import (
     audio_rttm_map,
-    get_uniqname_from_filepath,
-    labels_to_rttmfile,
     rttm_to_labels,
-    write_rttm2manifest,
     labels_to_pyannote_object,
 )
+SPLITSYM = "@"
+
+def divide_chunks(trans_info_dict, diar_logits, win_len):
+    """
+    Divide word sequence into chunks of length `win_len` for parallel processing.    
+
+    Args:
+        trans_info_dict (_type_): _description_
+        diar_logits (_type_): _description_
+        win_len (int, optional): _description_. Defaults to 250.
+    """
+    
+    div_trans_info_dict, div_diar_logits = {}, {}
+    for uniq_id in trans_info_dict.keys():
+        uniq_trans = trans_info_dict[uniq_id]
+        del uniq_trans['status']
+        del uniq_trans['transcription']
+        del uniq_trans['sentences']
+        word_seq = uniq_trans['words']
+        logit_seq = diar_logits[uniq_id]['pred_mat']
+        
+        div_word_seq, div_diar_logits_seq = [], []
+        n_chunks = int(np.ceil(len(word_seq)/win_len))  
+        for k in range(n_chunks):
+            # if k == 0:
+            #     div_word_seq.append(word_seq[:win_len])
+            #     div_diar_logits_seq.append(logit_seq[:win_len])
+            # else:
+            div_word_seq.append(word_seq[max((k-1)*win_len, 0):(k+1)*win_len])
+            div_diar_logits_seq.append(logit_seq[max((k-1)*win_len, 0):(k+1)*win_len])
+        total_count = len(div_word_seq)
+        for k, w_seq in enumerate(div_word_seq):
+            seq_id = uniq_id + f"{SPLITSYM}{k}{SPLITSYM}{total_count}"
+            div_trans_info_dict[seq_id] = dict(uniq_trans)
+            div_trans_info_dict[seq_id]['words'] = w_seq
+            div_diar_logits[seq_id] = dict(diar_logits[uniq_id])
+            div_diar_logits[seq_id]['pred_mat'] = div_diar_logits_seq[k]
+    return div_trans_info_dict, div_diar_logits
+
+def merge_div_inputs(div_trans_info_dict, org_trans_info_dict, win_len=250):
+    """
+    Merge the outputs of parallel processing.
+    """
+    
+    uniq_id_list = list(org_trans_info_dict.keys())
+    sub_div_dict = {}
+    for seq_id in div_trans_info_dict.keys():
+        div_info = seq_id.split(SPLITSYM)
+        uniq_id, sub_idx, total_count = div_info[0], int(div_info[1]), int(div_info[2])
+        if uniq_id not in sub_div_dict:
+            sub_div_dict[uniq_id] = [None] * total_count
+        sub_div_dict[uniq_id][sub_idx] = div_trans_info_dict[seq_id]['words']
+            
+    for uniq_id in uniq_id_list:
+        org_trans_info_dict[uniq_id]['words'] = []
+        for k, div_words in enumerate(sub_div_dict[uniq_id]):
+            if k == 0:
+                div_words = div_words[:win_len]
+            else:
+                div_words = div_words[win_len:]
+            org_trans_info_dict[uniq_id]['words'].extend(div_words)
+    return org_trans_info_dict
+            
+def run_mp_beam_search_decoding(asr_diar_offline, trans_info_dict, diar_logits, org_trans_info_dict, div_mp, win_len):
+    # uniq_id_list = sorted(list(asr_diar_offline.AUDIO_RTTM_MAP.keys() ))
+    uniq_id_list = sorted(list(trans_info_dict.keys() ))
+    tp = concurrent.futures.ProcessPoolExecutor(max_workers=4)
+    futures = []
+
+    for uniq_id in tqdm(uniq_id_list, desc="Submitting uniq_id futures", unit="file"):
+        uniq_trans_info_dict = {uniq_id: trans_info_dict[uniq_id]}
+        uniq_diar_logits = {uniq_id: diar_logits[uniq_id]}
+        futures.append(tp.submit(asr_diar_offline.beam_search_diarization, uniq_trans_info_dict, uniq_diar_logits))
+
+    pbar = tqdm(total=len(uniq_id_list), desc="Running beam search decoding", unit="files")
+    count = 0
+    output_trans_info_dict = {}
+    for done_future in concurrent.futures.as_completed(futures):
+        count += 1
+        pbar.update()
+        output_trans_info_dict.update(done_future.result())
+    tp.shutdown()
+    pbar.close() 
+    if div_mp:
+        output_trans_info_dict = merge_div_inputs(div_trans_info_dict=output_trans_info_dict, 
+                                                  org_trans_info_dict=org_trans_info_dict, 
+                                                  win_len=win_len)
+    return output_trans_info_dict
+     
+
 def check_results_dir(cfg):
     trans_info_dict, diar_logits = {}, {}
     all_reference, all_hypothesis = [], []
@@ -63,7 +152,8 @@ def check_results_dir(cfg):
     
     for uniq_id in manifest_json:
         json_trans_path = os.path.join(result_path, "pred_rttms", uniq_id + ".json")
-        logits_path = os.path.join(result_path, cfg.diarizer.msdd_model.parameters.system_name, "pred_logits", uniq_id + ".pkl")
+        # logits_path = os.path.join(result_path, cfg.diarizer.msdd_model.parameters.system_name, "pred_logits", uniq_id + ".pkl")
+        logits_path = os.path.join(result_path, "pred_logits", uniq_id + ".pkl")
         hyp_rttm_path = os.path.join(result_path, "pred_rttms", uniq_id + ".rttm")
         ref_rttm_path = manifest_json[uniq_id]["rttm_filepath"]
         if os.path.exists(json_trans_path):
@@ -72,8 +162,7 @@ def check_results_dir(cfg):
                 json_trans = json.load(file)
         else:
             logging.info(f"JSON transcript not found for {uniq_id}")
-            return None, None
-        
+            return None, None, None
             
         trans_info_dict[uniq_id] = json_trans
         
@@ -85,8 +174,12 @@ def check_results_dir(cfg):
         hypothesis = labels_to_pyannote_object(hyp_labels, uniq_name=uniq_id)
         all_hypothesis.append([uniq_id, hypothesis])    
         
-        with open(logits_path, 'rb') as f:
-            logit_dict = pickle.load(f)
+        if os.path.exists(logits_path):
+            with open(logits_path, 'rb') as f:
+                logit_dict = pickle.load(f)
+        else:
+            logging.info(f"Diarizaiton Logits not found for {uniq_id}")
+            return None, None, None
         logit_dict['diar_labels'] = hyp_labels
         diar_logits[uniq_id] = logit_dict
         
@@ -104,11 +197,11 @@ def check_results_dir(cfg):
 def main(cfg):
     cfg_copy = copy.deepcopy(cfg)
     
-    logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
-        
+    # logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
+       
     trans_info_dict, diar_scores, diar_logits = check_results_dir(cfg)
-    trans_info_dict = None
-    
+    # trans_info_dict, diar_scores, diar_logits = None, None, None
+    org_trans_info_dict = deepcopy(trans_info_dict) 
     if trans_info_dict is None:
         # ASR inference for words and word timestamps
         asr_decoder_ts = ASRDecoderTimeStamps(cfg.diarizer)
@@ -126,8 +219,34 @@ def main(cfg):
         trans_info_dict = asr_diar_offline.get_transcript_with_speaker_labels(diar_hyp, word_hyp, word_ts_hyp, diar_logits=diar_logits)
     else:
         asr_diar_offline = OfflineDiarWithASR(cfg.diarizer) 
-        trans_info_dict = asr_diar_offline.beam_search_diarization(trans_info_dict, diar_logits)
-        
+        use_mp = True
+        # use_mp = False
+        div_mp = True
+        # div_mp = False
+        if cfg.diarizer.asr.realigning_lm_parameters.use_mp:
+            if cfg.diarizer.asr.realigning_lm_parameters.use_chunk_mp:
+                div_trans_info_dict, diar_logits = divide_chunks(trans_info_dict, 
+                                                                 diar_logits, 
+                                                                 win_len=cfg.diarizer.asr.realigning_lm_parameters.parallel_chunk_word_len)
+                
+                trans_info_dict = run_mp_beam_search_decoding(asr_diar_offline, 
+                                                              div_trans_info_dict, 
+                                                              diar_logits, 
+                                                              org_trans_info_dict=trans_info_dict, 
+                                                              div_mp=True,
+                                                              win_len=cfg.diarizer.asr.realigning_lm_parameters.parallel_chunk_word_len)
+            else:
+                div_trans_info_dict = trans_info_dict
+                trans_info_dict = run_mp_beam_search_decoding(asr_diar_offline, 
+                                                              div_trans_info_dict, 
+                                                              diar_logits, 
+                                                              org_trans_info_dict=trans_info_dict, 
+                                                              div_mp=False,
+                                                              win_len=cfg.diarizer.asr.realigning_lm_parameters.parallel_chunk_word_len,
+                                                              )
+        else:
+            trans_info_dict = asr_diar_offline.beam_search_diarization(trans_info_dict, diar_logits)
+                
     # If RTTM is provided and DER evaluation
     if diar_scores is not None:
         metric, mapping_dict, _ = diar_scores
@@ -158,7 +277,7 @@ def main(cfg):
             csv_columns=asr_diar_offline.csv_columns,
         )
         
-        print(f"ALPHA: {cfg.diarizer.asr.ctc_decoder_parameters.alpha} BETA: {cfg.diarizer.asr.ctc_decoder_parameters.beta} BEAM WIDTH: {cfg.diarizer.asr.ctc_decoder_parameters.beam_width}")
+        print(f"ALPHA: {cfg.diarizer.asr.realigning_lm_parameters.alpha} BETA: {cfg.diarizer.asr.realigning_lm_parameters.beta} BEAM WIDTH: {cfg.diarizer.asr.realigning_lm_parameters.beam_width} Word Window {cfg.diarizer.asr.realigning_lm_parameters.word_window}")
         print(f"SpeakerLM Model: {cfg.diarizer.asr.realigning_lm_parameters.arpa_language_model} ASR MODEL: {cfg.diarizer.asr.model_path}")
 
 if __name__ == '__main__':

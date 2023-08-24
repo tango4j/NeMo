@@ -2077,18 +2077,15 @@ class NeuralDiarizer(LightningModule):
             hop_len_in_cs=int(self.feat_per_sec * self.msdd_model.cfg.interpolated_scale/2),
             ts_vad_threshold=self._cfg.diarizer.msdd_model.parameters.ts_vad_threshold,
         )
-        try:
-            for k, (collar, ignore_overlap) in enumerate(self.diar_eval_settings):
-                output = score_labels(
-                    rttm_map,
-                    all_reference,
-                    all_hypothesis,
-                    collar=collar,
-                    ignore_overlap=ignore_overlap,
-                    verbose=self._cfg.verbose,
-                )
-        except:
-            import ipdb; ipdb.set_trace()
+        for k, (collar, ignore_overlap) in enumerate(self.diar_eval_settings):
+            output = score_labels(
+                rttm_map,
+                all_reference,
+                all_hypothesis,
+                collar=collar,
+                ignore_overlap=ignore_overlap,
+                verbose=self._cfg.verbose,
+            )
         outputs.append(output)
         params = {'hop_len_in_cs': int(self.feat_per_sec * self.msdd_model.cfg.interpolated_scale/2),}
         diar_logits_dict = self._get_diar_logits(rttm_map, preds_dict, clus_test_label_dict, params)
