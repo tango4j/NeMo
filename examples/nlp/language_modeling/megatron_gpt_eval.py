@@ -218,6 +218,12 @@ def main(cfg) -> None:
             except:
                 pretrained_cfg["use_flash_attention"] = True
             pretrained_cfg.apply_query_key_layer_scaling = False
+            
+            if cfg.get("encoder_seq_length", None) is not None:
+                pretrained_cfg.encoder_seq_length = cfg.encoder_seq_length
+            if cfg.get("max_position_embeddings", None) is not None:
+                pretrained_cfg.max_position_embeddings = cfg.max_position_embeddings
+
         model = MegatronGPTModel.restore_from(
             restore_path=cfg.gpt_model_file,
             trainer=trainer,
@@ -252,7 +258,6 @@ def main(cfg) -> None:
 
     print(f'\n{OmegaConf.to_yaml(model._cfg)}')
     model.freeze()
-
     # Have to turn off activations_checkpoint_method for inference
     try:
         model.model.language_model.encoder.activations_checkpoint_method = None

@@ -70,6 +70,11 @@ def _modify_config(gpt_cfg, cfg, add_cfg_to_tree=False):
         if cfg.model.get('seq_len_interpolation_factor', None) is not None:
             gpt_cfg.seq_len_interpolation_factor = cfg.model.seq_len_interpolation_factor
 
+        if "encoder_seq_length" in cfg.model:
+            gpt_cfg.encoder_seq_length = cfg.model.encoder_seq_length
+        if "max_position_embeddings" in cfg.model:
+            gpt_cfg.max_position_embeddings = cfg.model.max_position_embeddings
+
         sft_cls = MegatronGPTSFTModel
         gpt_cfg.target = f"{sft_cls.__module__}.{sft_cls.__name__}"
 
