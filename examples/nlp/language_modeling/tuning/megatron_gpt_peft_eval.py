@@ -134,6 +134,10 @@ def main(cfg) -> None:
             peft_model_cfg.apply_query_key_layer_scaling = cfg.model.get('apply_query_key_layer_scaling', True)
         if cfg.model.get("seq_len_interpolation_factor", None) is not None:
             peft_model_cfg["seq_len_interpolation_factor"] = cfg.model.seq_len_interpolation_factor
+        if "encoder_seq_length" in cfg.model:
+            peft_model_cfg.encoder_seq_length = cfg.model.encoder_seq_length
+        if "max_position_embeddings" in cfg.model:
+            peft_model_cfg.max_position_embeddings = cfg.model.max_position_embeddings
 
     with open_dict(cfg):
         # update the config with the trained model config
