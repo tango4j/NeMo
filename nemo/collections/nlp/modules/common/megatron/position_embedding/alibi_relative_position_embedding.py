@@ -86,7 +86,7 @@ class ALiBiRelativePositionEmbedding(torch.nn.Module):
 
     def __init__(
         self, bidirectional, num_attention_heads, layer_type, num_attention_heads_alibi=None, max_seq_len=512, use_FA=False,
-        seq_len_interpolation_factor: int = 2
+        seq_len_interpolation_factor: int = 1
     ):
         """
         Args:
@@ -137,15 +137,14 @@ class ALiBiRelativePositionEmbedding(torch.nn.Module):
                 .unsqueeze(0)
                 .expand(self.num_attention_heads, -1, -1)
             )
-            print("build_relative_position")
         else:
             relative_position = self.relative_position
-            print("reuse")
 
         # shape (num_attention_heads, query_seq_length, key_seq_length)
         relative_position = relative_position[:, -query_seq_length:, -key_seq_length:]
         # if not bidirectional, mask out the future positions
         # shape (1, num_heads, query_length, key_length)
-        import pdb; pdb.set_trace()
-        return -relative_position.unsqueeze(0) * self.slopes / self.seq_len_interpolation_factor
+        if self.seq_len_interpolation_factor is not None:
+            relative_position *= 1 / self.seq_len_interpolation_factor
+        return -relative_position.unsqueeze(0) * self.slopes
             
