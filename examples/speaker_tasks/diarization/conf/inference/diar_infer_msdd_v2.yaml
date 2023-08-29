@@ -139,6 +139,7 @@ diarizer:
       use_chunk_mp: True # If True, use multiprocessing for parallel chunking of each session.
       parallel_chunk_word_len: 200 # The length of the parallel chunk in terms of the number of words.
       beam_width: 32
+      port: "[5501,5503]"
       alpha: 0.5
       beta: 2.5
       gamma: 0.5

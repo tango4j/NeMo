@@ -48,7 +48,7 @@ from .constants import (
     MIN_TOKEN_CLIP_P,
 )
 DEFAULT_BEAM_WIDTH=10
-
+LOG_MIN_VAL = 1e-12
 from .language_model import (
     AbstractLanguageModel,
     HotwordScorer,
@@ -119,10 +119,19 @@ Shape = TypeVar("Shape")
 
 import json
 import requests
-from pprint import pprint 
 import time
+from pprint import pprint 
 
-def request_data(data, port_num=5554):
+def rindex(mylist, myvalue):
+    return len(mylist) - mylist[::-1].index(myvalue) - 1
+
+def rindex_incl(mylist, myvalue):
+    for i, item in enumerate(reversed(mylist)):
+        if myvalue in item:
+            return len(mylist) - i - 1
+    return 0
+
+def request_data(data, port_num=5555):
     headers = {"Content-Type": "application/json"}
     resp = requests.put('http://localhost:{}/generate'.format(port_num),
 			data=json.dumps(data),
@@ -131,18 +140,16 @@ def request_data(data, port_num=5554):
         raise ValueError("Error: {}".format(resp.json()))
     
     if 'word_probs' in resp.json():
-        sentences = resp.json()['word_probs']
+        probs = resp.json()['word_probs']
     elif 'spk_probs' in resp.json():
-        sentences = resp.json()['spk_probs']
+        probs = resp.json()['spk_probs']
     else:
         raise ValueError("Error: No such keys as word_probs or spk_probs {}".format(resp.json()))
-    # print(f"resp: {resp}")
-    # print(f"resp.json: {resp.json()}")
-    # sentences = resp.json()['sentences']
-    resp_dict = resp.json()
-    return sentences, resp_dict
 
-def send_chat(prompt_var, tokens_to_generate):
+    resp_dict = resp.json()
+    return resp_dict
+
+def send_chat(prompt_var, tokens_to_generate, port):
     task_hash = [] 
     # for prompt in prompt_var:
     #     task_hash.append(hashlib.md5(prompt.encode()).hexdigest())
@@ -164,12 +171,10 @@ def send_chat(prompt_var, tokens_to_generate):
         "compute_logprob": True,
         "min_tokens_to_generate": 2,
     }
-    sentences, resp_dict = request_data(data)
-    # for sent in sentences:
-    #     print(sent)
-    # print(f"resp_dict: {resp_dict}")
-    # print(f"sentences: {sentences}")
-    return sentences
+    # sentences, resp_dict = request_data(data, port_num=port)
+    # return sentences
+    resp_dict = request_data(data, port_num=port)
+    return resp_dict
 
 
 
@@ -204,6 +209,25 @@ class SpeakerToWordAlignerLM:
             else:
                 spk_trans_dict[spk_label] += f" {word}"
         return spk_trans_dict
+    
+    def _get_windowed_context_ngram(self, all_spk_trans: dict , num_spks: int , max_word: int):
+        # trunc_trans = all_spk_trans.split()[-(num_spks*max_word):]
+        trunc_trans = all_spk_trans.split()[-(max_word):]
+        if trunc_trans[0] not in [ARPA_STT, ARPA_END]:
+            trunc_trans.insert(0, ARPA_STT)
+        elif trunc_trans[0] == ARPA_END:
+            trunc_trans = trunc_trans[1:]
+        return trunc_trans
+    
+    def _get_windowed_context_llm(self, prompt_trans: dict , num_spks: int , max_word: int):
+        split_trans = prompt_trans.split()
+        # ridx = rindex_incl(split_trans[:-(num_spks*max_word)], '[speaker')
+        ridx = rindex_incl(split_trans[:-(max_word)], '[speaker')
+        speaker_symbol = split_trans[ridx]
+        trunc_trans = split_trans[-(num_spks*max_word):]
+        if '[speaker' not in trunc_trans[0]:
+            trunc_trans.insert(0, speaker_symbol)
+        return trunc_trans
     
     def get_spk_wise_probs(
         self, 
@@ -243,10 +267,16 @@ class SpeakerToWordAlignerLM:
         hyp_probs = {spk: 0 for spk in speaker_list}
         hyp_base_individ_probs = {spk: {tgt_spk: 0 for tgt_spk in speaker_list} for spk in speaker_list}
         hyp_base_allspks_probs = {spk: 0 for spk in speaker_list}
+        
         for spk in speaker_list:
-            PROMPT_STT, PROMPT_END = f'[speaker{spk}]', ""
-            allspks_word_list = spk_trans_dict['all_spks'].split()[-(num_spks*max_word):]
-            prompt_word_list = spk_trans_dict['prompt'].split()[-(num_spks*max_word):]
+            PROMPT_STT, PROMPT_END = f'[speaker{spk}]:', ""
+            # if len(spk_trans_dict['prompt'].split()) < 100:
+            #     allspks_word_list = spk_trans_dict['all_spks'].split()[-(num_spks*max_word):]
+            #     prompt_word_list = spk_trans_dict['prompt'].split()[-(num_spks*max_word):]
+            # else:
+            allspks_word_list = self._get_windowed_context_ngram(spk_trans_dict['all_spks'], num_spks, max_word) 
+            prompt_word_list = self._get_windowed_context_llm(spk_trans_dict['prompt'], num_spks, max_word)  
+            
             truncated_allspks_words = " ".join(allspks_word_list)
             truncated_prompt_words = " ".join(prompt_word_list)
             hyp_base_allspks_probs[spk] = self.realigning_lm.score(truncated_allspks_words)
@@ -292,6 +322,7 @@ class SpeakerToWordAlignerLM:
             all_spks_sentence = hyp_allspks_dict[spk]
             all_spks_prob = self.realigning_lm.score(all_spks_sentence) - hyp_base_allspks_probs[spk]
             hyp_probs[spk] += sum(indiv_spk_probs) 
+            
         lm_spk_logits = [hyp_probs[spk] for spk in sorted(hyp_probs)]
         lm_spk_probs = np.power(10, lm_spk_logits)
         lm_spk_probs_sm = lm_spk_probs/np.sum(lm_spk_probs)
@@ -518,6 +549,7 @@ class BeamSearchDecoderCTC:
         use_ngram: bool = True,
         build_up_len: int = 50,
         language_model: Optional[AbstractLanguageModel] = None,
+        port: int = None,
     ) -> None:
         """CTC beam search decoder for token logit matrix.
 
@@ -537,6 +569,7 @@ class BeamSearchDecoderCTC:
         self.build_up_len=build_up_len
         self.word_window = word_window
         self.gamma = 0.9
+        self.port = port
         self.spk_lm_decoder = SpeakerToWordAlignerLM(realigning_lm=language_model, beta=self.beta)
         BeamSearchDecoderCTC.model_container[self._model_key] = language_model
 
@@ -641,14 +674,15 @@ class BeamSearchDecoderCTC:
         return hashlib.md5(text.encode()).hexdigest()
     
 
-    def get_prompt(self, spk_trans_dict, next_word, speaker_list, spk_int, prompt_dict):
-        EOD = "[end of dialogue]"
-        USER = "User:"
-        ASSI = "Assistant:"
+    def get_prompt(self, spk_trans_dict, next_word, speaker_list, spk_int, prompt_dict, num_spks, max_word):
+        EOD = "[end]"
+        ASSI = "Answer:[speaker"
+        next_word = f"({next_word})"
         speaker_list_str = " or ".join([f"[{spk_id.replace('_','')}]" for spk_id in speaker_list ])
-        QUESTION_STR = f"The next word is `{next_word}`. Which speaker spoke the next word `{next_word}`? {speaker_list_str}?"
-        transcript_prompt = spk_trans_dict['prompt'].replace(f"[speaker", f"\n[speaker")
-        spk_prompt_str = f"{USER} {transcript_prompt}\n{EOD}\n{QUESTION_STR} \n\n{ASSI}"
+        QUESTION_STR = f"Question: The next word is {next_word}. Who spoke {next_word} ?"
+        prompt_word_list = self.spk_lm_decoder._get_windowed_context_llm(spk_trans_dict['prompt'], num_spks, max_word)  
+        transcript_prompt = " ".join(prompt_word_list)
+        spk_prompt_str = f"{transcript_prompt} {EOD} {QUESTION_STR} \n{ASSI}"
         word_prompt_str = f"{prompt_dict[spk_int]}"
         return spk_prompt_str, word_prompt_str
     
@@ -681,6 +715,7 @@ class BeamSearchDecoderCTC:
                                                                 prev_trans_dict=spk_trans_dict)
             transcript_hash =  self._get_transcript_hash(text=concat_prev_text) 
             batch_input.append((cache_key, next_word, last_char, next_char, next_spk_int, spk_trans_dict))
+            num_spks = len(_get_speaker_list(spk_trans_dict))
             spk_wise_probs, confidence, prompt_dict = self.spk_lm_decoder.get_spk_wise_probs(next_word=next_word, 
                                                                                             last_char=last_char, 
                                                                                             next_char=next_char,
@@ -691,19 +726,32 @@ class BeamSearchDecoderCTC:
             spk_probs_ngram.append(spk_wise_probs)
             word_probs_ngram.append(confidence)
             
-            spk_prompt_str, word_prompt_str = self.get_prompt(spk_trans_dict, next_word, speaker_list, next_spk_int, prompt_dict)
+            spk_prompt_str, word_prompt_str = self.get_prompt(spk_trans_dict, next_word, speaker_list, next_spk_int, prompt_dict, num_spks, max_word=self.word_window)
                 
             spk_prompts.append(spk_prompt_str)
             word_prompts.append(word_prompt_str)
 
         
         # cached_lm_scores = self.run_batched_inference(batch_input=batch_input)
+        use_one_infer = False
         try:
-            spk_probs = send_chat(spk_prompts, tokens_to_generate=4)
-            word_probs = send_chat(word_prompts, tokens_to_generate=1)
+            if use_one_infer:
+                resp_dict = send_chat(spk_prompts, tokens_to_generate=4, port=self.port)
+                spk_probs, word_probs = resp_dict['spk_probs'], resp_dict['word_probs']
+            else:
+                resp_dict_spk = send_chat(spk_prompts, tokens_to_generate=4, port=self.port)
+                resp_dict_word = send_chat(word_prompts, tokens_to_generate=1, port=self.port)
+                spk_probs, word_probs = resp_dict_spk['spk_probs'], resp_dict_word['word_probs']
+        
+            # print(f"Time taken for spk_probs: {(time.time() - stt1):.4f} s, len(spk_prompts[0].split()): {len(spk_prompts[0].split())}")
+            # stt2 = time.time()
+            # word_probs = send_chat(word_prompts, tokens_to_generate=1, port=self.port)
+            # print(f"Time taken for word_probs: {(time.time() - stt2):.4f} s, len(word_prompts[0].split()): {len(word_prompts[0].split())}")
         except:
-            spk_probs = spk_probs_ngram
-            word_probs = word_probs_ngram
+            logging.info("[Error] Failed sending chat to nvllm server. Falling back to ngram LM.")
+            spk_probs, word_probs = spk_probs_ngram, word_probs_ngram
+            # raise ValueError("Failed sending chat to nvllm server. Falling back to ngram LM.")
+            
                 
         if len(spk_trans_dict['all_spks'].split()) < self.word_window:
             self._beta_flag = 1.0
@@ -713,8 +761,9 @@ class BeamSearchDecoderCTC:
         for idx, (spk_trans_dict, next_word, text_frames, last_char, next_char, logit_score) in enumerate(beams):
             # _, _, spk_wise_probs, confidence  = cached_lm_scores[cache_key]
             spk_wise_probs, confidence = spk_probs[idx], word_probs[idx]
+            # spk_wise_probs, confidence = spk_probs_ngram[idx], word_probs_ngram[idx]
 
-            lm_score = np.log(confidence * spk_wise_probs[next_spk_int])
+            lm_score = np.log(max(confidence * spk_wise_probs[next_spk_int], LOG_MIN_VAL))
             spk_idx_char = int(last_char.split('_')[-1])
             new_beams.append(
                 (
@@ -802,7 +851,7 @@ class BeamSearchDecoderCTC:
         if word == '' or word is None or len(word) == 0:
            return spk_trans_dict 
         
-        PROMPT_STT = f"[speaker{spk_label}]"
+        PROMPT_STT = f"[speaker{spk_label}]:"
         PROMPT_END = ""
            
         if spk_label == prev_spk or prev_spk is None:
@@ -942,7 +991,8 @@ class BeamSearchDecoderCTC:
             # lm scoring and beam pruning
             new_beams = _merge_speaker_beams(new_beams, word_window=self.word_window)
             
-            if self.use_ngram: 
+            # if self.use_ngram or word_idx < 100: 
+            if self.use_ngram:
                 scored_beams = self._get_speaker_lm_beams(
                     speaker_list,
                     new_beams,
@@ -1010,6 +1060,7 @@ class BeamSearchDecoderCTC:
         token_min_logp: float = DEFAULT_MIN_TOKEN_LOGP,
         prune_history: bool = DEFAULT_PRUNE_BEAMS,
         hotwords: Optional[Iterable[str]] = None,
+        port_num: int = None,
         hotword_weight: float = DEFAULT_HOTWORD_WEIGHT,
         lm_start_state: LMState = None,
     ) -> List[OutputBeam]:
@@ -1033,6 +1084,7 @@ class BeamSearchDecoderCTC:
         hotword_scorer = HotwordScorer.build_scorer(hotwords, weight=hotword_weight)
         logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
         token_min_logp=np.log(np.clip(0, MIN_TOKEN_CLIP_P, 1))
+        self.port = port_num
         decoded_beams = self._decode_logits(
             logits,
             speaker_list=speaker_list,
@@ -1340,6 +1392,7 @@ def build_diardecoder(
     beta: float = DEFAULT_BETA,
     word_window: int = 25,
     use_ngram: bool = True,
+    port: int = None,
     build_up_len: int = 25,
     unk_score_offset: float = DEFAULT_UNK_LOGP_OFFSET,
     lm_score_boundary: bool = DEFAULT_SCORE_LM_BOUNDARY,
@@ -1386,4 +1439,4 @@ def build_diardecoder(
     else:
         language_model = None
     alphabet = None
-    return BeamSearchDecoderCTC(alphabet, alpha, beta, word_window, use_ngram, build_up_len, language_model)
+    return BeamSearchDecoderCTC(alphabet, alpha, beta, word_window, use_ngram, build_up_len, language_model, port=port)

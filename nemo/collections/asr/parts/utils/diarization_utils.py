@@ -29,7 +29,7 @@ import re
 from nemo.collections.asr.parts.utils.pydiardecode import build_diardecoder
 # diar_decoder, diar_language_model
 
-from nemo.collections.asr.metrics.der import concat_perm_word_error_rate
+from nemo.collections.asr.metrics.der import concat_perm_word_error_rate, spk_attr_word_error_rate, word_diar_error_rate
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.models import ClusteringDiarizer
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
@@ -277,7 +277,7 @@ def convert_ctm_to_text(ctm_file_path: str) -> Tuple[List[str], str]:
         mix_reference.append(ctm_split[4])
     spk_reference = [" ".join(word_list) for word_list in per_spk_ref_trans_dict.values()]
     mix_reference = " ".join(mix_reference)
-    return spk_reference, mix_reference
+    return spk_reference, mix_reference, per_spk_ref_trans_dict
 
 
 def convert_word_dict_seq_to_text(word_dict_seq_list: List[Dict[str, float]]) -> Tuple[List[str], str]:
@@ -319,7 +319,7 @@ def convert_word_dict_seq_to_text(word_dict_seq_list: List[Dict[str, float]]) ->
     # Create a list containing string formatted transcript
     spk_hypothesis = [" ".join(word_list) for word_list in per_spk_hyp_trans_dict.values()]
     mix_hypothesis = " ".join(mix_hypothesis)
-    return spk_hypothesis, mix_hypothesis
+    return spk_hypothesis, mix_hypothesis, per_spk_hyp_trans_dict
 
 
 def convert_word_dict_seq_to_ctm(
@@ -523,8 +523,10 @@ class OfflineDiarWithASR:
             'MISS',
             'est_n_spk',
             'ref_n_spk',
-            'cpWER',
             'WER',
+            'cpWER',
+            'SAWER',
+            'deltaSAWER',
             'mapping',
         ]
 
@@ -946,12 +948,12 @@ class OfflineDiarWithASR:
                 diar_logit_mat=diar_hyp_dict['pred_mat']
             )
             if self.realigning_lm is not None:
-                output_beams = self.realign_words_with_lm(diar_hyp_dict['pred_mat'], word_dict_seq_list, spk_list=spk_list)
+                output_beams = self.realign_words_with_lm(diar_hyp_dict['pred_mat'], word_dict_seq_list)
                 word_dict_seq_list = output_beams[0][2]
 
             
             # Create a transscript information json dictionary from the output variables
-            trans_info_dict[uniq_id] = self._make_json_output(uniq_id, diar_labels, word_dict_seq_list)
+            trans_info_dict[uniq_id] = self._make_json_output(uniq_id, diar_labels, word_dict_seq_list, write_files=True)
         logging.info(f"Diarization with ASR output files are saved in: {self.root_path}/pred_rttms")
         return trans_info_dict
 
@@ -959,6 +961,7 @@ class OfflineDiarWithASR:
         self, 
         trans_info_dict,
         diar_logits: Dict[str, Dict[str, list]]=None,
+        port_num=None,
     ) -> Dict[str, Dict[str, float]]:
         """
         Match the diarization result with the ASR output.
@@ -978,17 +981,16 @@ class OfflineDiarWithASR:
                 )
             else:
                 self.realigning_lm = self._load_realigning_LM()
-
         for uniq_id, session_dict in trans_info_dict.items():
             if self.realigning_lm is not None:
                 diar_hyp_dict = diar_logits[uniq_id]
                 word_dict_seq_list = session_dict['words']
                 logging.info(f"Beam search for diarization of {uniq_id}")
-                output_beams = self.realign_words_with_lm(diar_hyp_dict['pred_mat'], word_dict_seq_list, speaker_count=session_dict['speaker_count'])
+                output_beams = self.realign_words_with_lm(diar_hyp_dict['pred_mat'], word_dict_seq_list, speaker_count=session_dict['speaker_count'], port_num=port_num)
                 word_dict_seq_list = output_beams[0][2]
                 # Create a transscript information json dictionary from the output variables
                 diar_labels = diar_logits[uniq_id]['diar_labels']
-                trans_info_dict[uniq_id] = self._make_json_output(uniq_id, diar_labels, word_dict_seq_list)
+                trans_info_dict[uniq_id] = self._make_json_output(uniq_id, diar_labels, word_dict_seq_list, write_files=False)
         return trans_info_dict
     
     def get_word_level_json_list(
@@ -1074,6 +1076,7 @@ class OfflineDiarWithASR:
         uniq_id: str, 
         diar_labels: List[str], 
         word_dict_seq_list: List[Dict[str, float]],
+        write_files: bool = True,
     ) -> Dict[str, Dict[str, str]]:
         """
         Generate json output files and transcripts from the ASR and diarization results.
@@ -1176,7 +1179,7 @@ class OfflineDiarWithASR:
         session_trans_dict['transcription'] = ' '.join(word_seq_list)
         # add sentences to transcription information dict
         session_trans_dict['sentences'] = sentences
-        self._write_and_log(uniq_id, session_trans_dict, audacity_label_words, gecko_dict, sentences)
+        self._write_and_log(uniq_id, session_trans_dict, audacity_label_words, gecko_dict, write_files=write_files)
         return session_trans_dict
 
     def _get_realignment_ranges(self, k: int, word_seq_len: int) -> Tuple[int, int]:
@@ -1241,7 +1244,7 @@ class OfflineDiarWithASR:
         return word_pos
     
 
-    def realign_words_with_lm(self, diar_logits, word_dict_seq_list: List[Dict[str, float]], speaker_count: int = None) -> List[Dict[str, float]]:
+    def realign_words_with_lm(self, diar_logits, word_dict_seq_list: List[Dict[str, float]], speaker_count: int = None, port_num=None) -> List[Dict[str, float]]:
         """
         Realign the mapping between speaker labels and words using a language model.
         The realigning process calculates the probability of the certain range around the words,
@@ -1288,7 +1291,8 @@ class OfflineDiarWithASR:
         realigned_list = self.realigning_lm.decode_beams(logits=diar_logits, 
                                                          beam_width=self.realigning_lm_params['beam_width'],
                                                          speaker_list=sorted(list(set(spk_list))), 
-                                                         word_dict_seq_list=word_dict_seq_list)
+                                                         word_dict_seq_list=word_dict_seq_list,
+                                                         port_num=port_num)
         return realigned_list
 
     @staticmethod
@@ -1297,6 +1301,7 @@ class OfflineDiarWithASR:
         hyp_trans_info_dict: Dict[str, Dict[str, float]],
         hyp_ctm_file_list: List[str] = None,
         ref_ctm_file_list: List[str] = None,
+        mapping_dict: Dict[str, str] = None,
     ) -> Dict[str, Dict[str, float]]:
         """
         Evaluate the result transcripts based on the provided CTM file. WER and cpWER are calculated to assess
@@ -1321,7 +1326,7 @@ class OfflineDiarWithASR:
         wer_results = {}
 
         if ref_ctm_file_list is not None:
-            spk_hypotheses, spk_references = [], []
+            spk_hypotheses, spk_references, per_spk_references, per_spk_hypotheses = [], [], [], []
             mix_hypotheses, mix_references = [], []
             WER_values, uniq_id_list = [], []
 
@@ -1334,38 +1339,47 @@ class OfflineDiarWithASR:
                 # Either hypothesis CTM file or hyp_trans_info_dict should be provided
                 if hyp_ctm_file_list is not None:
                     if uniq_id == get_uniqname_from_filepath(hyp_ctm_file_list[k]):
-                        spk_hypothesis, mix_hypothesis = convert_ctm_to_text(hyp_ctm_file_list[k])
+                        spk_hypothesis, mix_hypothesis, per_spk_hypothesis = convert_ctm_to_text(hyp_ctm_file_list[k])
                     else:
                         raise ValueError("Hypothesis CTM files are provided but uniq_id is mismatched")
                 elif hyp_trans_info_dict is not None and uniq_id in hyp_trans_info_dict:
-                    spk_hypothesis, mix_hypothesis = convert_word_dict_seq_to_text(
+                    spk_hypothesis, mix_hypothesis, per_spk_hypothesis = convert_word_dict_seq_to_text(
                         hyp_trans_info_dict[uniq_id]['words']
                     )
                 else:
                     raise ValueError("Hypothesis information is not provided in the correct format.")
 
-                spk_reference, mix_reference = convert_ctm_to_text(ctm_file_path)
-
+                spk_reference, mix_reference, per_spk_reference = convert_ctm_to_text(ctm_file_path)
+                # For cpWER
                 spk_hypotheses.append(spk_hypothesis)
                 spk_references.append(spk_reference)
                 mix_hypotheses.append(mix_hypothesis)
                 mix_references.append(mix_reference)
+                # For SA-WER (DA-WER)
+                per_spk_hypotheses.append(per_spk_hypothesis)
+                per_spk_references.append(per_spk_reference)
 
                 # Calculate session by session WER value
                 WER_values.append(word_error_rate([mix_hypothesis], [mix_reference]))
 
-            cpWER_values, hyps_spk, refs_spk = concat_perm_word_error_rate(spk_hypotheses, spk_references)
+            cpWER_values, cpWER_hyps_spk, cpWER_refs_spk = concat_perm_word_error_rate(spk_hypotheses, spk_references)
+            SAWER_values, SAWER_hyps_spk, SAWER_refs_spk = spk_attr_word_error_rate(per_spk_hypotheses, per_spk_references, uniq_id_list, mapping_dict=mapping_dict)
+            # WDER_values, hyps_spk, refs_spk = word_diar_error_rate(spk_hypotheses, spk_references)
 
             # Take an average of cpWER and regular WER value on all sessions
             wer_results['total'] = {}
-            wer_results['total']['average_cpWER'] = word_error_rate(hypotheses=hyps_spk, references=refs_spk)
+            wer_results['total']['average_cpWER'] = word_error_rate(hypotheses=cpWER_hyps_spk, references=cpWER_refs_spk)
+            wer_results['total']['average_SAWER'] = word_error_rate(hypotheses=SAWER_hyps_spk, references=SAWER_refs_spk)
             wer_results['total']['average_WER'] = word_error_rate(hypotheses=mix_hypotheses, references=mix_references)
+            wer_results['total']['average_deltaSAWER'] =  wer_results['total']['average_SAWER'] -  wer_results['total']['average_WER']
 
-            for (uniq_id, cpWER, WER) in zip(uniq_id_list, cpWER_values, WER_values):
+            for (uniq_id, cpWER, SAWER, WER) in zip(uniq_id_list, cpWER_values, SAWER_values, WER_values):
                 # Save session-level cpWER and WER values
                 wer_results[uniq_id] = {}
                 wer_results[uniq_id]['cpWER'] = cpWER
+                wer_results[uniq_id]['SAWER'] = SAWER
                 wer_results[uniq_id]['WER'] = WER
+                wer_results[uniq_id]['deltaSAWER'] = SAWER - WER
 
         return wer_results
 
@@ -1412,6 +1426,7 @@ class OfflineDiarWithASR:
                 writer.writeheader()
                 for data in total_result_jsons:
                     writer.writerow(data)
+                        
         except IOError:
             logging.info("I/O error has occurred while writing a csv file.")
 
@@ -1453,7 +1468,7 @@ class OfflineDiarWithASR:
         session_trans_dict: Dict[str, Dict[str, float]],
         audacity_label_words: List[str],
         gecko_dict: Dict[str, Dict[str, float]],
-        sentences: List[Dict[str, float]],
+        write_files: bool = True,
     ):
         """
         Write output files and display logging messages.
@@ -1471,25 +1486,32 @@ class OfflineDiarWithASR:
                 List containing sentence dictionary
         """
         # print the sentences in the .txt output
-        string_out = self.print_sentences(sentences)
+        string_out = self.print_sentences(session_trans_dict['sentences'])
         if self.params['break_lines']:
             string_out = self._break_lines(string_out)
 
         session_trans_dict["status"] = "success"
         ctm_lines_list = convert_word_dict_seq_to_ctm(session_trans_dict['words'])
         
-        if self.realigning_lm is None:
+        # if self.realigning_lm is None:
+        if self.cfg_diarizer.asr.realigning_lm_parameters.arpa_language_model is None:
             output_folder = "pred_rttms"
         else:
-            output_folder = "pred_rttms_lm_align"
+            if self.cfg_diarizer.asr.realigning_lm_parameters.use_ngram:
+                output_folder = "pred_rttms_ngram_align"
+            else:
+                output_folder = "pred_rttms_llm_align"
         
         if not os.path.exists(f'{self.root_path}/{output_folder}'):
             os.makedirs(f'{self.root_path}/{output_folder}')
-        dump_json_to_file(f'{self.root_path}/{output_folder}/{uniq_id}.json', session_trans_dict)
-        dump_json_to_file(f'{self.root_path}/{output_folder}/{uniq_id}_gecko.json', gecko_dict)
-        write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.ctm', '\n'.join(ctm_lines_list))
-        write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.txt', string_out.strip())
-        write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.w.label', '\n'.join(audacity_label_words))
+        if write_files:
+            dump_json_to_file(f'{self.root_path}/{output_folder}/{uniq_id}.json', session_trans_dict)
+            write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.ctm', '\n'.join(ctm_lines_list))
+            write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.txt', string_out.strip())
+            if gecko_dict is not None:
+                dump_json_to_file(f'{self.root_path}/{output_folder}/{uniq_id}_gecko.json', gecko_dict)
+            if audacity_label_words is not None:
+                write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.w.label', '\n'.join(audacity_label_words))
 
     @staticmethod
     def print_errors(der_results: Dict[str, Dict[str, float]], wer_results: Dict[str, Dict[str, float]]):
@@ -1513,7 +1535,9 @@ class OfflineDiarWithASR:
             logging.info(
                 DER_info
                 + f"\ncpWER              : {wer_results['total']['average_cpWER']:.4f} \
-                     \nWER                : {wer_results['total']['average_WER']:.4f}"
+                    \nSAWER              : {wer_results['total']['average_SAWER']:.4f} \
+                    \nWER                : {wer_results['total']['average_WER']:.4f} \
+                    \nΔSAWER             : {wer_results['total']['average_deltaSAWER']:.4f}"
             )
         else:
             logging.info(DER_info)
