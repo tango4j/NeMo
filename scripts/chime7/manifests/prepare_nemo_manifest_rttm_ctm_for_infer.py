@@ -321,6 +321,9 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     
     if subset == 'dev':
         datasets = ['chime6', 'dipco', 'mixer6']
+    elif subset == 'eval':
+        datasets = ['chime6']
+        # datasets = ['chime6', 'dipco', 'mixer6']
         # datasets = ['dipco']
     elif subset == 'train':
         datasets = ['chime6']
@@ -343,6 +346,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
             uem_lines = open(uem_files_paths[0]).readlines()
             uem_dict = parse_uem_lines(uem_lines)
         elif len(uem_files_paths) == 0:
+            import ipdb; ipdb.set_trace()
             raise ValueError(f'No uem files found in {uem_dir}')
         else:
             raise ValueError(f'Multiple uem files found in {uem_dir}')
@@ -486,7 +490,7 @@ if __name__ == '__main__':
         '--data-dir', type=str, required=True, help='Directory with CHiME-7 data',
     )
     parser.add_argument(
-        '--subset', choices=['dev', 'train', 'train_intv', 'train_call'], default='dev', help='Data subset',
+        '--subset', choices=['dev', 'eval', 'train', 'train_intv', 'train_call'], default='dev', help='Data subset',
     )
     parser.add_argument(
         '--output-dir', type=str, required=True, help='Output dir',

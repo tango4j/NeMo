@@ -4,15 +4,17 @@ set -x
 
 CONTAINER=nvcr.io/nvidia/nemo:22.12
 NGC_WORKSPACE=nemo_asr_eval
-NGC_JOB_NAME=optuna-msdd-gss-as5-t221
+NGC_JOB_NAME=optuna-msdd-gss-asr-lm-v2
 NGC_JOB_LABEL="ml___conformer"
 NGC_NODE_TYPE="dgx1v.32g.8.norm"
-NUM_TRIALS=1
+NUM_TRIALS=1000000
 
-NEMO_ROOT=/ws/nemo-gitlab-chime7
+NEMO_ROOT=/ws/nemo-gitlab-chime7-v2
 
-OPTUNA_JOB_NAME=optuna-msdd-gss-asr5-t221
-SCRIPT_NAME=optimize_full_ngc_debug.py
+OPTUNA_JOB_NAME=optuna-msdd-gss-asr-lm-v2
+
+
+SCRIPT_NAME=optimize_full_ngc_kd.py
 
 OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
 STORAGE=sqlite:///${OPTUNA_JOB_NAME}.db
@@ -29,8 +31,9 @@ cd /ws/chime7_optuna \
 && pip install optuna \
 && pip install lhotse==1.14.0 \
 && pip install --upgrade jiwer \
+&& ./ngc_install_lm.sh \
 && export PYTHONPATH=${NEMO_ROOT}:${PYTHONPATH} \
-&& python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 1 --output_log ${OPTUNA_LOG} --storage ${STORAGE} \
+&& python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 5 --output_log ${OPTUNA_LOG} --storage ${STORAGE} --output_dir ./speaker_outputs_v2 \
 --manifest_path /ws/manifests_dev_ngc \
 --config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
 --vad_model_path /ws/chime7/checkpoints/frame_vad_chime7_acrobat.nemo \
@@ -51,4 +54,4 @@ ngc batch run \
   --label "_wl___asr" \
   --label ${NGC_JOB_LABEL}
 
-set + 
+set +

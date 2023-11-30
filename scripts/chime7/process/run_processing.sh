@@ -25,6 +25,7 @@ echo "DIARIZATION_CONFIG:   $DIARIZATION_CONFIG"
 echo "DIARIZATION_BASE_DIR: $DIARIZATION_BASE_DIR"
 echo "DIARIZATION_PARAMS:   $DIARIZATION_PARAMS"
 echo "OUTPUT_ROOT:          $OUTPUT_ROOT"
+echo "SUBSETS:              $SUBSETS"
 echo "************************************************************"
 
 # Manual path setup
