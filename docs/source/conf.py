@@ -28,7 +28,6 @@ import sphinx_book_theme
 
 sys.path.insert(0, os.path.abspath("../.."))
 sys.path.insert(0, os.path.abspath("../../nemo"))
-sys.path.insert(0, os.path.abspath("../../nemo_text_processing"))
 
 from package_info import __version__
 
@@ -47,18 +46,21 @@ autodoc_mock_imports = [
     'hydra',  # hydra-core in requirements, hydra during import
     'dateutil',  # part of core python
     'transformers.tokenization_bert',  # has ., troublesome for this regex
-    'megatron',  # megatron-lm in requirements, megatron in import
     'sklearn',  # scikit_learn in requirements, sklearn in import
     'nemo_text_processing.inverse_text_normalization',  # Not installed automatically
     'nemo_text_processing.text_normalization',  # Not installed automatically
     'attr',  # attrdict in requirements, attr in import
     'torchmetrics',  # inherited from PTL
     'lightning_utilities',  # inherited from PTL
+    'lightning_fabric',
     'apex',
+    'megatron.core',
+    'transformer_engine',
     'joblib',  # inherited from optional code
     'IPython',
     'ipadic',
     'psutil',
+    'regex',
 ]
 
 _skipped_autodoc_mock_imports = ['wrapt', 'numpy']
@@ -147,7 +149,7 @@ master_doc = "index"
 
 # General information about the project.
 project = "NVIDIA NeMo"
-copyright = "© 2021-2022 NVIDIA Corporation & Affiliates. All rights reserved."
+copyright = "© 2021-2023 NVIDIA Corporation & Affiliates. All rights reserved."
 author = "NVIDIA CORPORATION"
 
 # The version info for the project you're documenting, acts as replacement for

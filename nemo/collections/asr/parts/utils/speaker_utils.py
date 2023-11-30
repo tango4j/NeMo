@@ -43,8 +43,9 @@ split_input_data,
 cos_similarity,
 cos_similarity_batch,
 )
+from nemo.collections.asr.parts.utils.longform_clustering import LongFormSpeakerClustering
+from nemo.collections.asr.parts.utils.offline_clustering import SpeakerClustering, get_argmin_mat, split_input_data
 from nemo.utils import logging
-
 
 """
 This file contains all the utility functions required for speaker embeddings part in diarization scripts
@@ -795,9 +796,8 @@ def perform_clustering(
         logging.warning("cuda=False, using CPU for eigen decomposition. This might slow down the clustering process.")
         cuda = False
 
-    speaker_clustering = SpeakerClustering(cuda=cuda)
+    speaker_clustering = LongFormSpeakerClustering(cuda=cuda)
 
-    # If True, export torch script module and save it to the base folder.
     if clustering_params.get('export_script_module', False):
         speaker_clustering = torch.jit.script(speaker_clustering)
         torch.jit.save(speaker_clustering, 'speaker_clustering_script.pt')
@@ -824,6 +824,8 @@ def perform_clustering(
             min_num_speakers=int(clustering_params.get('min_num_speakers', 1)),
             max_rp_threshold=float(clustering_params.max_rp_threshold),
             sparse_search_volume=int(clustering_params.sparse_search_volume),
+            chunk_cluster_count=clustering_params.get('chunk_cluster_count', None),
+            embeddings_per_chunk=clustering_params.get('embeddings_per_chunk', None),
         )
 
         del uniq_embs_and_timestamps
@@ -831,8 +833,8 @@ def perform_clustering(
             torch.cuda.empty_cache()
         else:
             gc.collect()
-        
         timestamps = speaker_clustering.timestamps_in_scales[base_scale_idx]
+
         cluster_labels = cluster_labels.cpu().numpy()
         if len(cluster_labels) != timestamps.shape[0]:
             raise ValueError("Mismatch of length between cluster_labels and timestamps.")

@@ -510,7 +510,14 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                 entry = {'audio_filepath': audio_file, 'offset': 0.0, 'duration': None, 'text': '-', 'label': 'infer'}
                 fp.write(json.dumps(entry) + '\n')
 
-    def _init_clus_diarizer(self, paths2audio_files=None, batch_size=None):
+    def diarize(self, paths2audio_files: List[str] = None, batch_size: int = 0):
+        """
+        Diarize files provided through paths2audio_files or manifest file
+        input:
+        paths2audio_files (List[str]): list of paths to file containing audio file
+        batch_size (int): batch_size considered for extraction of speaker embeddings and VAD computation
+        """
+
         self._out_dir = self._diarizer_params.out_dir
 
         self._speaker_dir = os.path.join(self._diarizer_params.speaker_out_dir, 'speaker_outputs')

@@ -133,7 +133,7 @@ class SaveRestoreConnector:
                 # Change current working directory to
                 os.chdir(tmpdir)
                 if override_config_path is None:
-                    config_yaml = os.path.join(tmpdir, self.model_config_yaml)
+                    config_yaml = self.model_config_yaml
                 else:
                     # can be str path or OmegaConf / DictConfig object
                     config_yaml = override_config_path
@@ -391,6 +391,9 @@ class SaveRestoreConnector:
                 )
             else:
                 # artifact is optional and we simply return None
+                logging.warning(
+                    f"src path does not exist or it is not a path in nemo file. src value I got was: {src}. Absolute: {os.path.abspath(src)}"
+                )
                 return None
 
         assert os.path.exists(return_path)

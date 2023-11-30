@@ -5,10 +5,11 @@ onnx>=1.7.0
 python-dateutil
 ruamel.yaml
 scikit-learn
-setuptools==65.5.1
+setuptools>=65.5.1
 tensorboard
 text-unidecode
 torch
 tqdm>=4.41.0
+triton
 wget
 wrapt

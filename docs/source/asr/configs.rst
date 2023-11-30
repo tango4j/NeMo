@@ -64,7 +64,7 @@ An example ASR train and validation configuration should look similar to the fol
 There are two ways to test/validate on more than one manifest:
 
 - Specify a list in the `manifest_filepath` field. Results will be reported for each, the first one being used for overall loss / WER (specify `val_dl_idx` if you wish to change that). In this case, all manifests will share configuration parameters.
-- Use the ds_item key and pass a list of config objects to it. This allows you to use differently configured datasets for validation, e.g. 
+- Use the ds_item key and pass a list of config objects to it. This allows you to use differently configured datasets for validation, e.g.
 
 .. code-block:: yaml
 
@@ -235,6 +235,45 @@ For example, a decoder config corresponding to a sub-word tokenization model sho
       feat_in: *enc_final
       num_classes: -1  # filled with vocabulary size from tokenizer at runtime
       vocabulary: []  # filled with vocabulary from tokenizer at runtime
+
+
+On-the-fly Code Switching
+-------------------------
+
+Nemo supports creating code-switched synthetic utterances on-the-fly during training/validation/testing. This allows you to create ASR models which
+support intra-utterance code switching. If you have Nemo formatted audio data on disk (either JSON manifests or tarred audio data), you
+can easily mix as many of these audio sources together as desired by adding some extra parameters to your `train_ds`, `validation_ds`, and `test_ds`.
+
+Please note that this allows you to mix any kind of audio sources together to create synthetic utterances which sample from all sources. The most
+common use case for this is blending different languages together to create a multilingual code-switched model, but you can also blend
+together different audio sources from the same languages (or language families), to create noise robust data, or mix fast and slow speech from the
+same language.
+
+For multilingual code-switched models, we recommend using AggTokenizer for your Tokenizer if mixing different languages.
+
+The following example shows how to mix 3 different languages: English (en), German (de), and Japanese (ja) added to the `train_ds` model block, however
+you can add similar logic to your `validation_ds` and `test_ds` blocks for on-the-fly code-switched validation and test data too. This example mixes
+together 3 languages, but you can use as many as you want. However, be advised that the more languages you add, the higher your `min_duration` and `max_duration`
+need to be set to ensure all languages are sampled into each synthetic utterance, and setting these hyperparameters higher will use more VRAM per mini-batch during
+training and evaluation.
+
+.. code-block:: yaml
+
+  model:
+    train_ds:
+      manifest_filepath: [/path/to/EN/tarred_manifest.json, /path/to/DE/tarred_manifest.json, /path/to/JA/tarred_manifest.json]
+      tarred_audio_filepaths: ['/path/to/EN/tars/audio__OP_0..511_CL_.tar', '/path/to/DE/tars/audio__OP_0..1023_CL_.tar', '/path/to/JA/tars/audio__OP_0..2047_CL_.tar']
+      is_code_switched: true
+      is_tarred: true
+      shuffle: true
+        code_switched:              # add this block for code-switching
+          min_duration: 12          # the minimum number of seconds for each synthetic code-switched utterance
+          max_duration: 20          # the maximum number of seconds for each synthetic code-switched utterance
+          min_monolingual: 0.3      # the minimum percentage of utterances which will be pure monolingual (0.3 = 30%)
+          probs: [0.25, 0.5, 0.25]  # the probability to sample each language (matches order of `language` above) if not provided, assumes uniform distribution
+          force_monochannel: true   # if your source data is multi-channel, then setting this to True will force the synthetic utterances to be mono-channel
+          sampling_scales: 0.75     # allows you to down/up sample individual languages. Can set this as an array for individual languages, or a scalar for all languages
+          seed: 123                 # add a seed for replicability in future runs (highly useful for `validation_ds` and `test_ds`)
 
 
 Model Architecture Configurations
@@ -945,8 +984,8 @@ Main parts of the config:
       batch_size: 16 # you may increase batch_size if your memory allows
       # other params
 
-Finetuning
-~~~~~~~~~~~
+Finetuning with Text-Only Data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To finetune existing ASR model using text-only data use ``<NeMo_git_root>/examples/asr/asr_with_tts/speech_to_text_bpe_with_text_finetune.py`` script with the corresponding config ``<NeMo_git_root>/examples/asr/conf/asr_tts/hybrid_asr_tts.yaml``.
 
@@ -991,7 +1030,59 @@ Fine-tuning Configurations
 
 All ASR scripts support easy fine-tuning by partially/fully loading the pretrained weights from a checkpoint into the **currently instantiated model**. Note that the currently instantiated model should have parameters that match the pre-trained checkpoint (such that weights may load properly). In order to directly fine-tune a pre-existing checkpoint, please follow the tutorial  `ASR Language Fine-tuning. <https://colab.research.google.com/github/NVIDIA/NeMo/blob/stable/tutorials/asr/ASR_CTC_Language_Finetuning.ipynb>`_
 
-Pre-trained weights can be provided in multiple ways -
+Models can be fine-tuned in two ways: 
+* By updating or retaining current tokenizer alone
+* By updating model architecture and tokenizer
+
+Fine-tuning by updating or retaining current tokenizer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In this case, the model architecture is not updated. The model is initialized with the pre-trained weights by 
+two ways:
+
+1) Providing a path to a NeMo model (via ``init_from_nemo_model``)
+2) Providing a name of a pretrained NeMo model (which will be downloaded via the cloud) (via ``init_from_pretrained_model``)
+
+Then users can use existing tokenizer or update the tokenizer with new vocabulary. This is useful when users don't want to update the model architecture 
+but want to update the tokenizer with new vocabulary.
+
+The same script can be used to finetune CTC, RNNT or Hybrid models as well.
+
+<NeMo_repo>/examples/asr/speech_to_text_finetune.py script supports this type of fine-tuning with the following arguments:
+
+.. code-block:: sh
+
+    python examples/asr/speech_to_text_finetune.py \
+        --config-path=<path to dir of configs> \
+        --config-name=<name of config without .yaml>) \
+        model.train_ds.manifest_filepath="<path to manifest file>" \
+        model.validation_ds.manifest_filepath="<path to manifest file>" \
+        model.tokenizer.update_tokenizer=<True/False> \ # True to update tokenizer, False to retain existing tokenizer
+        model.tokenizer.dir=<path to tokenizer dir> \ # Path to tokenizer dir when update_tokenizer=True
+        model.tokenizer.type=<tokenizer type> \ # tokenizer type when update_tokenizer=True
+        trainer.devices=-1 \
+        trainer.accelerator='gpu' \
+        trainer.max_epochs=50 \
+        +init_from_nemo_model="<path to .nemo model file>" (or +init_from_pretrained_model="<name of pretrained checkpoint>")
+
+
+Refer to <NeMo_repo>/examples/asr/conf/asr_finetune/speech_to_text_finetune.yaml for more details.
+
+Finetune ASR Models using HuggingFace Datasets
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Users can utilize HuggingFace Datasets for finetuning NeMo ASR models. The following config file can be used for this purpose:
+`<NeMo_repo>/examples/asr/conf/asr_finetune/speech_to_text_hf_finetune.yaml`
+
+As mentioned earlier, users can update the tokenizer or use an existing one based on their requirements. If users want to create a new tokenizer 
+from HuggingFace Datasets, they can use the following script:
+`<NeMo_repo>/scripts/tokenizers/get_hf_text_data.py`
+
+Fine-tuning by changing model architecture and tokenizer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If users want to update the model architecture as well they can use the following script:
+
+For providing pretrained model, users can provide Pre-trained weights in multiple ways -
 
 1) Providing a path to a NeMo model (via ``init_from_nemo_model``)
 2) Providing a name of a pretrained NeMo model (which will be downloaded via the cloud) (via ``init_from_pretrained_model``)
@@ -999,9 +1090,6 @@ Pre-trained weights can be provided in multiple ways -
 
 There are multiple ASR subtasks inside the ``examples/asr/`` directory, you can substitute the ``<subtask>`` tag below.
 
-Fine-tuning via a NeMo model
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 .. code-block:: sh
 
     python examples/asr/<subtask>/script_to_<script_name>.py \
@@ -1012,38 +1100,16 @@ Fine-tuning via a NeMo model
         trainer.devices=-1 \
         trainer.accelerator='gpu' \
         trainer.max_epochs=50 \
-        +init_from_nemo_model="<path to .nemo model file>"
+        +init_from_nemo_model="<path to .nemo model file>" # (or +init_from_pretrained_model, +init_from_ptl_ckpt )
 
+To reinitialize part of the model, to make it different from the pretrained model, users can mention them through config:
 
-Fine-tuning via a NeMo pretrained model name
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: sh
-
-    python examples/asr/<subtask>/script_to_<script_name>.py \
-        --config-path=<path to dir of configs> \
-        --config-name=<name of config without .yaml>) \
-        model.train_ds.manifest_filepath="<path to manifest file>" \
-        model.validation_ds.manifest_filepath="<path to manifest file>" \
-        trainer.devices=-1 \
-        trainer.accelerator='gpu' \
-        trainer.max_epochs=50 \
-        +init_from_pretrained_model="<name of pretrained checkpoint>"
-
-Fine-tuning via a Pytorch Lightning checkpoint
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: sh
-
-    python examples/asr/<subtask>/script_to_<script_name>.py \
-        --config-path=<path to dir of configs> \
-        --config-name=<name of config without .yaml>) \
-        model.train_ds.manifest_filepath="<path to manifest file>" \
-        model.validation_ds.manifest_filepath="<path to manifest file>" \
-        trainer.devices=-1 \
-        trainer.accelerator='gpu' \
-        trainer.max_epochs=50 \
-        +init_from_ptl_ckpt="<name of pytorch lightning checkpoint>"
+.. code-block:: yaml
+    
+    init_from_nemo_model: "<path to .nemo model file>"
+        asr_model:
+            include: ["preprocessor","encoder"]
+            exclude: ["decoder"]
 
 Fine-tuning Execution Flow Diagram
 ----------------------------------

@@ -285,7 +285,7 @@ class SLUIntentSlotBPEModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, ASR
         predictions = self.sequence_generator.decode_semantics_from_tokens(pred_tokens)
         return predictions
 
-    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+    def validation_pass(self, batch, batch_idx, dataloader_idx=0):
         if len(batch) == 4:
             signal, signal_len, semantics, semantics_len = batch
         else:
@@ -327,19 +327,29 @@ class SLUIntentSlotBPEModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, ASR
             'val_wer': wer,
         }
 
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        metrics = self.validation_pass(batch, batch_idx, dataloader_idx)
+        if type(self.trainer.val_dataloaders) == list and len(self.trainer.val_dataloaders) > 1:
+            self.validation_step_outputs[dataloader_idx].append(metrics)
+        else:
+            self.validation_step_outputs.append(metrics)
+        return metrics
+
     def test_step(self, batch, batch_idx, dataloader_idx=0):
-        logs = self.validation_step(batch, batch_idx, dataloader_idx=dataloader_idx)
-        test_logs = {
-            'test_loss': logs['val_loss'],
-            'test_wer_num': logs['val_wer_num'],
-            'test_wer_denom': logs['val_wer_denom'],
-            'test_wer': logs['val_wer'],
-        }
+        logs = self.validation_pass(batch, batch_idx, dataloader_idx=dataloader_idx)
+        test_logs = {name.replace("val_", "test_"): value for name, value in logs.items()}
+        if type(self.trainer.test_dataloaders) == list and len(self.trainer.test_dataloaders) > 1:
+            self.test_step_outputs[dataloader_idx].append(test_logs)
+        else:
+            self.test_step_outputs.append(test_logs)
         return test_logs
 
     def test_dataloader(self):
-        if self._test_dl is not None:
-            return self._test_dl
+        if self._test_dl is None:
+            # None dataloader no longer supported in PTL2.0
+            self._test_dl = []
+
+        return self._test_dl
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
         if 'augmentor' in config:
@@ -436,7 +446,11 @@ class SLUIntentSlotBPEModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, ASR
         # Need to set this because if using an IterableDataset, the length of the dataloader is the total number
         # of samples rather than the number of batches, and this messes up the tqdm progress bar.
         # So we set the number of steps manually (to the correct number) to fix this.
-        if 'is_tarred' in train_data_config and train_data_config['is_tarred']:
+        if (
+            self._train_dl is not None
+            and hasattr(self._train_dl, 'dataset')
+            and isinstance(self._train_dl.dataset, torch.utils.data.IterableDataset)
+        ):
             # We also need to check if limit_train_batches is already set.
             # If it's an int, we assume that the user has set it to something sane, i.e. <= # training batches,
             # and don't change it. Otherwise, adjust batches accordingly if it's a float (including 1.0).

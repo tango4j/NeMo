@@ -67,6 +67,7 @@ class ChineseG2p(BaseG2p):
         assert word_segmenter in [
             None,
             'jieba',
+            'pkuseg',
         ], f"{word_segmenter} is not supported now. Please choose correct word_segmenter."
 
         if phoneme_prefix is None:
@@ -82,11 +83,11 @@ class ChineseG2p(BaseG2p):
             if isinstance(phoneme_dict, str) or isinstance(phoneme_dict, pathlib.Path)
             else phoneme_dict
         )
-        self.phoneme_list = list({pron for prons in phoneme_dict.values() for pron in prons})
+        self.phoneme_list = sorted({pron for prons in phoneme_dict.values() for pron in prons})
 
         # tones
         self.tone_dict = {str(x): tone_prefix + str(x) for x in range(1, 6)}
-        self.tone_list = list(self.tone_dict.values())
+        self.tone_list = sorted(self.tone_dict.values())
 
         # ascii letters
         self.ascii_letter_dict = {
@@ -118,6 +119,15 @@ class ChineseG2p(BaseG2p):
 
             # Cut sentences into words to improve polyphone disambiguation
             self.word_segmenter = jieba.cut
+        elif word_segmenter == "pkuseg":
+            try:
+                import pkuseg
+            except ImportError as e:
+                logging.error(
+                    "`pkuseg` is not the default word segmenter for Chinese in NeMo. Please install it manually by running `pip install pkuseg`, or choose `jieba` segmenter instead."
+                )
+
+            self.word_segmenter = pkuseg.pkuseg().cut
         else:
             self.word_segmenter = lambda x: [x]
 

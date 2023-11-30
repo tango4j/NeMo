@@ -25,11 +25,11 @@ import numpy as np
 import torch
 
 from nemo.core import Dataset
-from nemo.utils import logging
+from nemo.utils import AppState, logging
 
-__all__ = ['TextMemMapDataset', 'CSVMemMapDataset', 'build_index_files']
-__idx_version__ = '0.2'  # index file version
-__idx_suffix__ = 'idx'  # index file suffix
+__all__ = ["TextMemMapDataset", "CSVMemMapDataset", "build_index_files"]
+__idx_version__ = "0.2"  # index file version
+__idx_suffix__ = "idx"  # index file suffix
 
 
 def _build_index_from_memdata(fn, newline_int):
@@ -40,7 +40,7 @@ def _build_index_from_memdata(fn, newline_int):
     Returns a 1D array of ints.
     """
     # use memmap to read file
-    mdata = np.memmap(fn, dtype=np.uint8, mode='r')
+    mdata = np.memmap(fn, dtype=np.uint8, mode="r")
     # find newline positions
     midx = np.where(mdata == newline_int)[0]
     midx_dtype = midx.dtype
@@ -115,9 +115,10 @@ class TextMemMapDataset(Dataset):
 
         logging.info(f"Building data files")
         # load all files into memmap
-        is_ditributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
 
-        if not is_ditributed or (is_ditributed and torch.distributed.get_rank() == 0):
+        if not is_distributed or (is_distributed and torch.distributed.get_rank() == 0):
+            # Create index files on global rank 0.
             build_index_files(
                 dataset_paths,
                 newline_int,
@@ -126,14 +127,39 @@ class TextMemMapDataset(Dataset):
                 index_mapping_dir=index_mapping_dir,
             )
 
-        if is_ditributed:
+        if is_distributed:
+            torch.distributed.barrier()
+
+        if is_distributed and AppState().local_rank == 0:
+            # If we are in a distributed multi-node set-up and index files are not stored on
+            # a shared filesystem, then the index files created on global rank 0 are only
+            # accessible to the workers on that node.
+            #
+            # Two cases may occur here:
+            #
+            # 1. case of a shared filesystem, or global_rank==0: the index files are present in
+            #    the locally available filesystem, calling build_index_files() again is a no-op.
+            # 2. case of a non-shared filesystem, and global_rank>0: the index files are not
+            #    present in the locally available filesystem, calling build_index_files() again
+            #    will create them.
+            #
+            # Outcome in all cases: all nodes have access to the index files in their filesystem.
+            build_index_files(
+                dataset_paths,
+                newline_int,
+                workers=self._worker,
+                build_index_fn=build_index_fn,
+                index_mapping_dir=index_mapping_dir,
+            )
+
+        if is_distributed:
             torch.distributed.barrier()
 
         logging.info(f"Loading data files")
         start_time = time.time()
         mdata_midx_list = [self.load_file(fn, index_mapping_dir) for fn in self._files_list]
         logging.info(
-            f'Time loading {len(mdata_midx_list)} mem-mapped files: {datetime.timedelta(seconds=time.time() - start_time)}'
+            f"Time loading {len(mdata_midx_list)} mem-mapped files: {datetime.timedelta(seconds=time.time() - start_time)}"
         )
 
         logging.info("Computing global indices")
@@ -224,34 +250,34 @@ class TextMemMapDataset(Dataset):
         idx_fn = _index_fn(fn, index_mapping_dir)
 
         # create data map
-        mdata = np.memmap(fn, dtype=np.uint8, mode='r')
+        mdata = np.memmap(fn, dtype=np.uint8, mode="r")
 
         if _index_file_exists(idx_fn):
             # load index file into memory map
-            midx = np.load(idx_fn + ".npy", allow_pickle=True, mmap_mode='r')
+            midx = np.load(idx_fn + ".npy", allow_pickle=True, mmap_mode="r")
             # test for header
             if len(midx) < self._header_lines:
                 raise RuntimeError(f"Missing header, expected {self._header_lines} header lines")
 
             # load meta info
-            idx_info_dict = pickle.load(open(idx_fn + ".info", 'rb'))
+            idx_info_dict = pickle.load(open(idx_fn + ".info", "rb"))
             # test for mismatch in expected newline_int
-            if 'newline_int' in idx_info_dict:
-                newline_int = idx_info_dict['newline_int']
+            if "newline_int" in idx_info_dict:
+                newline_int = idx_info_dict["newline_int"]
                 if self._newline_int != newline_int:
                     logging.warning(
                         f"Mismatch in newline_int, expected = {self._newline_int} but loaded {newline_int}"
                     )
 
             # test for version mismatch (useful to force recreation of index files)
-            idx_version = idx_info_dict.get('version', '0.0')
+            idx_version = idx_info_dict.get("version", "0.0")
             if __idx_version__ != idx_version:
                 raise RuntimeError(
                     f"Version mismatch: Please delete existing '.{__idx_suffix__}' files. Expected version = {__idx_version__}, but file version = {idx_version}. File path = {idx_fn}"
                 )
         else:
             raise ValueError(
-                f'Memory Map for {fn} is not found, missing one or more of files: {idx_fn}.{{.npy,.info}}'
+                f"Memory Map for {fn} is not found, missing one or more of files: {idx_fn}.{{.npy,.info}}"
             )
 
         return (mdata, midx)
@@ -271,7 +297,7 @@ class CSVMemMapDataset(TextMemMapDataset):
         tokenizer: Optional[Type["TokenizerSpec"]] = None,
         sort_dataset_paths: Optional[bool] = True,
         data_col=1,
-        data_sep=',',
+        data_sep=",",
         index_mapping_dir: Optional[str] = None,
     ):
         """
@@ -305,6 +331,63 @@ class CSVMemMapDataset(TextMemMapDataset):
         text = text.split(self._data_sep)[self._data_col]
         # tokenize
         return super()._build_data_from_text(text)
+
+
+class CSVFieldsMemmapDataset(TextMemMapDataset):
+    """
+    Allow per-line lazy access to multiple csv files using numpy memmap.
+    Returns a dictionary with multiple fields.
+    """
+
+    def __init__(
+        self,
+        dataset_paths,
+        newline_int=10,
+        header_lines=1,
+        workers=None,
+        tokenizer=None,
+        sort_dataset_paths=True,
+        data_sep=',',
+        data_fields={"data": 0},
+        index_mapping_dir: Optional[str] = None,
+    ):
+        """
+        Args:
+            dataset_paths: list of csv file paths to read data from
+            newline_int: ASCII code to use to interpret newlines in file.
+            header_lines: number of header lines in csv files.
+            workers: number of workers to use for creating index files.
+            tokenizer: tokenizer to use to convert text to tokens.
+            sort_dataset_paths: whether to sort datasets by paths.
+            data_sep: data separator.
+            data_fields:  dict of field names and their corresponding column indices
+            index_mapping_dir: directory to save the index mapping to.
+                If None, will write to the same folder as the dataset.
+        """
+        super().__init__(
+            dataset_paths=dataset_paths,
+            newline_int=newline_int,
+            header_lines=header_lines,
+            workers=workers,
+            tokenizer=tokenizer,
+            sort_dataset_paths=sort_dataset_paths,
+            index_mapping_dir=index_mapping_dir,
+        )
+
+        self._data_fields = data_fields
+        self._data_sep = data_sep
+
+    def _build_data_from_text(self, text: str):
+        """
+
+        """
+        _build_data_from_text = super()._build_data_from_text
+        data = {}
+        text_fields = text.split(self._data_sep)
+        for field_name, field_idx in self._data_fields.items():
+            data[field_name] = _build_data_from_text(text_fields[field_idx])
+
+        return data
 
 
 class JSONLMemMapDataset(TextMemMapDataset):
@@ -345,7 +428,13 @@ class JSONLMemMapDataset(TextMemMapDataset):
 
     def _build_data_from_text(self, text):
         """Return a dictionary of data based on a single JSON line."""
-        return json.loads(text)
+        try:
+            record = json.loads(text)
+        except Exception as e:
+            logging.error(f"Exception: {e}")
+            logging.error(f"datapoint: {text}")
+            raise e
+        return record
 
 
 def _index_file_exists(idx_fn):
@@ -424,7 +513,7 @@ def _build_memmap_index_files(newline_int, build_index_fn, fn, index_mapping_dir
 
 
 def build_index_files(
-    dataset_paths, newline_int, workers=None, build_index_fn=_build_index_from_memdata, index_mapping_dir: str = None
+    dataset_paths, newline_int, workers=None, build_index_fn=_build_index_from_memdata, index_mapping_dir: str = None,
 ):
     """Auxiliary method to build multiple index files"""
     if len(dataset_paths) < 1:
@@ -436,12 +525,13 @@ def build_index_files(
     logging.info(f"Processing {len(dataset_paths)} data files using {workers} workers")
     # load all files into memmap
     start_time = time.time()
-    with mp.Pool(workers) as p:
+    ctx = mp.get_context("fork")
+    with ctx.Pool(workers) as p:
         build_status = p.map(
-            partial(_build_memmap_index_files, newline_int, build_index_fn, index_mapping_dir=index_mapping_dir),
+            partial(_build_memmap_index_files, newline_int, build_index_fn, index_mapping_dir=index_mapping_dir,),
             dataset_paths,
         )
 
     logging.info(
-        f'Time building {sum(build_status)} / {len(build_status)} mem-mapped files: {datetime.timedelta(seconds=time.time() - start_time)}'
+        f"Time building {sum(build_status)} / {len(build_status)} mem-mapped files: {datetime.timedelta(seconds=time.time() - start_time)}"
     )

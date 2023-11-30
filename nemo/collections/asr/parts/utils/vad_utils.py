@@ -333,7 +333,9 @@ def generate_overlap_vad_seq(
     if out_dir:
         overlap_out_dir = out_dir
     else:
-        overlap_out_dir = frame_pred_dir + "/overlap_smoothing_output" + "_" + smoothing_method + "_" + str(overlap)
+        overlap_out_dir = os.path.join(
+            frame_pred_dir, "overlap_smoothing_output" + "_" + smoothing_method + "_" + str(overlap)
+        )
 
     if not os.path.exists(overlap_out_dir):
         os.mkdir(overlap_out_dir)
@@ -790,9 +792,9 @@ def generate_vad_segment_table(
     vad_pred_filepath_list = [os.path.join(vad_pred_dir, x) for x in os.listdir(vad_pred_dir) if x.endswith(suffixes)]
 
     if not out_dir:
-        out_dir_name = "seg_output_"
+        out_dir_name = "seg_output"
         for key in postprocessing_params:
-            out_dir_name = out_dir_name + str(key) + str(postprocessing_params[key]) + "-"
+            out_dir_name = out_dir_name + "-" + str(key) + str(postprocessing_params[key])
 
         out_dir = os.path.join(vad_pred_dir, out_dir_name)
 
@@ -1109,11 +1111,11 @@ def plot(
     else:
         label = None
 
-    if label:
+    if label is not None:
         ax2.plot(np.arange(len_pred) * unit_frame_len, label, 'r', label='label')
-    if pred_snippet:
+    if pred_snippet is not None:
         ax2.plot(np.arange(len_pred) * unit_frame_len, pred_snippet, 'b', label='pred')
-    if frame_snippet:
+    if frame_snippet is not None:
         ax2.plot(np.arange(len_pred) * unit_frame_len, frame_snippet, 'g--', label='speech prob')
 
     ax2.tick_params(axis='y', labelcolor='r')
@@ -1777,7 +1779,7 @@ def frame_vad_infer_load_manifest(cfg: DictConfig):
             manifest_orig.append(entry)
 
             # always prefer RTTM labels if exist
-            if "label" not in entry or "rttm_filepath" in entry or "rttm_file" in entry:
+            if "label" not in entry and ("rttm_filepath" in entry or "rttm_file" in entry):
                 rttm_key = "rttm_filepath" if "rttm_filepath" in entry else "rttm_file"
                 segments = load_speech_segments_from_rttm(entry[rttm_key])
                 label_str = get_frame_labels(
@@ -1790,8 +1792,8 @@ def frame_vad_infer_load_manifest(cfg: DictConfig):
                 key_labels_map[uniq_audio_name] = [float(x) for x in label_str.split()]
             elif entry.get("label", None) is not None:
                 key_labels_map[uniq_audio_name] = [float(x) for x in entry["label"].split()]
-            else:
-                raise ValueError("Must have either `label` or `rttm_filepath` in manifest")
+            elif cfg.evaluate:
+                raise ValueError("Must have either `label` or `rttm_filepath` in manifest when evaluate=True")
 
     return manifest_orig, key_labels_map, key_rttm_map
 
