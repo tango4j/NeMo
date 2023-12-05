@@ -1623,3 +1623,76 @@ class SpeakerClustering(torch.nn.Module):
             kmeans_random_trials=kmeans_random_trials,
             fixed_thres=fixed_thres,
         )
+
+    def forward_embs(
+        self,
+        embs: torch.Tensor,
+        oracle_num_speakers: int = -1,
+        max_rp_threshold: float = 0.15,
+        max_num_speakers: int = 4,
+        min_num_speakers: int = 1,
+        sparse_search_volume: int = 30,
+        fixed_thres: float = -1,
+        kmeans_random_trials: int = 1,
+        nme_mat_size: int = 512,
+        drop_length_thres: int = 4800,
+        base_scale_idx: int = 2,
+        maj_vote_spk_count: bool = True,
+        use_drop_and_recluster: bool = True,
+    ) -> torch.LongTensor:
+
+        # embs = ms_embs.mean(dim=1)
+        embs = embs.cuda()
+        if len(embs.shape) == 3: # Multi-channel embeddings
+            embs = embs.reshape(embs.shape[0], -1)
+        mat = getCosAffinityMatrix(embs)
+        
+        nmesc = NMESC(
+            mat,
+            max_num_speakers=max_num_speakers,
+            min_num_speakers=min_num_speakers,
+            max_rp_threshold=max_rp_threshold,
+            sparse_search=self.sparse_search,
+            sparse_search_volume=sparse_search_volume,
+            fixed_thres=fixed_thres,
+            nme_mat_size=nme_mat_size,
+            maj_vote_spk_count=maj_vote_spk_count,
+            parallelism=self.parallelism,
+            cuda=self.cuda,
+            device=self.device,
+        )
+
+        # If there are less than `min_samples_for_nmesc` segments, est_num_of_spk is 1.
+        if mat.shape[0] > self.min_samples_for_nmesc:
+            est_num_of_spk, p_hat_value = nmesc.forward(limit_lambda_gap=False)
+            affinity_mat = getAffinityGraphMat(mat, p_hat_value)
+        else:
+            nmesc.fixed_thres = max_rp_threshold
+            est_num_of_spk, p_hat_value = nmesc.forward()
+            affinity_mat = mat
+        
+        # Clip the estimated number of speakers to the range of [min_num_speakers, max_num_speakers]
+        est_num_of_spk = torch.clamp(est_num_of_spk, min=min_num_speakers, max=max_num_speakers)
+
+        # n_clusters is number of speakers estimated from spectral clustering.
+        if oracle_num_speakers > 0:
+            n_clusters = int(oracle_num_speakers)
+        else:
+            n_clusters = int(est_num_of_spk.item())
+            
+        if use_drop_and_recluster:
+            Y, n_clusters = drop_and_recluster(embs, 
+                                            affinity_mat, 
+                                            min_num_speakers, 
+                                            max_num_speakers, 
+                                            drop_length_thres, 
+                                            n_clusters, 
+                                            cuda=self.cuda, 
+                                            method='spectral')
+        else:
+            spectral_model = SpectralClustering(
+                n_clusters=n_clusters, n_random_trials=kmeans_random_trials, cuda=self.cuda, device=embs.device
+            )
+            Y = spectral_model.forward(affinity_mat)
+        return Y
+    

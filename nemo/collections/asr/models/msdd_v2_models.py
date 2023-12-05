@@ -44,8 +44,9 @@ from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDInfer
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
-from nemo.collections.asr.models import ClusteringDiarizer
 from nemo.collections.asr.models.asr_model import ExportableEncDecModel
+# from nemo.collections.asr.models import ClusteringDiarizer
+from nemo.collections.asr.models import ClusteringMultiChDiarizer
 from nemo.collections.asr.models.clustering_diarizer import (
     _MODEL_CONFIG_YAML,
     _SPEAKER_MODEL,
@@ -1437,7 +1438,7 @@ class ClusterEmbedding(torch.nn.Module):
         ms_weights = cfg_diar_infer.diarizer.speaker_embeddings.parameters.multiscale_weights
         self.cfg_diar_infer.diarizer.speaker_embeddings.parameters = self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters
         self.cfg_diar_infer.diarizer.speaker_embeddings.parameters.multiscale_weights = ms_weights
-        self.clus_diar_model = ClusteringDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model, is_modular=False)
+        self.clus_diar_model = ClusteringMultiChDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model)
 
     def prepare_cluster_embs_infer(self, mc_input: bool = False, use_mc_embs: bool = False):
         """
@@ -1473,7 +1474,7 @@ class ClusterEmbedding(torch.nn.Module):
         self.cfg_diar_infer.diarizer.manifest_filepath = manifest_filepath
         self.cfg_diar_infer.diarizer.out_dir = emb_dir
 
-        # Run ClusteringDiarizer which includes system VAD or oracle VAD.
+        # Run ClusteringMultiChDiarizer which includes system VAD or oracle VAD.
         self._out_dir = self.clus_diar_model._diarizer_params.out_dir
         self.out_rttm_dir = os.path.join(self._out_dir, 'pred_rttms')
         os.makedirs(self.out_rttm_dir, exist_ok=True)
@@ -1485,7 +1486,7 @@ class ClusterEmbedding(torch.nn.Module):
         self.clus_diar_model._diarizer_params.speaker_embeddings.parameters = (
             self.cfg_diar_infer.diarizer.speaker_embeddings.parameters
         )
-        self.clus_diar_model = ClusteringDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model, is_modular=False)
+        self.clus_diar_model = ClusteringMultiChDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model)
         
     def run_clustering_diarizer(self, manifest_filepath: str, emb_dir: str, mc_input: bool = False, use_mc_embs: bool = False):
         """
