@@ -323,11 +323,9 @@ class FrontEnd_v1(CutEnhancer):
             filter_beta=mc_filter_beta,
             filter_rank=mc_filter_rank,
             filter_postfilter=mc_filter_postfilter,
-            filter_num_iterations=mc_filter_num_iterations,
             ref_channel=mc_ref_channel,
             mask_min_db=mc_mask_min_db,
             postmask_min_db=mc_postmask_min_db,
-            dtype=use_dtype,
         ).cuda()
 
     def enhance_batch(self, audio, activity, speaker_id, num_chunks=1, left_context=0, right_context=0) -> np.ndarray:

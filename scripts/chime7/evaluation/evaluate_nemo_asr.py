@@ -342,6 +342,7 @@ def score(
     uem_file=None,
     collar=0.5,
     use_diarization=True,
+    allow_subset_eval=True,
 ):
     scenario_dir = os.path.join(output_folder, scenario_tag)
     Path(scenario_dir).mkdir(parents=True, exist_ok=True)
@@ -387,14 +388,26 @@ def score(
 
     h_sess2segs = get_sess2segs(hyps)
     r_sess2segs = get_sess2segs(refs)
-
+    
+    intersection_list = set(h_sess2segs.keys()).intersection(set(r_sess2segs.keys()))
+    
     if not (h_sess2segs.keys() == r_sess2segs.keys()):
-        raise RuntimeError(
-            "Hypothesis JSON does not have all sessions as in the reference JSONs."
-            "The sessions that are missing: {}".format(
-                set(h_sess2segs.keys()).difference(set(r_sess2segs.keys()))
+        
+        if allow_subset_eval:
+            ### To make subset evaluation without errors  
+            r_sess2segs_new = {}
+            for key in r_sess2segs.keys():
+                if key in intersection_list:
+                    r_sess2segs_new[key] = r_sess2segs[key] 
+            r_sess2segs = r_sess2segs_new 
+            raise Warning(f"Subset evaluation is being performed. {len(r_sess2segs.keys())} sessions are being evaluated.")
+        else: 
+            raise RuntimeError(
+                "Hypothesis JSON does not have all sessions as in the reference JSONs."
+                "The sessions that are missing: {}".format(
+                    set(h_sess2segs.keys()).difference(set(r_sess2segs.keys()))
+                )
             )
-        )
 
     all_sess_stats = []
     all_spk_stats = []

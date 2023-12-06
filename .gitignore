@@ -194,3 +194,5 @@ examples/neural_graphs/*.yml
 nemo_experiments/
 
 *.nemo
+
+scripts/chime7/hyper_optim/text/
