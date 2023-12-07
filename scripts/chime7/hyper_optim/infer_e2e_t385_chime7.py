@@ -61,11 +61,10 @@ if False:
     SUBSETS = "dev"
     
 else: 
-    NGC_WS_MOUNT="/ws"
-    NEMO_ROOT="/home/taejinp/projects/infer_gitlab_dev_chime7/NeMo"
+    NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
     ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
     NEMO_CHIME7_ROOT=f"{NEMO_ROOT}/scripts/chime7"
-    CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
+    CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2"
     # ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
     # ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/chime7/checkpoints/rnnt_ft_chime6ANDmixer6_26jun_avged.nemo"
     # LM_PATH=f"{NGC_WS_MOUNT}/chime7/checkpoints/rnnt_chime6_mixer6_dipco_train_dev.kenlm"
@@ -121,8 +120,8 @@ def diar_config_setup(
     config.diarizer.speaker_embeddings.parameters.multiscale_weights = scale_weights(r_value, scale_n)
     return config
 
-def get_gss_command(gpu_id, asr_model_path, lm_path, diar_config, diar_param, diar_base_dir, output_dir, 
-                    mc_mask_min_db, mc_postmask_min_db, bss_iterations, dereverb_filter_length, top_k, scenarios=SCENARIOS, subsets=SUBSETS, 
+def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir, 
+                    mc_mask_min_db, mc_postmask_min_db, bss_iterations, dereverb_filter_length, top_k, scenarios, subsets, 
                     dereverb_prediction_delay=2, dereverb_num_iterations=3, mc_filter_type="pmwf", mc_filter_postfilter="ban"):
     
     assert len(scenarios) != 0, f"Please specify at least one scenario, got scenarios: {scenarios}"
@@ -136,6 +135,7 @@ def get_gss_command(gpu_id, asr_model_path, lm_path, diar_config, diar_param, di
 
 
 def get_asr_eval_command(gpu_id, asr_model_path, lm_path, diar_config, diar_param, normalize_db, output_dir, lm_alpha, lm_beam_size, maes_num_steps, maes_alpha, maes_gamma, maes_beta, asr_output_dir, eval_results_dir, scenarios=SCENARIOS, subsets=SUBSETS):
+    assert asr_model_path.endswith(".ckpt") or asr_model_path.endswith(".nemo"), f"get_asr_eval_command(): must be a .ckpt or .nemo file but got asr_model_path: {asr_model_path}"
     command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr_lm.sh '{scenarios}' '{subsets}' " \
               f"{diar_config}-{diar_param} {output_dir}/processed {output_dir} {normalize_db} {asr_model_path} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id} " \
               f"{lm_path} {lm_alpha} {lm_beam_size} {maes_num_steps} {maes_alpha} {maes_gamma} {maes_beta} {asr_output_dir} {eval_results_dir}"
@@ -155,6 +155,7 @@ def objective_gss_asr(
         scenarios: str = SCENARIOS,
         subsets: str = SUBSETS,
 ):
+    assert asr_model_path.endswith(".ckpt") or asr_model_path.endswith(".nemo"), f"objective_gss_asr(): asr_model_path must be a .ckpt or .nemo file but got asr_model_path: {asr_model_path}"
     mc_mask_min_db = -160 # trial.suggest_int("mc_mask_min_db", -160, -160, 20)
     mc_postmask_min_db = -10 #trial.suggest_int("mc_postmask_min_db", -25, -5, 3)
     bss_iterations = 5 #trial.suggest_int("bss_iterations", 5, 5, 5)
@@ -177,8 +178,6 @@ def objective_gss_asr(
 
     command_gss = get_gss_command(
         gpu_id, 
-        asr_model_path,
-        lm_path,
         diar_config, 
         diar_param, 
         diar_base_dir, 
@@ -335,13 +334,11 @@ if __name__ == "__main__":
         "--asr_model_path",
         help="path to the ASR model",
         type=str,
-        default="diar_msdd_telephonic",
     )
     parser.add_argument(
         "--lm_path",
         help="path to the ngram language model",
         type=str,
-        default="diar_msdd_telephonic",
     )
     parser.add_argument("--temp_dir", help="path to store temporary files", type=str, default="temp/")
     parser.add_argument("--output_dir", help="path to store temporary files", type=str, default="speaker_outputs/")

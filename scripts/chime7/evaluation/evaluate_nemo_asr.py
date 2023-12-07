@@ -392,7 +392,6 @@ def score(
     intersection_list = set(h_sess2segs.keys()).intersection(set(r_sess2segs.keys()))
     
     if not (h_sess2segs.keys() == r_sess2segs.keys()):
-        
         if allow_subset_eval:
             ### To make subset evaluation without errors  
             r_sess2segs_new = {}
@@ -400,7 +399,7 @@ def score(
                 if key in intersection_list:
                     r_sess2segs_new[key] = r_sess2segs[key] 
             r_sess2segs = r_sess2segs_new 
-            raise Warning(f"Subset evaluation is being performed. {len(r_sess2segs.keys())} sessions are being evaluated.")
+            # raise Warning(f"Subset evaluation is being performed. {len(r_sess2segs.keys())} sessions are being evaluated.")
         else: 
             raise RuntimeError(
                 "Hypothesis JSON does not have all sessions as in the reference JSONs."
