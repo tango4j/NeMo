@@ -46,11 +46,17 @@ from omegaconf import OmegaConf
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
-
-NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
-ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
+if False:
+    NEMO_ROOT="/your/path/to/NeMo"
+    ESPNET_ROOT="/your/path/to/espnet/egs2/chime7_task1/asr1"
+    CHIME7_ROOT="/your/path/to/chime7_official_datafolder" # this contains sub-folders: chime6, dipco, mixer6
+    
+else:
+    NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
+    ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
+    CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2"
+    
 NEMO_CHIME7_ROOT=f"{NEMO_ROOT}/scripts/chime7"
-CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2"
 
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]

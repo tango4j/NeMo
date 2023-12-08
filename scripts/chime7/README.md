@@ -92,12 +92,24 @@ Run the script to install the language model.
 
 # How to launch NeMo CHiME-8 Baseline
 
+## Create NeMo style manifest files
 ```bash
 NEMO_ROOT="/your/path/to/NeMo" # cloned NeMo branch: dev/chime7
 NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest" # Folder that will contain nemo manifest .json files
-CHIME7_CLEANED_DATA_FOLDER="/disk_d_nvd/datasets/chime7_official_cleaned" # This folder contains sub-folders named: chime6, dipco, mixer6
+CHIME7_CLEANED_DATA_FOLDER="/your/path/to/chime7_official_cleaned" # This folder contains sub-folders named: chime6, dipco, mixer6
 python ${NEMO_ROOT}/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_infer.py --data-dir ${CHIME7_CLEANED_DATA_FOLDER} --subset ${DATA_SPLIT} --output-dir ${NEMO_MSASR_MANIFEST} \
 ```
+
+## Setup global varialbes (This is temporar, will be removed in the final format)
+
+Modify the path in the inference script: `<NeMo Root>/scripts/chime7/hyper_optim/infer_e2e_t385_chime7.py`
+
+```python
+NEMO_ROOT="/your/path/to/NeMo" 
+ESPNET_ROOT="/your/path/to/espnet/egs2/chime7_task1/asr1"
+CHIME7_ROOT="/your/path/to/chime7_official_cleaned" 
+```
+
 
 ### Launch CHiME-8 Baseline 
 
