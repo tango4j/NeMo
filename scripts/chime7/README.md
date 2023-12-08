@@ -73,12 +73,14 @@ pip install optuna
 ```
 
 Install a specific version of Lhotse (`1.14.0`).
+Lhotse is mainly needed for Guided Source Separation (GSS) part.
 
 ```bash
 pip install lhotse==1.14.0
 ```
 
 Upgrade Jiwer, a package for evaluating automatic speech recognition.
+Jiwer is needed for evaluating and normalizing the text.
 
 ```bash
 pip install --upgrade jiwer
@@ -92,15 +94,15 @@ Run the script to install the language model.
 
 # How to launch NeMo CHiME-8 Baseline
 
-## Create NeMo style manifest files
+## 1. Create NeMo style manifest files
 ```bash
 NEMO_ROOT="/your/path/to/NeMo" # cloned NeMo branch: dev/chime7
-NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest" # Folder that will contain nemo manifest .json files
-CHIME7_CLEANED_DATA_FOLDER="/your/path/to/chime7_official_cleaned" # This folder contains sub-folders named: chime6, dipco, mixer6
+NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest" # Folder that contains nemo manifest .json files
+CHIME7_CLEANED_DATA_FOLDER="/your/path/to/chime7_official_cleaned" # Folder that contains sub-folders named: chime6, dipco, mixer6
 python ${NEMO_ROOT}/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_infer.py --data-dir ${CHIME7_CLEANED_DATA_FOLDER} --subset ${DATA_SPLIT} --output-dir ${NEMO_MSASR_MANIFEST} \
 ```
 
-## Setup global varialbes (This is temporar, will be removed in the final format)
+## 2. Setup global varialbes (This is temporar, will be removed in the final format)
 
 Modify the path in the inference script: `<NeMo Root>/scripts/chime7/hyper_optim/infer_e2e_t385_chime7.py`
 
@@ -111,7 +113,7 @@ CHIME7_ROOT="/your/path/to/chime7_official_cleaned"
 ```
 
 
-### Launch CHiME-8 Baseline 
+## 3. Launch CHiME-8 Baseline 
 
 ```bash
 CHECKPOINTS=/your/path/to/checkpoints

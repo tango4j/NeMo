@@ -54,7 +54,7 @@ if False:
 else:
     NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
     ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
-    CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2"
+    CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2" # this contains sub-folders: chime6, dipco, mixer6
     
 NEMO_CHIME7_ROOT=f"{NEMO_ROOT}/scripts/chime7"
 
