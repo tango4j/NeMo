@@ -1,4 +1,14 @@
 
+# TODO: Administrative Section
+
+[] Convert two bash scripts (GSS, RNNT-ASR-BSD) to python based script.
+[] Add Whisper text-normalization (as in the original challenge implementation)
+[] Add Ante's pre-dereverbration to NeMo Multichannel diarization.
+[] Make inference script in (1) Class based structure (2) And make separate yaml file or dataConfig-class
+[] Clean and organize environment setting again 
+[] Setup and check the training script of NeMo multichannel diarization
+[] Setup Optuna script and re-optimize including the new dataset
+[] Plug-in 3rd party ASR (Whisper-v3, wavLM) and report the dev/eval-set performance.
 
 # CHiME-8 DASR Baseline Environment Setup
 
@@ -95,6 +105,9 @@ Run the script to install the language model.
 # How to launch NeMo CHiME-8 Baseline
 
 ## 1. Create NeMo style manifest files
+
+This script will generate NeMo style 
+
 ```bash
 NEMO_ROOT="/your/path/to/NeMo" # cloned NeMo branch: dev/chime7
 NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest" # Folder that contains nemo manifest .json files
@@ -102,7 +115,7 @@ CHIME7_CLEANED_DATA_FOLDER="/your/path/to/chime7_official_cleaned" # Folder that
 python ${NEMO_ROOT}/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_infer.py --data-dir ${CHIME7_CLEANED_DATA_FOLDER} --subset ${DATA_SPLIT} --output-dir ${NEMO_MSASR_MANIFEST} \
 ```
 
-## 2. Setup global varialbes (This is temporar, will be removed in the final format)
+## 2. Setup global varialbes (This is temporary, will be removed in the final format)
 
 Modify the path in the inference script: `<NeMo Root>/scripts/chime7/hyper_optim/infer_e2e_t385_chime7.py`
 
