@@ -47,30 +47,10 @@ from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.utils import logging as nemo_logger
 
 
-if False:
-    # NGC workspace: nemo_asr_eval
-    NGC_WS_MOUNT="/ws"
-    ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
-    NEMO_CHIME7_ROOT=f"{NGC_WS_MOUNT}/nemo-gitlab-chime7/scripts/chime7"
-    CHIME7_ROOT=f"{NGC_WS_MOUNT}/chime7_official_cleaned_v2"
-    # ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
-    ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/chime7/checkpoints/rnnt_ft_chime6ANDmixer6_26jun_avged.nemo"
-    LM_PATH=f"{NGC_WS_MOUNT}/chime7/checkpoints/rnnt_chime6_mixer6_dipco_train_dev.kenlm"
-
-    SCENARIOS = "chime6 dipco mixer6"
-    SUBSETS = "dev"
-    
-else: 
-    NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
-    ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
-    NEMO_CHIME7_ROOT=f"{NEMO_ROOT}/scripts/chime7"
-    CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2"
-    # ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/model_checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo"
-    # ASR_MODEL_PATH=f"{NGC_WS_MOUNT}/chime7/checkpoints/rnnt_ft_chime6ANDmixer6_26jun_avged.nemo"
-    # LM_PATH=f"{NGC_WS_MOUNT}/chime7/checkpoints/rnnt_chime6_mixer6_dipco_train_dev.kenlm"
-    # SCENARIOS = "chime6 dipco mixer6"
-    SCENARIOS = "mixer6"
-    SUBSETS = "dev"
+NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
+ESPNET_ROOT="/workspace/espnet/egs2/chime7_task1/asr1"
+NEMO_CHIME7_ROOT=f"{NEMO_ROOT}/scripts/chime7"
+CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2"
 
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
@@ -134,7 +114,7 @@ def get_gss_command(gpu_id, diar_config, diar_param, diar_base_dir, output_dir,
     return command
 
 
-def get_asr_eval_command(gpu_id, asr_model_path, lm_path, diar_config, diar_param, normalize_db, output_dir, lm_alpha, lm_beam_size, maes_num_steps, maes_alpha, maes_gamma, maes_beta, asr_output_dir, eval_results_dir, scenarios=SCENARIOS, subsets=SUBSETS):
+def get_asr_eval_command(gpu_id, asr_model_path, lm_path, diar_config, diar_param, normalize_db, output_dir, lm_alpha, lm_beam_size, maes_num_steps, maes_alpha, maes_gamma, maes_beta, asr_output_dir, eval_results_dir, scenarios, subsets=SUBSETS):
     assert asr_model_path.endswith(".ckpt") or asr_model_path.endswith(".nemo"), f"get_asr_eval_command(): must be a .ckpt or .nemo file but got asr_model_path: {asr_model_path}"
     command = f"EVAL_CHIME=True {NEMO_CHIME7_ROOT}/evaluation/run_asr_lm.sh '{scenarios}' '{subsets}' " \
               f"{diar_config}-{diar_param} {output_dir}/processed {output_dir} {normalize_db} {asr_model_path} 1 4 {CHIME7_ROOT} {NEMO_CHIME7_ROOT} {gpu_id} " \
@@ -151,9 +131,9 @@ def objective_gss_asr(
         lm_path: str,
         diar_config: str,
         diar_base_dir: str,
-        diar_param: str = "T",
-        scenarios: str = SCENARIOS,
-        subsets: str = SUBSETS,
+        diar_param: str,
+        scenarios: str, 
+        subsets: str,
 ):
     assert asr_model_path.endswith(".ckpt") or asr_model_path.endswith(".nemo"), f"objective_gss_asr(): asr_model_path must be a .ckpt or .nemo file but got asr_model_path: {asr_model_path}"
     mc_mask_min_db = -160 # trial.suggest_int("mc_mask_min_db", -160, -160, 20)
@@ -237,10 +217,10 @@ def infer_chime7_mcmsasr(
     speaker_output_dir: str,
     gpu_id: int,
     temp_dir: str,
-    keep_mixer6: bool = False,
-    tune_vad: bool = True,
-    scenarios: str = SCENARIOS,
-    subsets: str = SUBSETS,
+    keep_mixer6: bool,
+    tune_vad: bool, 
+    scenarios: str,
+    subsets: str,
     pattern: str = "*-dev.json",
 ):
     """
@@ -348,7 +328,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", help="Batch size for mc-embedings and MSDD", type=int, default=8)
     parser.add_argument("--keep_mixer6", help="Keep mixer6 in the evaluation", action="store_true")
     parser.add_argument("--tune_vad", help="whether to tune VAD", type=bool, default=True)
-    parser.add_argument("--scenarios", help="Scenarios to run on", type=str, default=SCENARIOS)
+    parser.add_argument("--scenarios", help="Scenarios to run on", type=str)
     parser.add_argument("--subsets", help="Subsets to run on", type=str, default=SUBSETS)
     parser.add_argument("--pattern", help="Pattern to match manifest files", type=str, default="*-dev.json")
     parser.add_argument("--gpu_id", help="GPU ID to run on", type=int, default=0)  

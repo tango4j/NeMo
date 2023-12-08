@@ -91,7 +91,7 @@ def create_multichannel_manifest(
         os.remove(manifest_filepath)
     wav_pathlist = [ x.strip() for x in read_file(wav_path) ]
     wav_pathdict = {}
-    for uniq_id, cs_wav_paths in zip(uniqids,wav_pathlist):
+    for uniq_id, cs_wav_paths in zip(uniqids, wav_pathlist):
         wav_pathdict[uniq_id] = cs_wav_paths
 
     lines = []
@@ -135,7 +135,10 @@ def create_multichannel_manifest(
         duration = None
         audio_duration_list = []
         for audio_line in tqdm.tqdm(audio_line_list, desc=f"Measuring multichannel audio duration for {uid} {count}/{total_file_count}", unit=" files"):
-            duration = sox.file_info.duration(audio_line)
+            try:
+                duration = sox.file_info.duration(audio_line)
+            except:
+                import ipdb; ipdb.set_trace()
             audio_duration_list.append(duration)
         min_duration, max_duration = min(audio_duration_list), max(audio_duration_list)
         if min_duration < (uem_abs_end - uem_abs_stt):
@@ -287,8 +290,6 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
             sc_audio_files = sc_audio_files_loaded
         sc_audio_files.sort()
 
-        # Double-check that the channel count i
-
         # Double-check that the channel count is correct
         # if dataset == 'chime6':
         #     try:
@@ -320,11 +321,10 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     total_data_stats = {}
     
     if subset == 'dev':
-        datasets = ['chime6', 'dipco', 'mixer6']
-    elif subset == 'eval':
-        datasets = ['chime6']
         # datasets = ['chime6', 'dipco', 'mixer6']
-        # datasets = ['dipco']
+        datasets = ['mixer6']
+    elif subset == 'eval':
+        datasets = ['chime6', 'dipco', 'mixer6']
     elif subset == 'train':
         datasets = ['chime6']
     elif subset in ['train_intv', 'train_call']:
@@ -346,7 +346,6 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
             uem_lines = open(uem_files_paths[0]).readlines()
             uem_dict = parse_uem_lines(uem_lines)
         elif len(uem_files_paths) == 0:
-            import ipdb; ipdb.set_trace()
             raise ValueError(f'No uem files found in {uem_dir}')
         else:
             raise ValueError(f'Multiple uem files found in {uem_dir}')
@@ -417,7 +416,7 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
 
         # Get duration stats
         if len(session_duration_list) == 0:
-            import ipdb; ipdb.set_trace()
+            raise ValueError('session_duration_list is empty.')
         data_stats = get_data_stats(session_duration_list, output_precision=output_precision)
         total_data_stats[dataset] = data_stats
 

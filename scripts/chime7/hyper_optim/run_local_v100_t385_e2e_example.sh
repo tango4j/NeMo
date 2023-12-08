@@ -29,7 +29,8 @@ export PYTHONPATH=$NEMO_PATH/decoders:$PYTHONPATH
 export PYTHONPATH=/usr/lib/python3.8/site-packages:$PYTHONPATH
 export PYTHONPATH=/usr/lib/python3.8/site-packages/kenlm-0.0.0-py3.8-linux-x86_64.egg:$PYTHONPATH
 
-MANIFEST_BASE_PATH="/disk_d/datasets/nemo_chime7_diar_manifests/mixer6/mulspk_asr_manifest"
+NEMO_MSASR_MANIFEST="/disk_d/datasets/nemo_chime7_diar_manifests"
+MANIFEST_BASE_PATH="${NEMO_MSASR_MANIFEST}/mixer6/mulspk_asr_manifest"
 
 python -c "import kenlm; print('kenlm imported successfully')"
 python -c "import kenlm; print(kenlm.__file__)"

@@ -90,24 +90,30 @@ Run the script to install the language model.
 ./ngc_install_lm.sh
 ```
 
+# How to launch NeMo CHiME-8 Baseline
+
+```bash
+NEMO_ROOT="/your/path/to/NeMo" # cloned NeMo branch: dev/chime7
+NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest" # Folder that will contain nemo manifest .json files
+CHIME7_CLEANED_DATA_FOLDER="/disk_d_nvd/datasets/chime7_official_cleaned" # This folder contains sub-folders named: chime6, dipco, mixer6
+python ${NEMO_ROOT}/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_infer.py --data-dir ${CHIME7_CLEANED_DATA_FOLDER} --subset ${DATA_SPLIT} --output-dir ${NEMO_MSASR_MANIFEST} \
+```
+
 ### Launch CHiME-8 Baseline 
 
 ```bash
-NUM_TRIALS=1
-WORK_SPACE=/disk_b
-CHECKPOINTS=/disk_b/models/checkpoints
+CHECKPOINTS=/your/path/to/checkpoints
 
-NEMO_ROOT="/home/taejinp/projects/challenge_nemo/NeMo"
+NEMO_ROOT="/your/path/to/NeMo"
 NEMO_PATH=${NEMO_ROOT}/nemo
 
 OPTUNA_JOB_NAME=infer-e2e-t385-tango4j-NOd-dev_chime7
-PATTERN="*-dev.first1.json"
-# OPTUNA_JOB_NAME=infer-e2e-t385-tango4j-d03-dev_chime7
-# PATTERN="*-dev-d03.first1.json"
-
+DATA_SPLIT=dev
+PATTERN="*-"${DATA_SPLIT}".json"
 SCENARIOS=mixer6
-SPLIT=dev
 
+
+TEMP_DIR=/path/to/temp_dir/chime7_outputs/${OPTUNA_JOB_NAME}  
 SCRIPT_NAME=infer_e2e_t385_chime7.py
 
 OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
@@ -120,10 +126,13 @@ export PYTHONPATH=$NEMO_PATH/decoders:$PYTHONPATH
 export PYTHONPATH=/usr/lib/python3.8/site-packages:$PYTHONPATH
 export PYTHONPATH=/usr/lib/python3.8/site-packages/kenlm-0.0.0-py3.8-linux-x86_64.egg:$PYTHONPATH
 
-MANIFEST_BASE_PATH="/disk_d/datasets/nemo_chime7_diar_manifests/mixer6/mulspk_asr_manifest"
+NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest"
+MANIFEST_BASE_PATH="${NEMO_MSASR_MANIFEST}/mixer6/mulspk_asr_manifest"
 
-python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 1 --output_log ${OPTUNA_LOG} --storage ${STORAGE} --output_dir ./speaker_outputs_v3 \
---subsets ${SPLIT} --pattern ${PATTERN} --scenarios ${SCENARIOS} \
+python -c "import kenlm; print('kenlm imported successfully')" || exit 1
+
+python ${SCRIPT_NAME} --n_trials 1 --n_jobs 1 --output_log ${OPTUNA_LOG} --storage ${STORAGE} --output_dir ./speaker_outputs_v3 \
+--subsets ${DATA_SPLIT} --pattern ${PATTERN} --scenarios ${SCENARIOS} \
 --gpu_id 0 \
 --manifest_path ${MANIFEST_BASE_PATH} \
 --config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
@@ -134,7 +143,5 @@ python ${SCRIPT_NAME} --n_trials ${NUM_TRIALS} --n_jobs 1 --output_log ${OPTUNA_
 --batch_size ${DIAR_BATCH_SIZE} \
 --scenarios ${SCENARIOS} \
 --subsets "dev" \
---temp_dir ${WORK_SPACE}/chime7_outputs/${OPTUNA_JOB_NAME}   
-
+--temp_dir $TEMP_DIR
 ```
-
