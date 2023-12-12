@@ -9,10 +9,10 @@ from omegaconf import OmegaConf
 from nemo.core.config import hydra_runner
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
 from nemo.utils import logging
-import nemo.collections.asr as nemo_asr
 
 from lhoste_manifests import prepare_chime_manifests
 from lhoste_cuts import simple_cut, trim_to_supervisions
+
 from mic_rank import get_gss_mic_ranks
 from enhance_cuts import enhance_cuts as nemo_enhance_cuts
 

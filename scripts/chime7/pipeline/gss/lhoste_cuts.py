@@ -1,14 +1,10 @@
 # Code adapted from https://github.com/lhotse-speech/lhotse/blob/master/lhotse/bin/modes/cut.py
-from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
-import click
 
-from lhotse.bin.modes.cli_base import cli
-from lhotse.cut import CutSet, append_cuts, mix_cuts
+from lhotse.cut import CutSet
 from lhotse.serialization import load_manifest_lazy_or_eager
 from lhotse.utils import Pathlike
-
 
 
 def simple_cut(
