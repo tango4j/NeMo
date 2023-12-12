@@ -1,0 +1,55 @@
+gpu_id: 0
+num_workers: 16
+audio_type: "flac"
+
+chime_data_root: /media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2
+
+scenarios:
+  - mixer6
+
+subsets: 
+  - dev
+
+gss_output_dir: "./nemo_experiments/gss_outputs"
+
+diar_base_dir: "/media/data2/chime7-challenge/chime7_diar_results"
+diar_config: "system_B_V05_D03_bak"
+diar_param: "T0.5"
+
+preprocess:
+  text_norm: chime7  # choices in [chime6, chime7]
+  ignore_shorter: 0.2  # ignore audios shorter than this duration (in seconds)
+
+gss:  
+  top_k_channels: 80  # select top_k percentage of best channels from audios [0,100]
+  # Args similar to the original GSS implementaion
+  # See https://github.com/desh2608/gss for parameter explanations
+  bss_iterations: 5
+  context_duration: 15
+  use_garbage_class: true
+  min_segment_length: 0.0
+  max_segment_length: 200
+  max_batch_duration: 100
+  max_batch_cuts: 1
+  num_buckets: 4
+  force_overwrite: false
+  duration_tolerance: 3.0
+  channels: null 
+  torchaudio_backend: "soundfile"
+  dereverb_filter_length: 5
+  mc_mask_min_db: -60
+  mc_postmask_min_db: -9
+  dereverb_prediction_delay: 2
+  dereverb_num_iterations: 3
+  mc_filter_type: pmwf
+  mc_filter_num_iterations: 5
+  mc_filter_postfilter: "ban"
+
+
+
+
+
+
+
+
+
