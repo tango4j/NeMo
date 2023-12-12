@@ -1,22 +1,24 @@
-import os
 import glob
-import tqdm
 import json
+import os
+from collections import defaultdict
 from pathlib import Path
 
-from collections import defaultdict
+import tqdm
+from enhance_cuts import enhance_cuts as nemo_enhance_cuts
+from lhoste_cuts import simple_cut, trim_to_supervisions
+from lhoste_manifests import prepare_chime_manifests
+from mic_rank import get_gss_mic_ranks
 from omegaconf import OmegaConf
-from nemo.core.config import hydra_runner
+
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+from nemo.core.config import hydra_runner
 from nemo.utils import logging
 
-from lhoste_manifests import prepare_chime_manifests
-from lhoste_cuts import simple_cut, trim_to_supervisions
 
-from mic_rank import get_gss_mic_ranks
-from enhance_cuts import enhance_cuts as nemo_enhance_cuts
-
-def convert_diar_results_to_falign(diarization_dir: str, diarization_params: str, output_dir: str = "", subsets: list = ['dev']):
+def convert_diar_results_to_falign(
+    diarization_dir: str, diarization_params: str, output_dir: str, subsets: list = ['dev']
+):
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
     diarization_system = diarization_dir.split('/')[-1]
@@ -41,7 +43,7 @@ def convert_diar_results_to_falign(diarization_dir: str, diarization_params: str
                 scenario_subset_dir = scenario_subset_dir[0]
 
             # Grab manifests from the results of diarization
-            manifests_dir =  os.path.join(scenario_subset_dir, diarization_params)
+            manifests_dir = os.path.join(scenario_subset_dir, diarization_params)
             if not os.path.isdir(manifests_dir):
                 manifests_dir = os.path.join(scenario_subset_dir, f"pred_jsons_{diarization_params}")
 
@@ -49,13 +51,19 @@ def convert_diar_results_to_falign(diarization_dir: str, diarization_params: str
             if len(manifests) == 0:
                 print(f'No manifests found in {manifests_dir}')
                 continue
-            
+
             # Process each manifest
             for manifest in manifests:
                 manifest_name = os.path.basename(manifest)
-                session_name = manifest_name.replace(scenario, '').replace('dev', '').replace('eval', '').replace('.json', '').strip('-')
+                session_name = (
+                    manifest_name.replace(scenario, '')
+                    .replace('dev', '')
+                    .replace('eval', '')
+                    .replace('.json', '')
+                    .strip('-')
+                )
                 new_manifest = os.path.join(output_dir, scenario, subset, session_name + '.json')
-                
+
                 if not os.path.isdir(os.path.dirname(new_manifest)):
                     os.makedirs(os.path.dirname(new_manifest))
 
@@ -102,7 +110,7 @@ def prepare_nemo_manifests(data_dir: str, audio_type: str = 'flac'):
         subset = 'eval'
     else:
         raise ValueError(f'Unknown subset: {data_dir}')
-    
+
     # Find all audio files
     audio_files = glob.glob(data_dir + f'/**/*.{audio_type}', recursive=True)
     logging.info(f"Found {len(audio_files)} *.{audio_type} files in {data_dir}")
@@ -115,7 +123,7 @@ def prepare_nemo_manifests(data_dir: str, audio_type: str = 'flac'):
         if scenario == 'mixer6':
             # session_id has '-' in it
             parts = filename.replace(f'.{audio_type}', '').split('-')
-            session_id = parts[0] # keep only session, drop dev and mdm
+            session_id = parts[0]  # keep only session, drop dev and mdm
             speaker_id = parts[-2]
             start_end_time = parts[-1]
         else:
@@ -123,13 +131,15 @@ def prepare_nemo_manifests(data_dir: str, audio_type: str = 'flac'):
         start_time, end_time = start_end_time.split('_')
         start_time = int(start_time) / 100
         end_time = int(end_time) / 100
-        session_to_data[session_id].append({
-            'speaker': speaker_id,
-            'session_id': session_id,
-            'start_time': str(start_time),
-            'end_time': str(end_time),
-            'audio_filepath': os.path.relpath(path=audio_file, start=data_dir),
-        })
+        session_to_data[session_id].append(
+            {
+                'speaker': speaker_id,
+                'session_id': session_id,
+                'start_time': str(start_time),
+                'end_time': str(end_time),
+                'audio_filepath': os.path.relpath(path=audio_file, start=data_dir),
+            }
+        )
 
     for session_id, data in session_to_data.items():
         manifest_file = os.path.join(data_dir, f'{scenario}-{subset}-{session_id}.json')
@@ -147,10 +157,10 @@ def run_gss_process(cfg):
 
     logging.info(f"Convert NeMo diarization output to falign format")
     convert_diar_results_to_falign(
-        diarization_dir=str(diar_output_dir), 
-        diarization_params=cfg.diar_param, 
-        output_dir=str(alignments_output_dir), 
-        subsets=cfg.subsets
+        diarization_dir=str(diar_output_dir),
+        diarization_params=cfg.diar_param,
+        output_dir=str(alignments_output_dir),
+        subsets=cfg.subsets,
     )
     outputs = []
     for scenario in cfg.scenarios:
@@ -166,7 +176,7 @@ def run_gss_process(cfg):
             # NOTE 2:
             # The script will ignore segments shorter than 0.2 seconds.
             logging.info(f"Prepare manifests for {scenario}/{subset}...")
-            alignments_dir=alignments_output_dir / scenario
+            alignments_dir = alignments_output_dir / scenario
             alignments_dir.mkdir(parents=True, exist_ok=True)
             prepare_chime_manifests(
                 data_root=str(cfg.chime_data_root),
@@ -207,9 +217,7 @@ def run_gss_process(cfg):
             logging.info("Stage 2: Trim cuts to supervisions (1 cut per supervision)")
             cuts_seg_manifest = str(exp_dir / f"cuts_per_segment.jsonl.gz")
             trim_to_supervisions(
-                cuts=cuts_manifest,
-                output_cuts=cuts_seg_manifest,
-                keep_overlapping=False,
+                cuts=cuts_manifest, output_cuts=cuts_seg_manifest, keep_overlapping=False,
             )
 
             logging.info("Stage 3: Run GSS and prepare nemo manifests")
