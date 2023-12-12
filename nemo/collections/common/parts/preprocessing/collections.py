@@ -848,7 +848,7 @@ class DiarizationSpeechLabel(DiarizationLabel):
             else:
                 rttm_labels = []
                 with open(item['rttm_file'], 'r') as f:
-                    for line in f.readlines():
+                    for index, line in enumerate(f.readlines()):
                         start, end, speaker = self.split_rttm_line(line, decimals=3)
                         rttm_labels.append('{} {} {}'.format(start, end, speaker))
                 speaker_set = set()
