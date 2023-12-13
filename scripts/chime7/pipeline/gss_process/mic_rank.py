@@ -18,22 +18,11 @@ class EnvelopeVariance(torch.nn.Module):
     """
 
     def __init__(
-        self,
-        n_mels=40,
-        n_fft=400,
-        hop_length=200,
-        samplerate=16000,
-        eps=1e-6,
-        chunk_size=4,
-        chunk_stride=2,
+        self, n_mels=40, n_fft=400, hop_length=200, samplerate=16000, eps=1e-6, chunk_size=4, chunk_stride=2,
     ):
         super(EnvelopeVariance, self).__init__()
         self.mels = torchaudio.transforms.MelSpectrogram(
-            sample_rate=samplerate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            power=2,
+            sample_rate=samplerate, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, power=2,
         )
         self.eps = eps
         self.subband_weights = torch.nn.Parameter(torch.ones(n_mels))
@@ -67,9 +56,7 @@ class EnvelopeVariance(torch.nn.Module):
             # using for because i am too lazy of taking care of padded
             # values in stats computation, but this is fast
 
-            indxs = self._get_chunks_indx(
-                mels.shape[-1], self.chunk_size, self.chunk_stride
-            )
+            indxs = self._get_chunks_indx(mels.shape[-1], self.chunk_size, self.chunk_stride)
             all_win_ranks = [self._single_window(mels[..., s:t]) for s, t in indxs]
 
             return torch.stack(all_win_ranks).mean(0)
@@ -93,15 +80,9 @@ class MicRanking(Dataset):
         to_tensor = []
         chan_indx = []
         for recording in c_recordings.sources:
-            c_wav, _ = sf.read(
-                recording.source,
-                start=int(start * fs),
-                stop=int(start * fs) + int(duration * fs),
-            )
+            c_wav, _ = sf.read(recording.source, start=int(start * fs), stop=int(start * fs) + int(duration * fs),)
             c_wav = torch.from_numpy(c_wav).float().unsqueeze(0)
-            assert (
-                c_wav.shape[0] == 1
-            ), "Input audio should be mono for channel selection in this script."
+            assert c_wav.shape[0] == 1, "Input audio should be mono for channel selection in this script."
 
             if len(to_tensor) > 0:
                 if c_wav.shape[-1] != to_tensor[0].shape[-1]:
@@ -134,14 +115,10 @@ class MicRanking(Dataset):
         duration = c_supervision.duration
         c_recordings = self.recordings[c_supervision.recording_id]
         fs = c_recordings.sampling_rate
-        all_channels, chan_indx = self._get_read_chans(
-            c_supervision, c_recordings, start, duration, fs
-        )
+        all_channels, chan_indx = self._get_read_chans(c_supervision, c_recordings, start, duration, fs)
 
         assert all_channels.ndim == 3
-        assert (
-            all_channels.shape[0] == 1
-        ), "If batch size is more than one here something went wrong."
+        assert all_channels.shape[0] == 1, "If batch size is more than one here something went wrong."
         with torch.inference_mode():
             c_scores = self.ranker(all_channels)
         c_scores = c_scores[0].numpy().tolist()
@@ -180,39 +157,24 @@ def get_gss_mic_ranks(recordings, supervisions, output_filename, top_k, num_work
         new_supervisions.extend(elem)
 
     recording_set, supervision_set = lhotse.fix_manifests(
-        lhotse.RecordingSet.from_recordings(recordings),
-        lhotse.SupervisionSet.from_segments(new_supervisions),
+        lhotse.RecordingSet.from_recordings(recordings), lhotse.SupervisionSet.from_segments(new_supervisions),
     )
     # Fix manifests
     lhotse.validate_recordings_and_supervisions(recording_set, supervision_set)
 
     Path(output_filename).parent.mkdir(exist_ok=True, parents=True)
     filename = Path(output_filename).stem
-    supervision_set.to_file(
-        os.path.join(Path(output_filename).parent, f"{filename}_supervisions.jsonl.gz")
-    )
-    recording_set.to_file(
-        os.path.join(Path(output_filename).parent, f"{filename}_recordings.jsonl.gz")
-    )
+    supervision_set.to_file(os.path.join(Path(output_filename).parent, f"{filename}_supervisions.jsonl.gz"))
+    recording_set.to_file(os.path.join(Path(output_filename).parent, f"{filename}_recordings.jsonl.gz"))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        "We use this script to select a subset of" "microphones to feed to GSS."
+    parser = argparse.ArgumentParser("We use this script to select a subset of" "microphones to feed to GSS.")
+    parser.add_argument(
+        "-r,--recordings", type=str, metavar="STR", dest="recordings", help="Input recordings lhotse manifest",
     )
     parser.add_argument(
-        "-r,--recordings",
-        type=str,
-        metavar="STR",
-        dest="recordings",
-        help="Input recordings lhotse manifest",
-    )
-    parser.add_argument(
-        "-s,--supervisions",
-        type=str,
-        metavar="STR",
-        dest="supervisions",
-        help="Input supervisions lhotse manifest",
+        "-s,--supervisions", type=str, metavar="STR", dest="supervisions", help="Input supervisions lhotse manifest",
     )
     parser.add_argument(
         "-o, --out_name",
@@ -230,16 +192,10 @@ if __name__ == "__main__":
         type=int,
         metavar="INT",
         dest="top_k",
-        help="Percentage of best microphones to keep "
-        "(e.g. 20 -> 20% of all microphones)",
+        help="Percentage of best microphones to keep " "(e.g. 20 -> 20% of all microphones)",
     )
     parser.add_argument(
-        "-w,--workers",
-        default=8,
-        type=int,
-        metavar="INT",
-        dest="num_workers",
-        help="Number of parallel jobs",
+        "-w,--workers", default=8, type=int, metavar="INT", dest="num_workers", help="Number of parallel jobs",
     )
     args = parser.parse_args()
 
