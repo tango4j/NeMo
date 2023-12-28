@@ -43,11 +43,19 @@ class BCELoss(Loss, Typing):
         """
         return {"loss": NeuralType(elements_type=LossType())}
 
-    def __init__(self, reduction='sum', alpha=1.0, weight=torch.tensor([0.5, 0.5])):
+    def __init__(self, reduction='sum', alpha=1.0, weight=torch.tensor([0.1, 0.9]), sorted_preds: bool=False, sorted_loss: bool=False, class_normalization: bool=False):
         super().__init__()
-        self.reduction = reduction
-        self.loss_weight = weight
-        self.loss_f = torch.nn.BCELoss(weight=self.loss_weight, reduction=self.reduction)
+        self.class_normalization = class_normalization
+        if class_normalization:
+            self.reduction = 'none'
+        else:
+            self.reduction = 'sum'
+        self.loss_weight = torch.tensor([0.1, 0.9]),
+        # self.loss_f = torch.nn.BCELoss(weight=self.loss_weight, reduction=self.reduction)
+        self.loss_f = torch.nn.BCELoss(reduction=self.reduction)
+        self.sorted_preds = sorted_preds
+        self.sorted_loss = sorted_loss
+        self.eps = 1e-6
 
     @typecheck()
     def forward(self, probs, labels, signal_lengths):
@@ -70,4 +78,34 @@ class BCELoss(Loss, Typing):
         targets_list = [labels[k, : signal_lengths[k], :] for k in range(labels.shape[0])]
         probs = torch.cat(probs_list, dim=0)
         labels = torch.cat(targets_list, dim=0)
-        return self.loss_f(probs, labels)
+        if self.class_normalization in ['class', 'class_binary', 'binary']:
+            if self.class_normalization in ['class', 'class_binary']:
+                # Normalize loss by number of classes
+                norm_weight = 1/(labels.sum(dim=0) + self.eps)
+                norm_weight_norm = norm_weight / norm_weight.sum()
+                norm_weight_norm2 = torch.clamp(norm_weight_norm, min=0.05, max=1.0) 
+                norm_weight_norm2 = norm_weight_norm2 / norm_weight_norm2.max()
+                norm_weight = norm_weight_norm2[None, :].expand_as(labels).detach().clone()
+            else:            
+                norm_weight = torch.ones_like(labels).detach().clone()
+
+            if self.class_normalization in ['binary', 'class_binary']:
+                binary_weight = torch.ones_like(labels).detach().clone()
+                one_weight = (labels.sum() / (labels.shape[0]*labels.shape[1])).to(labels.device)
+                binary_weight[labels == 0] = one_weight
+                binary_weight[labels == 1] = 1 - one_weight
+            else:
+                binary_weight = torch.ones_like(labels).detach().clone()
+                
+        elif self.class_normalization == 'none' or not self.class_normalization:
+            binary_weight = torch.ones_like(labels).detach().clone() 
+            norm_weight = torch.ones_like(labels).detach().clone()
+            
+        if self.reduction == 'sum':
+            return self.loss_f(probs, labels)
+        elif self.reduction == 'none':
+            if self.class_normalization in ['class', 'class_binary', 'binary']:
+                return (binary_weight * norm_weight * self.loss_f(probs, labels)).sum()
+            else:
+                return self.loss_f(probs, labels)
+            

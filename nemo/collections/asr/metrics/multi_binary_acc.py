@@ -78,6 +78,7 @@ class MultiBinaryAccuracy(Metric):
         self.true_positive_count = 0
         self.false_positive_count = 0
         self.false_negative_count = 0
+        self.eps = 1e-6
 
     def update(self, preds: torch.Tensor, targets: torch.Tensor, signal_lengths: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
@@ -103,9 +104,9 @@ class MultiBinaryAccuracy(Metric):
         """
         Compute F1 score from the accumulated values. Return -1 if the F1 score is NaN.
         """
-        self.precision = self.true_positive_count / (self.true_positive_count + self.false_positive_count)
-        self.recall = self.true_positive_count / (self.true_positive_count + self.false_negative_count)
-        self.f1_score = 2 * self.precision * self.recall / (self.precision + self.recall)
+        self.precision = self.true_positive_count / (self.true_positive_count + self.false_positive_count + self.eps)
+        self.recall = self.true_positive_count / (self.true_positive_count + self.false_negative_count + self.eps)
+        self.f1_score = torch.tensor(2 * self.precision * self.recall / (self.precision + self.recall + self.eps)).detach().clone()
         if torch.isnan(self.f1_score):
             logging.warn("self.f1_score contains NaN value. Returning -1 instead of NaN value.")
             self.f1_score = -1

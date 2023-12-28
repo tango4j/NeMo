@@ -24,7 +24,7 @@ from nemo.core.classes.module import NeuralModule
 from nemo.core.neural_types import EncodedRepresentation, LengthsType, NeuralType, SpectrogramType
 from nemo.core.neural_types.elements import ProbsType
 
-__all__ = ['MSDD_module']
+__all__ = ['SortformerDiarizer']
 
 
 class ConvLayer(nn.Module):
@@ -41,7 +41,7 @@ class ConvLayer(nn.Module):
         return feature
 
 
-class MSDD_module(NeuralModule, Exportable):
+class SortformerDiarizer(NeuralModule, Exportable):
     """
     Multi-scale Diarization Decoder (MSDD) for overlap-aware diarization and improved diarization accuracy from clustering diarizer.
     Based on the paper: Taejin Park et. al, "Multi-scale Speaker Diarization with Dynamic Scale Weighting", Interspeech 2022.
@@ -125,19 +125,24 @@ class MSDD_module(NeuralModule, Exportable):
         use_amsl_layer: bool = False,
         weighting_scheme: str = 'conv_scale_weight',
         context_vector_type: str = 'cos_sim',
+        sort_layer_on: bool = False, 
+        sort_final_layer_on: bool = False,
     ):
         super().__init__()
         self._speaker_model = None
+        self.sort_final_layer_on = sort_final_layer_on
         self._vad_model = None
         self.batch_size: int = 1
         self.length: int = 50
         self.emb_dim: int = emb_dim
         self.num_spks: int = num_spks
-        self.unit_n_spks: int = 2
+        self.unit_n_spks: int = num_spks
         if self.num_spks % self.unit_n_spks != 0:
             raise ValueError("The number of speakers must be divisible by unit_n_spks.")
         elif self.num_spks > self.unit_n_spks:
             self.n_stream = self.num_spks // self.unit_n_spks
+        else:
+            self.n_stream = 1
         
         self.scale_n: int = scale_n
         self.cnn_output_ch: int = cnn_output_ch
@@ -189,6 +194,9 @@ class MSDD_module(NeuralModule, Exportable):
             raise ValueError(f"No such weighting scheme as {self.weighting_scheme}")
 
         self.hidden_to_spks = nn.Linear(2 * hidden_size, self.unit_n_spks)
+        self.first_hidden_to_hidden = nn.Linear(hidden_size, hidden_size)
+        self.target_to_embs = nn.Linear(hidden_size, hidden_size)
+        # self.single1_hidden_to_spks = nn.Linear(hidden_size, self.unit_n_spks)
         self.single_hidden_to_spks = nn.Linear(hidden_size, self.unit_n_spks)
         if self.context_vector_type == "cos_sim":
             self.dist_to_emb = nn.Linear(self.scale_n * self.unit_n_spks, hidden_size)
@@ -480,29 +488,64 @@ class MSDD_module(NeuralModule, Exportable):
         return preds, scale_weights
     
     def forward_context(self, ms_emb_seq, length, ms_avg_embs):
-        if self.n_stream > 1:
-            seg_split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
-            ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, seg_split_tup, dim=3), dim=0)
-            ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
-            length = length.repeat(self.n_stream)
-            ms_avg_embs = ms_avg_embs_concat
+        # if self.n_stream > 1:
+        #     seg_split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
+        #     ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, seg_split_tup, dim=3), dim=0)
+        #     ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
+        #     length = length.repeat(self.n_stream)
+        #     ms_avg_embs = ms_avg_embs_concat
 
         context_emb, scale_weights = self.core_model(ms_emb_seq, length, ms_avg_embs)
         context_emb = self.dropout(F.relu(context_emb))
         return context_emb, scale_weights
 
-    def forward_speaker_logits(self, lstm_output, scale_weights):
-        lstm_hidden_out = self.dropout(F.relu(lstm_output))
-        spk_preds = self.single_hidden_to_spks(lstm_hidden_out)
+    # def forward_speaker_logits(self, lstm_output, scale_weights):
+    #     lstm_hidden_out = self.dropout(F.relu(lstm_output))
+    #     spk_preds = self.single_hidden_to_spks(lstm_hidden_out)
+    #     preds = nn.Sigmoid()(spk_preds)
+
+    #     if self.n_stream > 1:
+    #         preds_split_tup = (int(preds.shape[0]/self.n_stream),) * (self.n_stream - 1)
+    #         preds_reshaped = torch.cat(torch.tensor_split(preds, preds_split_tup, dim=0), dim=2)
+    #         scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, preds_split_tup, dim=0), dim=3)
+    #         preds, scale_weights = preds_reshaped, scale_weights_reshaped
+    #     return preds, scale_weights
+     
+    
+    def sort_output_states(self, output_states):
+        bs, seq_len, emb_dim = output_states.shape
+        sorted_output_states_list = []
+        per_sample_vars = torch.var(output_states, dim=1)
+        sort_indices = torch.sort(per_sample_vars, descending=True)[1]
+        for i in range(bs):
+            sorted_output_states_list.append(output_states[i, :, sort_indices[i]].unsqueeze(0))
+        sorted_output_states = torch.concat(sorted_output_states_list)
+        return sorted_output_states
+     
+    def forward_speaker_sigmoids(self, hidden_out):
+        if self.sort_final_layer_on:
+            hidden_out = self.sort_output_states(hidden_out)
+        # hidden_out = self.dropout(F.relu(hidden_out))
+        # hidden_out = self.first_hidden_to_hidden(hidden_out)
+        hidden_out = self.dropout(F.relu(hidden_out))
+        hidden_out = self.first_hidden_to_hidden(hidden_out)
+        if self.sort_final_layer_on:
+            hidden_out = self.sort_output_states(hidden_out)
+        hidden_out = self.dropout(F.relu(hidden_out))
+        spk_preds = self.single_hidden_to_spks(hidden_out)
         preds = nn.Sigmoid()(spk_preds)
-
-        if self.n_stream > 1:
-            preds_split_tup = (int(preds.shape[0]/self.n_stream),) * (self.n_stream - 1)
-            preds_reshaped = torch.cat(torch.tensor_split(preds, preds_split_tup, dim=0), dim=2)
-            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, preds_split_tup, dim=0), dim=3)
-            preds, scale_weights = preds_reshaped, scale_weights_reshaped
-        return preds, scale_weights
-
+        return preds
+    
+    def mock_embedding(self, temp_targets, emb_dim=192):
+        emb_dim, offset_val = 192, 1e+3
+        emb_seq = torch.repeat_interleave(temp_targets, int(emb_dim/temp_targets.shape[-1]) , dim=2)
+        if self.cfg_e2e_diarizer_model.variance_in_mock_embs > 0:
+            random_embs = torch.randn(emb_seq.shape[0], emb_seq.shape[-1]).unsqueeze(1).repeat(1, emb_seq.shape[1], 1).to(emb_seq.device)
+            emb_seq = (offset_val * emb_seq - self.cfg_e2e_diarizer_model.variance_in_mock_embs * random_embs)/offset_val
+        emb_seq = emb_seq + torch.randn_like(emb_seq) * self.cfg_e2e_diarizer_model.mock_emb_noise_std 
+        mock_embs = self.target_to_embs(emb_seq) 
+        return mock_embs 
+    
     def input_example(self):
         """
         Generate input examples for tracing etc.

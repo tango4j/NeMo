@@ -408,7 +408,7 @@ class CosineAnnealing(WarmupAnnealHoldPolicy):
         for initial_lr in self.base_lrs:
             if initial_lr < self.min_lr:
                 raise ValueError(
-                    f"{self} received an initial learning rate that was lower than the minimum learning rate."
+                    f"{self} received an initial learning rate that was lower than the minimum learning rate. inital_lr = {initial_lr}, min_lr = {self.min_lr}"
                 )
 
         if self.constant_steps is None or self.constant_steps == 0:

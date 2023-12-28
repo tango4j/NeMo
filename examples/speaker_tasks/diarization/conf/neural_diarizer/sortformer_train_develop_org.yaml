@@ -7,21 +7,13 @@
 # {"audio_filepath": "/path/to/audio01.wav", "offset": 390.83, "duration": 13.45, "text": "-", "num_speakers": 2, "rttm_filepath": "/path/to/audio01.rttm"}
 name: "MultiscaleDiarDecoder" 
 sample_rate: 16000
-num_workers: 30
+num_workers: 18
 batch_size: 8
 
 model: 
   diarizer:
     out_dir: null
     oracle_vad: True # If True, uses RTTM files provided in manifest file to get speech activity (VAD) timestamps
-    
-    vad:
-      model_path: ??? # .nemo local model path or pretrained VAD model name 
-      parameters: # Tuned parameters for CH109 (using the 11 multi-speaker sessions as dev set) 
-        window_length_in_sec: 0.15  # Window length in sec for VAD context input 
-        shift_length_in_sec: 0.02
-        vad_threshold: 0.5
-        mu: 0.3 # Ratio of VAD loss weight against speaker loss weight
 
     speaker_embeddings:
       model_path: ??? # .nemo local model path or pretrained model name (titanet_large is recommended)
@@ -30,15 +22,21 @@ model:
         shift_length_in_sec: [1.5,0.75,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
         multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
         save_embeddings: True # Save embeddings as pickle file for each audio input.
-
+  
+  use_mock_embs: True 
+  perm_mock_embs: True
+  variance_in_mock_embs: 0.1
+  # sort_layer_on: True
+  sort_layer_on: False
+  mock_emb_noise_std: 0.01
   num_workers: ${num_workers}
   max_num_of_spks: 6 # Number of speakers per model. This is currently fixed at 6.
   scale_n: 3 # Number of scales for MSDD model and initializing clustering.
   interpolated_scale: 0.1 # The length of the interpolated scale
   soft_label_thres: 0.5 # Threshold for creating discretized speaker label from continuous speaker label in RTTM files.
   session_len_sec: 15
-  # freeze_speaker_model: True # If True, speaker model is frozen and only MSDD module is trained.
-  freeze_speaker_model: False
+  freeze_speaker_model: True # If True, speaker model is frozen and only MSDD module is trained.
+  # freeze_speaker_model: False
   random_flip: True
   restore_from: null
   # global_loss_ratio: 30 # Ratio of global loss weight against speaker loss weight
@@ -68,6 +66,7 @@ model:
     labels: null
     batch_size: ${batch_size}
     shuffle: True
+    num_workers: ${num_workers}
 
   validation_ds:
     manifest_filepath: ???
@@ -80,6 +79,7 @@ model:
     labels: null
     batch_size: ${batch_size}
     shuffle: False
+    num_workers: ${num_workers}
   
   test_ds:
     manifest_filepath: null
@@ -93,6 +93,7 @@ model:
     batch_size: ${batch_size}
     shuffle: False
     seq_eval_mode: True
+    num_workers: ${num_workers}
 
   preprocessor:
     _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
@@ -106,10 +107,12 @@ model:
     frame_splicing: 1
     dither: 0.00001
 
-  msdd_module:
-    _target_: nemo.collections.asr.modules.msdd_diarizer.MSDD_module
+  diarizer_module:
+    # _target_: nemo.collections.asr.modules.sortformer.SortformerEncoder
+    _target_: nemo.collections.asr.modules.sortformer_diarizer.SortformerDiarizer
     num_spks: ${model.max_num_of_spks} # Number of speakers per model. This is currently fixed at 2.
-    hidden_size: 256 # Hidden layer size for linear layers in MSDD module
+    # hidden_size: 256 # Hidden layer size for linear layers in MSDD module
+    hidden_size: 192 # Hidden layer size for linear layers in MSDD module
     num_lstm_layers: 3 # Number of stacked LSTM layers
     dropout_rate: 0.5 # Dropout rate
     cnn_output_ch: 32 # Number of filters in a conv-net layer.
@@ -121,14 +124,47 @@ model:
     context_vector_type: 'cos_sim' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
     # context_vector_type: 'cos_sim_cross_scale' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
     use_amsl_layer: True
+    sort_layer_on: ${model.sort_layer_on}
+  
+  sortformer_encoder:
+    _target_: nemo.collections.asr.modules.transformer.sortformer_encoders.SortformerEncoder
+    num_layers: 2
+    hidden_size: 192 # Needs to be multiple of num_attention_heads
+    inner_size: 768
+    # num_attention_heads: 12
+    num_attention_heads: 16
+    attn_score_dropout: 0.5
+    attn_layer_dropout: 0.5
+    ffn_dropout: 0.5
+    hidden_act: relu
+    pre_ln: False
+    pre_ln_final_layer_norm: True
+    unit_dim: 5
+    sort_layer_on: ${model.sort_layer_on}
+    # sort_layer_on: False
+
+  transformer_encoder_row:
+    _target_: nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder
+    num_layers: 3
+    hidden_size: 299 # Needs to be multiple of num_attention_heads
+    inner_size: 598
+    # num_attention_heads: 12
+    num_attention_heads: 13
+    attn_score_dropout: 0.5
+    attn_layer_dropout: 0.5
+    ffn_dropout: 0.5
+    hidden_act: relu
+    pre_ln: False
+    pre_ln_final_layer_norm: True
+
 
   transformer_encoder:
     _target_: nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder
-    # _target_: nemo.collections.asr.modules.transformer.transformer_decoders.TransformerDecoder
-    num_layers: 4
-    hidden_size: 256 # Needs to be multiple of num_attention_heads
-    inner_size: 384
-    num_attention_heads: 4
+    num_layers: 11
+    hidden_size: 192 # Needs to be multiple of num_attention_heads
+    inner_size: 768
+    # num_attention_heads: 12
+    num_attention_heads: 16
     attn_score_dropout: 0.5
     attn_layer_dropout: 0.5
     ffn_dropout: 0.5
@@ -148,8 +184,11 @@ model:
     _target_: nemo.collections.asr.losses.bce_loss.BCELoss
     weight: null # Weight for binary cross-entropy loss. Either `null` or list type input. (e.g. [0.5,0.5])
     # alpha: 0.003 # Ratio between BCE loss and affinity loss
+    reduction: none
     alpha: 0.0 # Ratio between BCE loss and affinity loss
-  
+    sorted_loss: True # If True, labels are sorted to make first-come first-serve order.
+    class_normalization: True # If True, loss is normalized by the quantity of each class.
+
   global_loss:
     _target_: nemo.collections.asr.losses.angularloss.AngularSoftmaxLoss # you could also use cross-entrophy loss
     scale: 30
@@ -157,8 +196,8 @@ model:
     margin: 0.1
 
   optim_param_groups:
-    msdd._speaker_model.encoder: # NOTE: Only EncDecDiarLabelModel class supports multi-level optim_param_groups
-      lr: .000001
+    sortformer_diarizer._speaker_model.encoder: # NOTE: Only EncDecDiarLabelModel class supports multi-level optim_param_groups
+      lr: .001
       weight_decay: 0.005
 
       sched:
@@ -167,17 +206,34 @@ model:
 
   optim:
     name: adam
-    lr: .00005
-    weight_decay: 0.005
+    lr: 0.008
+    # lr: 0.001
+    betas:
+      - 0.9
+      - 0.98
+    weight_decay: 0.0
+    # sched:
+    #   # name: CosineAnnealing
+    #   # min_lr: 0.0000001
+    #   # last_epoch: -1
+    #   # warmup_ratio: 0.0001
+    #   name: CosineAnnealing
+    #   # scheduler config override
+    #   warmup_steps: 30
+    #   warmup_ratio: null
+    #   min_lr: 0.00000001
 
     sched:
-      name: CosineAnnealing
+      name: InverseSquareRootAnnealing
       min_lr: 0.000001
+      last_epoch: -1
+      # warmup_ratio: 0.1
+      warmup_steps: 30
 
 trainer:
   devices: 1 # number of gpus (devices)
   accelerator: gpu 
-  max_epochs: 50000
+  max_epochs: 800
   max_steps: -1 # computed at runtime if not set
   num_nodes: 1
   strategy: ddp
