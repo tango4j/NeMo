@@ -5,12 +5,7 @@ cd /home/taejinp/projects/$branch_name/NeMo
 #bash ../copy_from_mc_audio_gitlab.sh 
 pwd
 BASEPATH=/home/taejinp/projects/$branch_name/NeMo/examples/speaker_tasks/diarization
-#rir_manifest_path='/disk_d/datasets/RIRS_NOISES/only1ch/rir_impulse_manifest.only1ch.json'
-rir_manifest_path='/disk_d/datasets/RIRS_NOISES/only1ch/real_rirs_manifest.only1ch.json'
-#noise_manifest_paths=['/disk_d/datasets/musan/manifest_files/only1ch/musan_noise_and_music_manifest.only1ch.json']
 noise_manifest_paths='/disk_d/temporary_data/musan/manifest_files/only1ch/musan_noise_and_music_manifest.only1ch.json'
-#bg_noise_manifest_paths=['/disk_d/datasets/musan/manifest_files/only1ch/musan_noise_and_music_manifest.only1ch.json']
-bg_noise_manifest_paths=null
 
 
 # train_manifest='/disk_b/datasets/simulated_data/diar_sim_libri_beta_v100/05Movl/data_splits/diar_sim_libri_beta_v101_05Movl_train.v2seg.json'
@@ -164,12 +159,6 @@ NUM_WORKERS=18
 VAD_MODEL_PATH="/home/taejinp/Downloads/wnc_frame_vad.nemo"
 MAX_NUM_OF_SPKS=4
 EMB_MODEL_PATH="titanet_large"
-#model.augmentor.rir_noise_aug.rir_manifest_path=$rir_manifest_path \
-#model.augmentor.rir_noise_aug.bg_noise_manifest_paths=$bg_noise_manifest_paths \
-#model.augmentor.noise.manifest_path=$noise_manifest_paths \
-#model.augmentor.noise.manifest_path=$noise_manifest_paths \
-    #trainer.resume_from_checkpoint=$MSDD_MODEL_PATH \
-    # model.diarizer.vad.model_path=$VAD_MODEL_PATH \
 MAX_STEPS=500000
 MAX_EPOCHS=5000
 python $BASEPATH/neural_diarizer/sortformer_diar_encoder_train.py --config-path='../conf/neural_diarizer' --config-name="$YAML_NAME" \
