@@ -158,6 +158,7 @@ class SortformerEncoderBlock(nn.Module):
         layer_arrival_time_sort: bool = False,
         num_classes: int = 4,
         detach_preds: bool = False,
+        sort_layer_type: str = 'parallel',
     ):
         super().__init__()
         self.pre_ln = pre_ln
@@ -181,6 +182,7 @@ class SortformerEncoderBlock(nn.Module):
         self.hidden_to_spks = nn.Linear(hidden_size, self.num_classes)
         self.unit_emb_to_hidden = nn.Linear(self.unit_dim, hidden_size)
         self.dropout = nn.Dropout(ffn_dropout)
+        self.sort_layer_type = sort_layer_type
 
     def forward_speaker_sigmoids(self, unit_emb_out):
         unit_emb_out = self.dropout(F.sigmoid(unit_emb_out))
@@ -208,7 +210,7 @@ class SortformerEncoderBlock(nn.Module):
 
         return output_states
     
-    def sort_output_states(self, output_states):
+    def var_sort_pooling(self, output_states):
         bs, seq_len, emb_dim = output_states.shape
         sorted_output_states_list = []
         per_sample_vars = torch.var(output_states, dim=1)
@@ -247,6 +249,21 @@ class SortformerEncoderBlock(nn.Module):
         mask_max_indices[mask_max_values == 0] = max_cap_val
         return mask_max_indices 
     
+    def __forward_postln(self, encoder_query, encoder_mask, encoder_keys):
+        """
+        Post-LayerNorm block
+        Order of operations: Self-Attn -> Residual -> LN -> Cross-Attn -> Residual -> LN -> FFN -> Residual -> LN
+        """
+        self_attn_output = self.first_sub_layer(encoder_query, encoder_keys, encoder_keys, encoder_mask)
+        self_attn_output += encoder_query
+        self_attn_output = self.layer_norm_1(self_attn_output)
+
+        output_states = self.second_sub_layer(self_attn_output)
+        output_states += self_attn_output
+        output_states = self.layer_norm_2(output_states)
+
+        return output_states 
+    
     def sort_probs_and_labels(self, labels, discrete=True, thres=0.5):
         """
         Sorts probs and labels in descending order of signal_lengths.
@@ -283,15 +300,12 @@ class SortformerEncoderBlock(nn.Module):
 
         output_states = self.second_sub_layer(self_attn_output)
         output_states_2nd = output_states + self_attn_output
-        
         if self.sort_layer_on:
             if self.sort_bin_order and self.seq_var_sort:
-                sorted_output_states = self.sort_output_states(output_states_2nd)
+                sorted_output_states = self.var_sort_pooling(output_states_2nd)
             else:
                 sorted_output_states = output_states_2nd
             sorted_output_states_short = sorted_output_states[:, :, :self.unit_dim]
-            # if self.layer_arrival_time_sort:
-            #     sorted_output_states_short = self.arrival_time_sort(sorted_output_states_short)
             if self.sort_bin_order:
                 sorted_output_states_short = self.p2_norm(sorted_output_states_short)
                 preds = self.forward_speaker_sigmoids(sorted_output_states_short)
@@ -300,21 +314,90 @@ class SortformerEncoderBlock(nn.Module):
                 preds = self.forward_speaker_sigmoids(sorted_output_states_short)
             if self.detach_preds: 
                 preds = preds.detach()
-            # output_states = self.third_sub_layer(output_states) + output_states_2nd
             output_states = self.third_sub_layer(preds) + self.p2_norm(output_states_2nd)
-            # output_states = self.third_sub_layer(output_states) 
         else:
             output_states = output_states_2nd
         # output_states = output_states_2nd + output_states_3rd
         # output_states = self.third_sub_layer(sorted_output_states_short) + output_states_2nd
         output_states = self.layer_norm_2(output_states)
         return output_states, attn_score_mat, preds
+    
+    def forward_and_sort_replace(self, encoder_query, encoder_mask, encoder_keys):
+        """
+        Post-LayerNorm block
+        Order of operations: Self-Attn -> Residual -> LN -> Cross-Attn -> Residual -> LN -> FFN -> Residual -> LN
+        """
+        self_attn_output, attn_score_mat = self.first_sub_layer(encoder_query, encoder_keys, encoder_keys, encoder_mask)
+        self_attn_output += encoder_query
 
-    def forward(self, encoder_query, encoder_mask, encoder_keys):
-        if self.pre_ln:
-            return self.forward_preln(encoder_query, encoder_mask, encoder_keys)
+        self_attn_output = self.layer_norm_1(self_attn_output)
+        if self.sort_layer_on:
+            if self.sort_bin_order and self.seq_var_sort:
+                sorted_output_states = self.var_sort_pooling(self_attn_output)
+            else:
+                sorted_output_states = self_attn_output
+            sorted_output_states_short = sorted_output_states[:, :, :self.unit_dim]
+            if self.sort_bin_order:
+                sorted_output_states_short = self.p2_norm(sorted_output_states_short)
+                preds = self.forward_speaker_sigmoids(sorted_output_states_short)
+                preds = self.sort_probs_and_labels(preds, discrete=False)
+            else:
+                preds = self.forward_speaker_sigmoids(sorted_output_states_short)
+            if self.detach_preds: 
+                preds = preds.detach()
+            output_states = self.third_sub_layer(preds) + self.p2_norm(self_attn_output) 
         else:
+            output_states = self.second_sub_layer(self_attn_output)
+        output_states += self_attn_output
+        output_states = self.layer_norm_2(output_states)
+        return output_states, attn_score_mat, preds
+    
+    def forward_sort(self, encoder_query, encoder_mask, encoder_keys):
+        """
+        Post-LayerNorm block
+        Order of operations: Self-Attn -> Residual -> LN -> Cross-Attn -> Residual -> LN -> FFN -> Residual -> LN
+        """
+        self_attn_output, attn_score_mat = self.first_sub_layer(encoder_query, encoder_keys, encoder_keys, encoder_mask)
+        self_attn_output += encoder_query
+
+        self_attn_output = self.layer_norm_1(self_attn_output)
+        if self.sort_layer_on:
+            if self.sort_layer_type == 'serial':
+                self_attn_output = self.second_sub_layer(self_attn_output)
+            if self.sort_bin_order and self.seq_var_sort:
+                sorted_output_states = self.var_sort_pooling(self_attn_output)
+            else:
+                sorted_output_states = self_attn_output
+            sorted_output_states_short = sorted_output_states[:, :, :self.unit_dim]
+            if self.sort_bin_order:
+                sorted_output_states_short = self.p2_norm(sorted_output_states_short)
+                preds = self.forward_speaker_sigmoids(sorted_output_states_short)
+                preds = self.sort_probs_and_labels(preds, discrete=False)
+            else:
+                preds = self.forward_speaker_sigmoids(sorted_output_states_short)
+            if self.detach_preds: 
+                preds = preds.detach()
+            if self.sort_layer_type == 'parallel':
+                output_states = self.third_sub_layer(preds) + self.p2_norm(self.second_sub_layer(self_attn_output))
+            elif self.sort_layer_type == 'replace':
+                output_states = self.third_sub_layer(preds)
+            else:
+                raise NotImplementedError
+        else:
+            output_states = self.second_sub_layer(self_attn_output)
+        output_states += self_attn_output
+        output_states = self.layer_norm_2(output_states)
+        return output_states, attn_score_mat, preds
+ 
+    def forward(self, encoder_query, encoder_mask, encoder_keys):
+        # if self.pre_ln:
+        #     return self.forward_preln(encoder_query, encoder_mask, encoder_keys)
+        # else:
+        #     return self.forward_postln(encoder_query, encoder_mask, encoder_keys)
+        if self.sort_layer_type == 'parallel':
             return self.forward_postln(encoder_query, encoder_mask, encoder_keys)
+        elif self.sort_layer_type == 'replace':
+            return self.forward_and_sort_replace(encoder_query, encoder_mask, encoder_keys)
 
 
 class SortformerEncoder(nn.Module):
@@ -338,6 +421,7 @@ class SortformerEncoder(nn.Module):
         layer_arrival_time_sort: bool = False,
         num_classes: int = 4,
         detach_preds: bool = False,
+        sort_layer_type: str = 'parallel',
     ):
         super().__init__()
 
@@ -362,6 +446,7 @@ class SortformerEncoder(nn.Module):
             layer_arrival_time_sort,
             num_classes,
             detach_preds,
+            sort_layer_type,
         )
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(num_layers)])
         self.diag = 0 if mask_future else None

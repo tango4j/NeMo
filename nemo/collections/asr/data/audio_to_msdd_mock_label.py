@@ -18,6 +18,7 @@ from statistics import mode
 from typing import Dict, List, Tuple, Optional
 import pickle
 
+from torch import nn
 import torch
 import numpy as np
 import time
@@ -34,6 +35,11 @@ from nemo.core.classes import Dataset
 from nemo.core.neural_types import AudioSignal, EncodedRepresentation, LengthsType, NeuralType, ProbsType
 
 from nemo.collections.asr.parts.utils.channel_clustering import channel_cluster_from_coherence
+
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform(m.weight)
+        m.bias.data.fill_(0.01)
 
 def get_subsegments_to_scale_timestamps(subsegments: List[Tuple[float, float]], feat_per_sec, decimals=2):
     """
@@ -412,7 +418,7 @@ class _AudioMSDDTrainDataset(Dataset):
         )
         self.emb_dim = 192
         self.mock_emb_degree_of_freedom = mock_emb_degree_of_freedom
-        self.validation_mode = False
+        self.validation_mode = validation_mode
         self.perm_mock_embs = perm_mock_embs
         self.mock_emb_noise_std = mock_emb_noise_std
         self.featurizer = featurizer
@@ -454,7 +460,8 @@ class _AudioMSDDTrainDataset(Dataset):
         self.use_1ch_from_ch_clus = False
         self.ms_seg_timestamps, self.ms_seg_counts = self.get_ms_seg_timestamps(duration=self.session_len_sec, min_subsegment_duration=self.scale_dict[self.scale_n-1][0]) 
         self.scale_mapping = torch.stack(get_argmin_mat(self.ms_seg_timestamps))
-        
+        self.min_noise_std = 0.005
+  
     def __len__(self):
         return len(self.collection)
 
@@ -638,6 +645,14 @@ class _AudioMSDDTrainDataset(Dataset):
         #     ch_clus_mat = torch.zeros_like(ch_clus_mat)
         #     ch_clus_mat[torch.arange(ch_inds.shape[0]), ch_inds] = 1
         return ch_clus_mat
+    
+    def get_random_cov_mat(self, emb_dim: int = 192, max_spks: int = 4, mock_emb_degree_of_freedom: int = 16):
+        source_vecs = torch.rand(max_spks, emb_dim, mock_emb_degree_of_freedom)
+        covs = torch.bmm(source_vecs, source_vecs.transpose(1,2)) 
+        covs = covs / torch.max(covs)
+        covs.add_(torch.eye(emb_dim).unsqueeze(0)*0.001)
+        covs = torch.block_diag(*covs)
+        return covs
         
     def __getitem__(self, index):
         # print(f"Starting dataloader item idx: {index}")
@@ -667,29 +682,30 @@ class _AudioMSDDTrainDataset(Dataset):
         base_dim = self.max_spks * self.mock_emb_degree_of_freedom
         if base_dim > self.emb_dim:
             raise ValueError(f"max_spks * mock_emb_degree_of_freedom {base_dim} cannot be larger than emb_dim {self.emb_dim}")
-        mvec = torch.ones(base_dim) 
-        if self.validation_mode:
-            # If the model is in validation mode, we create randomness with more variability
-            cov = torch.diag(torch.ones(base_dim))
-        else:
-            # If the model is in training mode, we add noise has less variability
-            cov = torch.diag(torch.rand(self.mock_emb_degree_of_freedom).repeat(4))
-        multivariate_normal = torch.distributions.MultivariateNormal(mvec, cov)
-        emb_seed = multivariate_normal.sample() 
-
-        temp_targets = targets.clone()
-        if self.perm_mock_embs:
-            perm_idx = torch.argsort(torch.rand_like(torch.rand(temp_targets.shape[0], temp_targets.shape[-1])), dim=-1)
-            for batch_idx in range(temp_targets.shape[0]):
-                temp_targets[batch_idx] = temp_targets[batch_idx, :, perm_idx[batch_idx]]
-        emb_dim = self.emb_dim
-        speaker_mask_target_repeat = torch.repeat_interleave(temp_targets, int(self.emb_dim/temp_targets.shape[-1]), dim=1)
-        expand_count =  int(self.emb_dim // emb_seed.shape[0])
-        emb_seed_expand = torch.repeat_interleave(emb_seed, expand_count, dim=0).unsqueeze(0).repeat(temp_targets.shape[0], 1)
-        emb_seed_clean = emb_seed_expand * speaker_mask_target_repeat
-        emb_seed_dirty = emb_seed_clean + torch.randn_like(emb_seed_clean) * self.mock_emb_noise_std  
-        feature_length =  torch.tensor(emb_seed_dirty.shape[0]).long()
-        return emb_seed_dirty, feature_length, targets
+        seq_len, n_spks = targets.shape
+        rep_count = int(self.emb_dim//self.mock_emb_degree_of_freedom)
+        
+        # Generate `self.max_spks` worth of random embeddings
+        mvec = torch.randn(self.max_spks * self.mock_emb_degree_of_freedom)
+        zero_mean = torch.zeros_like(mvec)
+        covs = self.get_random_cov_mat(emb_dim=self.mock_emb_degree_of_freedom, 
+                                       max_spks=self.max_spks, 
+                                       mock_emb_degree_of_freedom=self.mock_emb_degree_of_freedom)
+            
+        # Create a correlated multivariate normal noise 
+        multivariate_normal = torch.distributions.MultivariateNormal(zero_mean, covs)
+        zero_mean_mvgn_emb_randomness =  multivariate_normal.sample(sample_shape=(seq_len,))
+        mvgn_emb_seed = mvec.unsqueeze(0).repeat(seq_len, 1) +  self.mock_emb_noise_std * zero_mean_mvgn_emb_randomness
+        
+        # Mix the embeddings according to the speaker tracks
+        spk_wise_mvgn_emb_seed =  mvgn_emb_seed.reshape(seq_len, self.max_spks, self.mock_emb_degree_of_freedom)
+        spk_wise_mvgn_emb_seed = spk_wise_mvgn_emb_seed.repeat_interleave(rep_count, dim=-1)
+        mixture_emb_seed_clean = torch.bmm(targets.unsqueeze(1), spk_wise_mvgn_emb_seed).squeeze(1)
+        
+        # Add noise to the embedding seed
+        mixture_emb_seed_dirty = mixture_emb_seed_clean + torch.randn_like(mixture_emb_seed_clean) * (self.mock_emb_noise_std + self.min_noise_std)
+        feature_length =  torch.tensor(mixture_emb_seed_dirty.shape[0]).long()
+        return mixture_emb_seed_dirty, feature_length, targets
 
 
 

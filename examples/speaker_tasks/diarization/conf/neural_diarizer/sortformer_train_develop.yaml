@@ -25,12 +25,12 @@ model:
   
   use_mock_embs: True 
   perm_mock_embs: True
-  variance_in_mock_embs: 0.0
+  variance_in_mock_embs: 0.05
   alpha: 0.5 # mix ratio between final pred and skip pred connections
   # sort_layer_on: True
   sort_layer_on: pre # pre, post, False
   sort_bin_order: False
-  mock_emb_noise_std: 0.0
+  mock_emb_noise_std: 0.05
   num_workers: ${num_workers}
   heads: 12
   inner: 768

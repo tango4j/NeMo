@@ -27,6 +27,7 @@ from operator import attrgetter
 import numpy as np
 import time
 import torch
+from torch import nn
 import torch.nn.functional as F
 from hydra.utils import instantiate
 from omegaconf import DictConfig, open_dict
@@ -98,6 +99,11 @@ except ImportError:
 __all__ = ['EncDecDiarLabelModel']
 
 from nemo.core.classes import Loss, Typing, typecheck
+
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform(m.weight)
+        m.bias.data.fill_(0.01)
 
 def get_n_params(model):
     pp=0
@@ -331,6 +337,9 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.global_loss_ratio = self.cfg_e2e_diarizer_model.get('global_loss_ratio', 300)
         self.original_audio_offsets = {}
         self.eps = 1e-3
+        self.emb_dim = self.cfg_e2e_diarizer_model.diarizer_module.emb_dim
+        self.train_non_linear_transform_layer = self.non_linear_transform_layer(layer_n=1, input_size=self.emb_dim, hidden_size=2*self.emb_dim, output_size=self.emb_dim, seed=100)
+        self.valid_non_linear_transform_layer = self.non_linear_transform_layer(layer_n=4, input_size=self.emb_dim, hidden_size=2*self.emb_dim, output_size=self.emb_dim, seed=200)
         
         # MSDD v2 parameters
         self.encoder_infer_mode = False
@@ -396,6 +405,28 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             self.emb_scale_n = self.cfg_e2e_diarizer_model.scale_n
             self.msdd_scale_n = self.cfg_e2e_diarizer_model.scale_n
 
+    def non_linear_transform_layer(self, layer_n, input_size, hidden_size, output_size, seed):
+        torch.manual_seed(seed)
+        layers = []
+
+        # First layer
+        layers.append(nn.Linear(input_size, hidden_size))
+        layers.append(nn.Sigmoid())
+
+        # Additional hidden layers
+        for _ in range(1, layer_n):
+            layers.append(nn.Linear(hidden_size, hidden_size))
+            layers.append(nn.Sigmoid())
+
+        # Output layer
+        layers.append(nn.Linear(hidden_size, output_size))
+
+        # Create the sequential model
+        model = nn.Sequential(*layers)
+        model.apply(init_weights)
+        model.eval()
+        return model
+    
     def setup_optimizer_param_groups(self):
         """
         Override function in ModelPT to allow for different parameter groups for the speaker model and the MSDD model.
@@ -562,7 +593,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
 
     def setup_validation_data(self, val_data_layer_config: Optional[Union[DictConfig, Dict]]):
         self._validation_dl = self.__setup_dataloader_from_config(config=val_data_layer_config,)
-
+    
     def setup_test_data(self, test_data_config: Optional[Union[DictConfig, Dict]], global_input_segmentation=True):
         self._test_dl = self.__setup_dataloader_from_config(config=test_data_config,)
 
@@ -801,7 +832,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             attn_score_stack = None
             
         _preds = self.sortformer_diarizer.forward_speaker_sigmoids(emb_seq)
-        if self.sortformer_encoder.sort_bin_order: 
+        if self.sortformer_encoder.sort_bin_order and self._cfg.sortformer_encoder.num_layers > 0:
             preds = self.alpha * _preds + (1 - self.alpha) * preds_mean
             preds = self.sort_probs_and_labels(preds, discrete=False)
         else:
@@ -867,14 +898,16 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if self.cfg_e2e_diarizer_model.use_mock_embs is True, then audio_signal is used as emb_seed.
             audio_signal dimension is [batch, emb_seed_dim*max_num_of_spks]
         if self.cfg_e2e_diarizer_model.use_mock_embs is False, then audio_signal is actual time series audio signal.
-        
-        
-        
         """        
         if self.cfg_e2e_diarizer_model.use_mock_embs:
             emb_seed_dirty = audio_signal
             # torch.random.manual_seed(temp_targets.sum().int().item()) 
             emb_seq = self.sortformer_diarizer.target_to_embs(emb_seed_dirty)
+            if self.validation_mode:
+                # emb_seq = self.valid_non_linear_transform_layer(emb_seq)
+                emb_seq = self.train_non_linear_transform_layer(emb_seq)
+            else:
+                emb_seq = self.train_non_linear_transform_layer(emb_seq)
         else:
             ms_emb_seq = self.forward_encoder(
                 audio_signal=audio_signal, 
@@ -953,6 +986,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1) 
         
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts.detach()])
+        self.validation_mode = False
         preds, attn_score_stack = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
@@ -997,6 +1031,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         ms_seg_timestamps = self.ms_seg_timestamps.unsqueeze(0).repeat(batch_size, 1, 1, 1)
         scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
+        self.validation_mode = True
         preds, attn_score_stack = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
