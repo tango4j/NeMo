@@ -158,6 +158,7 @@ model:
     pre_ln_final_layer_norm: True
     unit_dim: 5
     sort_layer_on: ${model.sort_layer_on}
+    sort_layer_type: False
     # sort_layer_on: False
     seq_var_sort: False
     sort_bin_order: ${model.sort_bin_order}
@@ -226,7 +227,7 @@ model:
 
       sched:
         name: CosineAnnealing
-        min_lr: 0.0000001
+        min_lr: 0.000001
 
   optim:
     name: adam
@@ -237,9 +238,9 @@ model:
     weight_decay: 0.0
     sched:
       name: InverseSquareRootAnnealing
-      warmup_steps: 1000
+      warmup_steps: 2000
       warmup_ratio: null
-      min_lr: 0.0001
+      min_lr: 0.00001
 
     # sched:
       # name: InverseSquareRootAnnealing

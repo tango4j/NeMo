@@ -163,6 +163,7 @@ class SortformerEncoderBlock(nn.Module):
         super().__init__()
         self.pre_ln = pre_ln
         self.sort_bin_order = sort_bin_order
+        self.sort_layer_type = sort_layer_type
         self.sort_layer_on = sort_layer_on
         self.seq_var_sort = seq_var_sort
         self.num_classes = num_classes
@@ -378,9 +379,9 @@ class SortformerEncoderBlock(nn.Module):
             if self.detach_preds: 
                 preds = preds.detach()
             if self.sort_layer_type == 'parallel':
-                output_states = self.third_sub_layer(preds) + self.p2_norm(self.second_sub_layer(self_attn_output))
+                output_states = self.p2_norm(self.third_sub_layer(preds)) + self.p2_norm(self.second_sub_layer(self_attn_output))
             elif self.sort_layer_type == 'replace':
-                output_states = self.third_sub_layer(preds)
+                output_states = self.p2_norm(self.third_sub_layer(preds))
             else:
                 raise NotImplementedError
         else:
@@ -394,9 +395,9 @@ class SortformerEncoderBlock(nn.Module):
         #     return self.forward_preln(encoder_query, encoder_mask, encoder_keys)
         # else:
         #     return self.forward_postln(encoder_query, encoder_mask, encoder_keys)
-        if self.sort_layer_type == 'parallel':
-            return self.forward_postln(encoder_query, encoder_mask, encoder_keys)
-        elif self.sort_layer_type == 'replace':
+        if self.sort_layer_type in ['parallel', 'serial','replace']:
+            return self.forward_sort(encoder_query, encoder_mask, encoder_keys)
+        else:
             return self.forward_and_sort_replace(encoder_query, encoder_mask, encoder_keys)
 
 
