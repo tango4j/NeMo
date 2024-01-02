@@ -82,10 +82,10 @@ def main():
     targets = torch.eye(4,4).repeat_interleave(unit_len,1).t()
     targets[:,2:] = 0
     # targets[:,3:] = 0
-    # targets = targets[:2*unit_len, :]
+    targets = targets[:2*unit_len, :]
     new_column = torch.full((targets.size(0), 1), 0.5)
     updated_targets = torch.cat((new_column, targets), dim=1)
-    mock_embs, audio_signal_length, targets = generate_mock_embs(targets=targets, seed=355, 
+    mock_embs, audio_signal_length, targets = generate_mock_embs(targets=targets, seed=315, 
                                                                   mock_emb_noise_std=0.03,
                                                                   mock_emb_degree_of_freedom=4,
                                                                   min_noise_std=0.01,)
@@ -112,7 +112,7 @@ def main():
     
     audio_signal_np = audio_signal.squeeze(0).cpu().detach().numpy() 
     plot_enc_tsne(audio_signal_np, targets, memo=f'input', )
-    for layer_c in range(6):
+    for layer_c in range(len(enc_states_list)):
         print(f"Plotting TSNE for layer {layer_c} ...")
         x = enc_states_list[layer_c].squeeze(0).cpu().detach().numpy() 
         plot_enc_tsne(x, targets, memo=f'layer{layer_c}', )

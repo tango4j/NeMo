@@ -834,8 +834,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             attn_score_stack = None
         sfmr_enc_states_list.append(emb_seq) 
         _preds = self.sortformer_diarizer.forward_speaker_sigmoids(emb_seq)
+        margets = torch.eye(4,4).repeat_interleave(25,1).t()
+        goo = 0.9* margets[:, torch.tensor([3,1,2,0])].unsqueeze(0).repeat(12, 1, 1)
+        boo = self.sort_probs_and_labels(goo, discrete=False)
         _preds = self.sort_probs_and_labels(_preds, discrete=False)
-        import ipdb; ipdb.set_trace()
         if self.sortformer_encoder.sort_bin_order and self._cfg.sortformer_encoder.num_layers > 0:
             preds = self.alpha * _preds + (1 - self.alpha) * preds_mean
             preds = self.sort_probs_and_labels(preds, discrete=False)
@@ -904,10 +906,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if self.cfg_e2e_diarizer_model.use_mock_embs is False, then audio_signal is actual time series audio signal.
         """        
         if self.cfg_e2e_diarizer_model.use_mock_embs:
-            emb_seed_dirty = audio_signal
-            # torch.random.manual_seed(temp_targets.sum().int().item()) 
-            emb_seq = self.sortformer_diarizer.target_to_embs(emb_seed_dirty)
-            emb_seq = self.train_non_linear_transform_layer(emb_seq)
+            # audio_signal = self.sortformer_diarizer.target_to_embs(audio_signal)
+            emb_seq = self.train_non_linear_transform_layer(audio_signal)
         else:
             ms_emb_seq = self.forward_encoder(
                 audio_signal=audio_signal, 
@@ -946,18 +946,18 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             dropped_labels = labels.clone()
             dropped_labels[labels <= thres] = 0
             max_inds = torch.argmax(dropped_labels, dim=2)
-            ax1 = torch.arange(labels_discrete.size(0)).unsqueeze(1)
-            ax2 = torch.arange(labels_discrete.size(1)).unsqueeze(1)
-            labels_discrete[ax1, ax2, max_inds[ax1, ax2]] = 1
+            labels_discrete_flatten = dropped_labels.reshape(-1, labels.shape[-1])
+            ax1 = torch.arange(labels_discrete_flatten.shape[0])
+            labels_discrete_flatten[ax1, max_inds.reshape(-1)[ax1]] = 1
+            labels_discrete = labels_discrete_flatten.reshape(labels.shape)
             labels_discrete[labels <= thres] = 0
         else:
             labels_discrete = labels
-        
         label_fz = self.find_first_nonzero(labels_discrete, max_cap_val)
         label_fz[label_fz == -1] = max_cap_val 
         sorted_inds = torch.sort(label_fz)[1]
         sorted_labels = labels.transpose(0,1)[:, torch.arange(labels.shape[0]).unsqueeze(1), sorted_inds].transpose(0, 1)
-        return sorted_labels
+        return sorted_labels 
     
     def compute_aux_f1(self, preds, targets):
         preds_bin = (preds > 0.5).to(torch.int64).detach()

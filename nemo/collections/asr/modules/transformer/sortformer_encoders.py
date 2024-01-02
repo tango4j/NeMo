@@ -299,9 +299,10 @@ class SortformerEncoderBlock(nn.Module):
             dropped_labels = labels.clone()
             dropped_labels[labels <= thres] = 0
             max_inds = torch.argmax(dropped_labels, dim=2)
-            ax1 = torch.arange(labels_discrete.size(0)).unsqueeze(1)
-            ax2 = torch.arange(labels_discrete.size(1)).unsqueeze(1)
-            labels_discrete[ax1, ax2, max_inds[ax1, ax2]] = 1
+            labels_discrete_flatten = dropped_labels.reshape(-1, labels.shape[-1])
+            ax1 = torch.arange(labels_discrete_flatten.shape[0])
+            labels_discrete_flatten[ax1, max_inds.reshape(-1)[ax1]] = 1
+            labels_discrete = labels_discrete_flatten.reshape(labels.shape)
             labels_discrete[labels <= thres] = 0
         else:
             labels_discrete = labels
