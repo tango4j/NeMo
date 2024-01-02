@@ -42,7 +42,7 @@ from omegaconf import OmegaConf
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 
 # from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDTrainDataset
-from nemo.collections.asr.data.audio_to_msdd_mock_label import AudioToSpeechMSDDTrainDataset, get_ms_seg_timestamps
+from nemo.collections.asr.data.audio_to_msdd_mock_label import AudioToSpeechMSDDTrainDataset, get_ms_seg_timestamps, generate_mock_embs
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
@@ -351,7 +351,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             self.loss = instantiate(self.cfg_e2e_diarizer_model.loss)
             # self.global_loss = instantiate(self.cfg_e2e_diarizer_model.global_loss)
             self.affinity_loss = AffinityLoss()
-            self.alpha = self.cfg_e2e_diarizer_model.alpha
+            # self.alpha = self.cfg_e2e_diarizer_model.alpha
             self.power_p_aff = self.cfg_e2e_diarizer_model.get('power_p_aff', 3)
             self.thres_aff = self.cfg_e2e_diarizer_model.get('thres_aff', 0.25)
             self.mc_audio_normalize = self.cfg_e2e_diarizer_model.get('mc_audio_normalize', True)
@@ -360,8 +360,9 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             # self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', False)
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         else:
-            self.sortformer_diarizer._speaker_model = EncDecSpeakerLabelModel.from_config_dict(cfg.speaker_model_cfg)
+            # self.sortformer_diarizer._speaker_model = EncDecSpeakerLabelModel.from_config_dict(cfg.speaker_model_cfg)
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
+        self.alpha = self.cfg_e2e_diarizer_model.alpha
         self.affinity_weighting = self.cfg_e2e_diarizer_model.get('affinity_weighting', True)
         self.msdd_overlap_add = self.cfg_e2e_diarizer_model.get("msdd_overlap_add", True)
         self.use_1ch_from_ch_clus = self.cfg_e2e_diarizer_model.get("use_1ch_from_ch_clus", True)
@@ -816,28 +817,31 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         """
         encoder_mask = self.length_to_mask(emb_seq)
         if self._cfg.sortformer_encoder.num_layers > 0 and self._cfg.sortformer_encoder.sort_layer_on == 'pre':
-            emb_seq, attn_score_list, preds_mean = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
+            emb_seq, attn_score_list, sfmr_enc_states_list, preds_mean = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
             attn_score_stack = torch.hstack(attn_score_list)
         else:
             attn_score_list = []
+            sfmr_enc_states_list = []
             attn_score_stack = None
             
         emb_seq = self.transformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
         
         if self._cfg.sortformer_encoder.num_layers > 0 and self._cfg.sortformer_encoder.sort_layer_on == 'post':
-            emb_seq, attn_score_list, preds_mean = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
+            emb_seq, attn_score_list, sfmr_enc_states_list, preds_mean = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
             attn_score_stack = torch.hstack(attn_score_list)
         else:
             attn_score_list = []
             attn_score_stack = None
-            
+        sfmr_enc_states_list.append(emb_seq) 
         _preds = self.sortformer_diarizer.forward_speaker_sigmoids(emb_seq)
+        _preds = self.sort_probs_and_labels(_preds, discrete=False)
+        import ipdb; ipdb.set_trace()
         if self.sortformer_encoder.sort_bin_order and self._cfg.sortformer_encoder.num_layers > 0:
             preds = self.alpha * _preds + (1 - self.alpha) * preds_mean
             preds = self.sort_probs_and_labels(preds, discrete=False)
         else:
             preds = _preds
-        return preds, attn_score_stack
+        return preds, _preds, attn_score_stack, sfmr_enc_states_list
     
     def forward_encoder(
         self, 
@@ -903,11 +907,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             emb_seed_dirty = audio_signal
             # torch.random.manual_seed(temp_targets.sum().int().item()) 
             emb_seq = self.sortformer_diarizer.target_to_embs(emb_seed_dirty)
-            if self.validation_mode:
-                # emb_seq = self.valid_non_linear_transform_layer(emb_seq)
-                emb_seq = self.train_non_linear_transform_layer(emb_seq)
-            else:
-                emb_seq = self.train_non_linear_transform_layer(emb_seq)
+            emb_seq = self.train_non_linear_transform_layer(emb_seq)
         else:
             ms_emb_seq = self.forward_encoder(
                 audio_signal=audio_signal, 
@@ -921,8 +921,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             batch_cos_sim = get_batch_cosine_sim(ms_emb_seq)
             emb_seq = ms_emb_seq.mean(dim=2)
         # Step 3: SortFormer Diarization Inference
-        preds, attn_score_stack = self.forward_infer(emb_seq)
-        return preds, attn_score_stack
+        preds, _preds, attn_score_stack, enc_states_list= self.forward_infer(emb_seq)
+        return preds, _preds, attn_score_stack, enc_states_list
     
     def find_first_nonzero(self, mat, max_cap_val=-1):
         # non zero values mask
@@ -936,18 +936,20 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         return mask_max_indices
 
         
-    def sort_probs_and_labels(self, labels, discrete=True):
+    def sort_probs_and_labels(self, labels, discrete=True, thres=0.5):
         """
         Sorts probs and labels in descending order of signal_lengths.
         """
         max_cap_val = labels.shape[1] + 1 
         if not discrete:
             labels_discrete = torch.zeros_like(labels).to(labels.device)
-            # mean = torch.mean(labels, dim=(1,2)).detach()
-            # median_repeat = mean.unsqueeze(1).unsqueeze(1).repeat(1, labels.shape[1], labels.shape[2])
-            thres = 0.5
-            labels_discrete[labels > thres] = 1
-            # labels = labels_discrete
+            dropped_labels = labels.clone()
+            dropped_labels[labels <= thres] = 0
+            max_inds = torch.argmax(dropped_labels, dim=2)
+            ax1 = torch.arange(labels_discrete.size(0)).unsqueeze(1)
+            ax2 = torch.arange(labels_discrete.size(1)).unsqueeze(1)
+            labels_discrete[ax1, ax2, max_inds[ax1, ax2]] = 1
+            labels_discrete[labels <= thres] = 0
         else:
             labels_discrete = labels
         
@@ -955,7 +957,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         label_fz[label_fz == -1] = max_cap_val 
         sorted_inds = torch.sort(label_fz)[1]
         sorted_labels = labels.transpose(0,1)[:, torch.arange(labels.shape[0]).unsqueeze(1), sorted_inds].transpose(0, 1)
-        # verify_sorted_labels = self.find_first_nonzero(sorted_labels, max_cap_val)
         return sorted_labels
     
     def compute_aux_f1(self, preds, targets):
@@ -987,7 +988,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts.detach()])
         self.validation_mode = False
-        preds, attn_score_stack = self.forward(
+        preds, _preds, attn_score_stack, enc_states_list = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -1032,7 +1033,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
         self.validation_mode = True
-        preds, attn_score_stack = self.forward(
+        _, preds, attn_score_stack, enc_states_list = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,

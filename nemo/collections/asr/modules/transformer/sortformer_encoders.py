@@ -265,6 +265,30 @@ class SortformerEncoderBlock(nn.Module):
 
         return output_states 
     
+    # def __sort_probs_and_labels(self, labels, discrete=True, thres=0.5):
+    #     """
+    #     Sorts probs and labels in descending order of signal_lengths.
+    #     """
+    #     max_cap_val = labels.shape[1] + 1 
+    #     if not discrete:
+    #         labels_discrete = torch.zeros_like(labels).to(labels.device)
+    #         # mean = torch.mean(labels, dim=(1,2)).detach()
+    #         # median_repeat = mean.unsqueeze(1).unsqueeze(1).repeat(1, labels.shape[1], labels.shape[2])
+    #         # thres = 0.5
+    #         # thres = torch.mean(labels, dim=(1,2)).detach()
+    #         thres = torch.mean(labels).detach()
+    #         labels_discrete[labels > thres] = 1
+    #         # labels = labels_discrete
+    #     else:
+    #         labels_discrete = labels
+        
+    #     label_fz = self.find_first_nonzero(labels_discrete, max_cap_val)
+    #     label_fz[label_fz == -1] = max_cap_val 
+    #     sorted_inds = torch.sort(label_fz)[1]
+    #     sorted_labels = labels.transpose(0,1)[:, torch.arange(labels.shape[0]).unsqueeze(1), sorted_inds].transpose(0, 1)
+    #     # verify_sorted_labels = self.find_first_nonzero(sorted_labels, max_cap_val)
+    #     return sorted_labels
+    
     def sort_probs_and_labels(self, labels, discrete=True, thres=0.5):
         """
         Sorts probs and labels in descending order of signal_lengths.
@@ -272,13 +296,13 @@ class SortformerEncoderBlock(nn.Module):
         max_cap_val = labels.shape[1] + 1 
         if not discrete:
             labels_discrete = torch.zeros_like(labels).to(labels.device)
-            # mean = torch.mean(labels, dim=(1,2)).detach()
-            # median_repeat = mean.unsqueeze(1).unsqueeze(1).repeat(1, labels.shape[1], labels.shape[2])
-            # thres = 0.5
-            # thres = torch.mean(labels, dim=(1,2)).detach()
-            thres = torch.mean(labels).detach()
-            labels_discrete[labels > thres] = 1
-            # labels = labels_discrete
+            dropped_labels = labels.clone()
+            dropped_labels[labels <= thres] = 0
+            max_inds = torch.argmax(dropped_labels, dim=2)
+            ax1 = torch.arange(labels_discrete.size(0)).unsqueeze(1)
+            ax2 = torch.arange(labels_discrete.size(1)).unsqueeze(1)
+            labels_discrete[ax1, ax2, max_inds[ax1, ax2]] = 1
+            labels_discrete[labels <= thres] = 0
         else:
             labels_discrete = labels
         
@@ -286,9 +310,7 @@ class SortformerEncoderBlock(nn.Module):
         label_fz[label_fz == -1] = max_cap_val 
         sorted_inds = torch.sort(label_fz)[1]
         sorted_labels = labels.transpose(0,1)[:, torch.arange(labels.shape[0]).unsqueeze(1), sorted_inds].transpose(0, 1)
-        # verify_sorted_labels = self.find_first_nonzero(sorted_labels, max_cap_val)
-        return sorted_labels
-    
+        return sorted_labels 
     
     def forward_postln(self, encoder_query, encoder_mask, encoder_keys):
         """
@@ -477,6 +499,7 @@ class SortformerEncoder(nn.Module):
         memory_states = self._get_memory_states(encoder_states, encoder_mems_list, 0)
         cached_mems_list = [memory_states]
         attn_score_mat_list = []
+        encoder_states_list = []
         preds_list = []
         
         for i, layer in enumerate(self.layers):
@@ -485,6 +508,7 @@ class SortformerEncoder(nn.Module):
             preds_list.append(preds)
             memory_states = self._get_memory_states(encoder_states, encoder_mems_list, i + 1)
             cached_mems_list.append(memory_states)
+            encoder_states_list.append(encoder_states)
             
         preds_layers = torch.stack(preds_list, dim=0)
         preds_mean = torch.mean(preds_layers, dim=0)
@@ -495,6 +519,6 @@ class SortformerEncoder(nn.Module):
             cached_mems_list.append(memory_states)
 
         if return_mems:
-            return cached_mems_list, attn_score_mat_list, preds_mean
+            return cached_mems_list, attn_score_mat_list, encoder_states_list, preds_mean
         else:
-            return cached_mems_list[-1], attn_score_mat_list, preds_mean
+            return cached_mems_list[-1], attn_score_mat_list, encoder_states_list, preds_mean

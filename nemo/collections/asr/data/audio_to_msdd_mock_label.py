@@ -41,6 +41,58 @@ def init_weights(m):
         torch.nn.init.xavier_uniform(m.weight)
         m.bias.data.fill_(0.01)
 
+
+def get_random_cov_mat(emb_dim: int = 192, max_spks: int = 4, mock_emb_degree_of_freedom: int = 16):
+    source_vecs = torch.rand(max_spks, emb_dim, mock_emb_degree_of_freedom)
+    covs = torch.bmm(source_vecs, source_vecs.transpose(1,2)) 
+    covs = covs / torch.max(covs)
+    covs.add_(torch.eye(emb_dim).unsqueeze(0)*0.001)
+    covs = torch.block_diag(*covs)
+    return covs
+        
+
+def generate_mock_embs(targets, 
+    seed=None, 
+    max_spks: int=4,
+    emb_dim: int=192,
+    mock_emb_noise_std: float=0.05,
+    mock_emb_degree_of_freedom: int=4,
+    min_noise_std=0.01,
+):
+    
+    if seed is not None:
+        torch.manual_seed(seed)
+    else:
+        torch.manual_seed(targets.sum().long() + index)
+    base_dim = max_spks * mock_emb_degree_of_freedom
+    if base_dim > emb_dim:
+        raise ValueError(f"max_spks * mock_emb_degree_of_freedom {base_dim} cannot be larger than emb_dim {emb_dim}")
+    seq_len, n_spks = targets.shape
+    rep_count = int(emb_dim//mock_emb_degree_of_freedom)
+    
+    # Generate `max_spks` worth of random embeddings
+    mvec = torch.randn(max_spks * mock_emb_degree_of_freedom)
+    zero_mean = torch.zeros_like(mvec)
+    covs = get_random_cov_mat(emb_dim=mock_emb_degree_of_freedom, 
+                                    max_spks=max_spks, 
+                                    mock_emb_degree_of_freedom=mock_emb_degree_of_freedom)
+        
+    # Create a correlated multivariate normal noise 
+    multivariate_normal = torch.distributions.MultivariateNormal(zero_mean, covs)
+    zero_mean_mvgn_emb_randomness =  multivariate_normal.sample(sample_shape=(seq_len,))
+    mvgn_emb_seed = mvec.unsqueeze(0).repeat(seq_len, 1) +  mock_emb_noise_std * zero_mean_mvgn_emb_randomness
+    
+    # Mix the embeddings according to the speaker tracks
+    spk_wise_mvgn_emb_seed =  mvgn_emb_seed.reshape(seq_len, max_spks, mock_emb_degree_of_freedom)
+    spk_wise_mvgn_emb_seed = spk_wise_mvgn_emb_seed.repeat_interleave(rep_count, dim=-1)
+    mixture_emb_seed_clean = torch.bmm(targets.unsqueeze(1), spk_wise_mvgn_emb_seed).squeeze(1)
+    
+    # Add noise to the embedding seed
+    mixture_emb_seed_dirty = mixture_emb_seed_clean + torch.randn_like(mixture_emb_seed_clean) * (mock_emb_noise_std + min_noise_std)
+    feature_length =  torch.tensor(mixture_emb_seed_dirty.shape[0]).long()
+    return mixture_emb_seed_dirty, feature_length, targets
+
+
 def get_subsegments_to_scale_timestamps(subsegments: List[Tuple[float, float]], feat_per_sec, decimals=2):
     """
     Convert subsegment timestamps to scale timestamps.
