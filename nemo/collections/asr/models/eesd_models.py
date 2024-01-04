@@ -379,6 +379,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
+        self._accuracy_valid_toplyr = MultiBinaryAccuracy()
+        self._accuracy_valid_prdmean = MultiBinaryAccuracy()
         self._accuracy_train_vad= MultiBinaryAccuracy()
         self._accuracy_valid_vad= MultiBinaryAccuracy()
         self._accuracy_train_ovl= MultiBinaryAccuracy()
@@ -843,7 +845,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             preds = self.sort_probs_and_labels(preds, discrete=False)
         else:
             preds = _preds
-        return preds, _preds, attn_score_stack, sfmr_enc_states_list
+        return preds, _preds, preds_mean, attn_score_stack, sfmr_enc_states_list
     
     def forward_encoder(
         self, 
@@ -921,8 +923,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             batch_cos_sim = get_batch_cosine_sim(ms_emb_seq)
             emb_seq = ms_emb_seq.mean(dim=2)
         # Step 3: SortFormer Diarization Inference
-        preds, _preds, attn_score_stack, enc_states_list= self.forward_infer(emb_seq)
-        return preds, _preds, attn_score_stack, enc_states_list
+        preds, _preds, preds_mean, attn_score_stack, enc_states_list= self.forward_infer(emb_seq)
+        return preds, _preds, preds_mean, attn_score_stack, enc_states_list
     
     def find_first_nonzero(self, mat, max_cap_val=-1):
         # non zero values mask
@@ -988,7 +990,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts.detach()])
         self.validation_mode = False
-        preds, _preds, attn_score_stack, enc_states_list = self.forward(
+        preds, _preds, preds_mean, attn_score_stack, enc_states_list = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -1012,7 +1014,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         f1_acc = self._accuracy_train.compute()
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
-        self.log('train_f1_all_acc', f1_acc, sync_dist=True)
+        self.log('train_f1_acc', f1_acc, sync_dist=True)
         self.log('train_f1_vad_acc', train_f1_vad, sync_dist=True)
         self.log('train_f1_ovl_acc', train_f1_ovl, sync_dist=True)
         self._accuracy_train.reset()
@@ -1033,7 +1035,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
         self.validation_mode = True
-        _, preds, attn_score_stack, enc_states_list = self.forward(
+        preds, _preds, preds_mean, attn_score_stack, enc_states_list = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
@@ -1054,9 +1056,15 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         loss = spk_loss
         self._accuracy_valid(preds, targets, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
+        self._accuracy_valid_toplyr(_preds, targets, sequence_lengths)
+        f1_acc = self._accuracy_valid.compute()
+        self._accuracy_valid_prdmean(preds_mean, targets, sequence_lengths)
+        f1_acc = self._accuracy_valid.compute()
 
         self.log('val_loss', loss, sync_dist=True)
         self.log('val_f1_acc', f1_acc, sync_dist=True)
+        self.log('val_f1_toplyr_acc', f1_acc_toplyr, sync_dist=True)
+        self.log('val_f1_prdmean_acc', f1_acc_prdmean, sync_dist=True)
         self.log('val_f1_vad_acc', valid_f1_vad, sync_dist=True)
         self.log('val_f1_ovl_acc', valid_f1_ovl, sync_dist=True)
         return {
