@@ -56,7 +56,7 @@ model:
 
   augmentor:
     noise:
-      manifest_path: ???
+      manifest_path: null
       prob: 0.5
       min_snr_db: 0
       max_snr_db: 40
@@ -158,7 +158,7 @@ model:
     pre_ln_final_layer_norm: True
     unit_dim: 5
     sort_layer_on: ${model.sort_layer_on}
-    sort_layer_type: False
+    sort_layer_type: "parallel"
     # sort_layer_on: False
     seq_var_sort: False
     sort_bin_order: ${model.sort_bin_order}
