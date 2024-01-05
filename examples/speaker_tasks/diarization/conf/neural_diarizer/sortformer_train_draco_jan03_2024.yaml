@@ -49,17 +49,17 @@ model:
   layer_arrival_time_sort: True
 
 
-  multichannel:
-    parameters:
-      mix_count: 2
-      power_p: 4
+  # multichannel:
+  #   parameters:
+  #     mix_count: 2
+  #     power_p: 4
 
-  augmentor:
-    noise:
-      manifest_path: null
-      prob: 0.5
-      min_snr_db: 0
-      max_snr_db: 40
+  # augmentor:
+  #   noise:
+  #     manifest_path: null
+  #     prob: 0.5
+  #     min_snr_db: 0
+  #     max_snr_db: 40
 
   train_ds:
     manifest_filepath: ???
@@ -237,12 +237,13 @@ model:
       - 0.98
     weight_decay: 0.0
     sched:
-      name: InverseSquareRootAnnealing
+      name: CosineAnnealing
       warmup_steps: 2000
       warmup_ratio: null
       min_lr: 0.00001
 
     # sched:
+      # name: InverseSquareRootAnnealing
       # name: InverseSquareRootAnnealing
       # name: CosineAnnealing
       # min_lr: 0.0005
