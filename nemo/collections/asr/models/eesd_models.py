@@ -1057,9 +1057,9 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_valid(preds, targets, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
         self._accuracy_valid_toplyr(_preds, targets, sequence_lengths)
-        f1_acc_toplyr = self._accuracy_valid.compute()
+        f1_acc_toplyr = self._accuracy_valid_toplyr.compute()
         self._accuracy_valid_prdmean(preds_mean, targets, sequence_lengths)
-        f1_acc_prdmean = self._accuracy_valid.compute()
+        f1_acc_prdmean = self._accuracy_valid_prdmean.compute()
 
         self.log('val_loss', loss, sync_dist=True)
         self.log('val_f1_acc', f1_acc, sync_dist=True)
