@@ -226,8 +226,8 @@ model:
       weight_decay: 0.005
 
       sched:
-        name: CosineAnnealing
-        min_lr: 0.000001
+        name: InverseSquareRootAnnealing
+        min_lr: 0.00005
 
   optim:
     name: adam
@@ -240,10 +240,9 @@ model:
       name: InverseSquareRootAnnealing
       warmup_steps: 10000
       warmup_ratio: null
-      min_lr: 0.00001
+      min_lr: 0.00005
 
     # sched:
-      # name: InverseSquareRootAnnealing
       # name: InverseSquareRootAnnealing
       # name: CosineAnnealing
       # min_lr: 0.0005
