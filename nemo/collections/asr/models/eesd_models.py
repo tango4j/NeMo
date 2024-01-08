@@ -815,35 +815,26 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 Dimension: (batch_size, msdd_scale_n, emb_dim)
 
         """
+        attn_score_list, preds_list, attn_score_stack, encoder_states_list = [], [], None, []
         encoder_mask = self.length_to_mask(emb_seq)
         if self._cfg.sortformer_encoder.num_layers > 0 and self._cfg.sortformer_encoder.sort_layer_on == 'pre':
-            emb_seq, attn_score_list, sfmr_enc_states_list, preds_mean = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
+            emb_seq, attn_score_list, preds_list, preds_mean, encoder_states_list = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
             attn_score_stack = torch.hstack(attn_score_list)
-        else:
-            attn_score_list = []
-            sfmr_enc_states_list = []
-            attn_score_stack = None
             
         emb_seq = self.transformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
         
         if self._cfg.sortformer_encoder.num_layers > 0 and self._cfg.sortformer_encoder.sort_layer_on == 'post':
-            emb_seq, attn_score_list, sfmr_enc_states_list, preds_mean = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
+            emb_seq, attn_score_list, preds_list, preds_mean, encoder_states_list = self.sortformer_encoder(encoder_states=emb_seq, encoder_mask=encoder_mask)
             attn_score_stack = torch.hstack(attn_score_list)
-        else:
-            attn_score_list = []
-            attn_score_stack = None
-        sfmr_enc_states_list.append(emb_seq) 
         _preds = self.sortformer_diarizer.forward_speaker_sigmoids(emb_seq)
-        margets = torch.eye(4,4).repeat_interleave(25,1).t()
-        goo = 0.9* margets[:, torch.tensor([3,1,2,0])].unsqueeze(0).repeat(12, 1, 1)
-        boo = self.sort_probs_and_labels(goo, discrete=False)
         _preds = self.sort_probs_and_labels(_preds, discrete=False)
+        
         if self.sortformer_encoder.sort_bin_order and self._cfg.sortformer_encoder.num_layers > 0:
             preds = self.alpha * _preds + (1 - self.alpha) * preds_mean
             preds = self.sort_probs_and_labels(preds, discrete=False)
         else:
             preds = _preds
-        return preds, _preds, attn_score_stack, sfmr_enc_states_list
+        return preds, _preds, attn_score_stack, preds_list, encoder_states_list
     
     def forward_encoder(
         self, 
@@ -896,7 +887,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         ms_seg_timestamps, 
         ms_seg_counts, 
         scale_mapping, 
-        temp_targets=None, # To be used for sanity check
     ):
         """
         Forward pass for training.
@@ -921,8 +911,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             batch_cos_sim = get_batch_cosine_sim(ms_emb_seq)
             emb_seq = ms_emb_seq.mean(dim=2)
         # Step 3: SortFormer Diarization Inference
-        preds, _preds, attn_score_stack, enc_states_list= self.forward_infer(emb_seq)
-        return preds, _preds, attn_score_stack, enc_states_list
+        preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward_infer(emb_seq)
+        return preds, _preds, attn_score_stack, preds_list, encoder_states_list
     
     def find_first_nonzero(self, mat, max_cap_val=-1):
         # non zero values mask
@@ -988,19 +978,28 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts.detach()])
         self.validation_mode = False
-        preds, _preds, attn_score_stack, enc_states_list = self.forward(
+        preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
             ms_seg_counts=ms_seg_counts,
             scale_mapping=scale_mapping,
-            temp_targets=targets,
         )
         if self.loss.sorted_loss:
             targets = self.sort_probs_and_labels(targets, discrete=True)
         # if self.loss.sorted_preds:
         #     preds = self.sort_probs_and_labels(preds, discrete=False)
-        spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths) 
+        
+        mid_layer_count = len(preds_list)
+        
+        if mid_layer_count > 0:
+            preds_list.append(_preds)
+            preds_all = torch.cat(preds_list)
+            targets_rep = targets.repeat(mid_layer_count+1,1,1)
+            sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
+            spk_loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
+        else:
+            spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths) 
         preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
         self._accuracy_train_vad(preds_vad, targets_vad, sequence_lengths)
         self._accuracy_train_ovl(preds_ovl, targets_ovl, sequence_lengths)
@@ -1033,13 +1032,12 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
         self.validation_mode = True
-        _, preds, attn_score_stack, enc_states_list = self.forward(
+        preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward(
             audio_signal=audio_signal,
             audio_signal_length=audio_signal_length,
             ms_seg_timestamps=ms_seg_timestamps,
             ms_seg_counts=ms_seg_counts,
             scale_mapping=scale_mapping,
-            temp_targets=targets,
         )
         if self.loss.sorted_loss:
             targets = self.sort_probs_and_labels(targets)

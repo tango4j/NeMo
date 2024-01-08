@@ -93,7 +93,6 @@ def main():
     audio_signal = mock_embs
     
     audio_signal, audio_signal_length, targets  
-    batch_size = 1
 
     audio_signal = audio_signal.cuda()
     ms_seg_counts = torch.tensor([]).cuda()
@@ -101,7 +100,7 @@ def main():
     scale_mapping = torch.tensor([]).cuda()
     sortformer_model.alpha = 0.0
     
-    _preds_mean, preds_, attn_score_stack, enc_states_list = sortformer_model.forward(
+    _preds_mean, preds_, attn_score_stack, enc_states_list, preds_list = sortformer_model.forward(
         audio_signal=audio_signal,
         audio_signal_length=audio_signal_length,
         ms_seg_timestamps=ms_seg_timestamps,

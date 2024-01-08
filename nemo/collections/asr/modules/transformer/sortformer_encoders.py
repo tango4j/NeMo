@@ -414,10 +414,6 @@ class SortformerEncoderBlock(nn.Module):
         return output_states, attn_score_mat, preds
  
     def forward(self, encoder_query, encoder_mask, encoder_keys):
-        # if self.pre_ln:
-        #     return self.forward_preln(encoder_query, encoder_mask, encoder_keys)
-        # else:
-        #     return self.forward_postln(encoder_query, encoder_mask, encoder_keys)
         if self.sort_layer_type in ['parallel', 'serial','replace']:
             return self.forward_sort(encoder_query, encoder_mask, encoder_keys)
         else:
@@ -499,9 +495,7 @@ class SortformerEncoder(nn.Module):
 
         memory_states = self._get_memory_states(encoder_states, encoder_mems_list, 0)
         cached_mems_list = [memory_states]
-        attn_score_mat_list = []
-        encoder_states_list = []
-        preds_list = []
+        attn_score_mat_list, encoder_states_list, preds_list = [], [], []
         
         for i, layer in enumerate(self.layers):
             encoder_states, attn_score_mat, preds = layer(encoder_states, encoder_attn_mask, memory_states)
@@ -520,6 +514,6 @@ class SortformerEncoder(nn.Module):
             cached_mems_list.append(memory_states)
 
         if return_mems:
-            return cached_mems_list, attn_score_mat_list, encoder_states_list, preds_mean
+            return cached_mems_list, attn_score_mat_list, preds_list, preds_mean, encoder_states_list
         else:
-            return cached_mems_list[-1], attn_score_mat_list, encoder_states_list, preds_mean
+            return cached_mems_list[-1], attn_score_mat_list, preds_list, preds_mean, encoder_states_list
