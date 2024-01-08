@@ -379,6 +379,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_test = MultiBinaryAccuracy()
         self._accuracy_train = MultiBinaryAccuracy()
         self._accuracy_valid = MultiBinaryAccuracy()
+        self._accuracy_valid_toplyr = MultiBinaryAccuracy()
+        self._accuracy_valid_prdmean = MultiBinaryAccuracy()
         self._accuracy_train_vad= MultiBinaryAccuracy()
         self._accuracy_valid_vad= MultiBinaryAccuracy()
         self._accuracy_train_ovl= MultiBinaryAccuracy()
@@ -1011,7 +1013,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         f1_acc = self._accuracy_train.compute()
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
-        self.log('train_f1_all_acc', f1_acc, sync_dist=True)
+        self.log('train_f1_acc', f1_acc, sync_dist=True)
         self.log('train_f1_vad_acc', train_f1_vad, sync_dist=True)
         self.log('train_f1_ovl_acc', train_f1_ovl, sync_dist=True)
         self._accuracy_train.reset()
@@ -1052,9 +1054,15 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         loss = spk_loss
         self._accuracy_valid(preds, targets, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
+        self._accuracy_valid_toplyr(_preds, targets, sequence_lengths)
+        f1_acc_toplyr = self._accuracy_valid_toplyr.compute()
+        self._accuracy_valid_prdmean(preds_mean, targets, sequence_lengths)
+        f1_acc_prdmean = self._accuracy_valid_prdmean.compute()
 
         self.log('val_loss', loss, sync_dist=True)
         self.log('val_f1_acc', f1_acc, sync_dist=True)
+        self.log('val_f1_toplyr_acc', f1_acc_toplyr, sync_dist=True)
+        self.log('val_f1_prdmean_acc', f1_acc_prdmean, sync_dist=True)
         self.log('val_f1_vad_acc', valid_f1_vad, sync_dist=True)
         self.log('val_f1_ovl_acc', valid_f1_ovl, sync_dist=True)
         return {
