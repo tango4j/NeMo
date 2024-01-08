@@ -216,16 +216,9 @@ class SortformerEncoderBlock(nn.Module):
         sorted_output_states_list = []
         per_sample_vars = torch.var(output_states, dim=1)
         sort_indices = torch.sort(per_sample_vars, descending=True)[1]
+        ### TODO: This is a hacky way to sort all the states in the batch. Need to be changed to batch-wise sorting.
         for i in range(bs):
             sorted_output_states_list.append(output_states[i, :, sort_indices[i]].unsqueeze(0))
-        # offset_vals = torch.linspace(start=0, end=((bs-1)*emb_dim), steps=bs).int()
-        # offset_vals_tile = torch.tile(offset_vals, (emb_dim, 1)).t() # (bs, emb_dim)
-        # offset_added_sort_indices = sort_indices + offset_vals_tile.to(sort_indices.device).detach()
-        # flatten_sort_indices = offset_added_sort_indices.flatten(0,1) 
-        # flatten_output_states = output_states.transpose(0, 1).reshape((seq_len, bs*emb_dim))
-        # # sorted_output_states = flatten_output_states[:, flatten_sort_indices].reshape_as(output_states) 
-        # reshaped_before_transpose = flatten_output_states[:, flatten_sort_indices].reshape((seq_len, bs, emb_dim))
-        # _sorted_output_states = flatten_output_states[:, flatten_sort_indices]
         sorted_output_states = torch.concat(sorted_output_states_list)
         return sorted_output_states
     

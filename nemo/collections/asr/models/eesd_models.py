@@ -41,8 +41,8 @@ from omegaconf import OmegaConf
 
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 
-# from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDTrainDataset
-from nemo.collections.asr.data.audio_to_msdd_mock_label import AudioToSpeechMSDDTrainDataset, get_ms_seg_timestamps, generate_mock_embs
+from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDTrainDataset
+from nemo.collections.asr.data.audio_to_msdd_mock_label import AudioToSpeechMSDDTrainMockEmbDataset, get_ms_seg_timestamps, generate_mock_embs
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
@@ -345,7 +345,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.encoder_infer_mode = False
 
         if trainer is not None:
-            # if not self.cfg_e2e_diarizer_model.use_mock_embs:
             self._init_speaker_model()
             self.add_speaker_model_config(cfg)
             self.loss = instantiate(self.cfg_e2e_diarizer_model.loss)
@@ -557,7 +556,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             global_rank = 0
         time_flag = time.time()
         print(f"AAB: Starting Dataloader Instance loading... Step A")
-        dataset = AudioToSpeechMSDDTrainDataset(
+        
+        if self.cfg_e2e_diarizer_model.use_mock_embs:
+            AudioToSpeechDiarTrainDataset = AudioToSpeechMSDDTrainMockEmbDataset
+        else:
+            AudioToSpeechDiarTrainDataset = AudioToSpeechMSDDTrainDataset
+        
+        dataset = AudioToSpeechDiarTrainDataset(
             manifest_filepath=config.manifest_filepath,
             emb_dir=config.emb_dir,
             multiscale_args_dict=self.msdd_multiscale_args_dict,
@@ -883,12 +888,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                                            scale_mapping=scale_mapping, 
                                            ms_seg_counts=ms_seg_counts, 
                                            ms_seg_timestamps=ms_seg_timestamps)
-        
-        # ms_pools_seq = self.get_ms_emb_fixed(embs=pools,    
-        #                                     scale_mapping=scale_mapping, 
-        #                                     ms_seg_counts=ms_seg_counts, 
-        #                                     ms_seg_timestamps=ms_seg_timestamps)
-
         return ms_emb_seq
     
     def forward(
@@ -908,7 +907,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if self.cfg_e2e_diarizer_model.use_mock_embs is False, then audio_signal is actual time series audio signal.
         """        
         if self.cfg_e2e_diarizer_model.use_mock_embs:
-            # audio_signal = self.sortformer_diarizer.target_to_embs(audio_signal)
             emb_seq = self.train_non_linear_transform_layer(audio_signal)
         else:
             ms_emb_seq = self.forward_encoder(
@@ -1024,10 +1022,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         # audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
         audio_signal, audio_signal_length, targets = batch
        
-        if not self.cfg_e2e_diarizer_model.use_mock_embs:
-            audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
-        else: # In this case, audio_signal is emb_seed
+        if self.cfg_e2e_diarizer_model.use_mock_embs:
             audio_signal, audio_signal_length, targets = batch 
+        else: # In this case, audio_signal is emb_seed
+            audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
         
         batch_size = audio_signal.shape[0]
         ms_seg_counts = self.ms_seg_counts.unsqueeze(0).repeat(batch_size, 1)
