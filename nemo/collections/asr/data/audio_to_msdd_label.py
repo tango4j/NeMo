@@ -441,6 +441,8 @@ class _AudioMSDDTrainDataset(Dataset):
         self.global_speaker_label_table = get_speaker_labels_from_diar_rttms(self.collection)
         self.ch_clus_mat_dict = {}
         self.channel_cluster_dict = {}
+        self.ms_seg_timestamps, self.ms_seg_counts = self.get_ms_seg_timestamps(duration=self.session_len_sec, min_subsegment_duration=self.scale_dict[self.scale_n-1][0]) 
+        self.scale_mapping = torch.stack(get_argmin_mat(self.ms_seg_timestamps))
         # self.use_1ch_from_ch_clus = True
         self.use_1ch_from_ch_clus = False
     
@@ -580,10 +582,7 @@ class _AudioMSDDTrainDataset(Dataset):
 
     def get_ms_seg_timestamps(
         self, 
-        uniq_id: str, 
-        offset: float, 
         duration: float, 
-        feat_per_sec: int, 
         min_subsegment_duration: float=0.03
         ):
         """
@@ -599,8 +598,6 @@ class _AudioMSDDTrainDataset(Dataset):
                 Number of segments for each scale. This information is used for reshaping embedding batch
                 during forward propagation.
         """
-        if offset < 0:
-            raise ValueError(f"offset {offset} cannot be negative")
         if duration < 0:
             raise ValueError(f"duration {duration} cannot be negative")
         ms_seg_timestamps_list = []
@@ -645,10 +642,7 @@ class _AudioMSDDTrainDataset(Dataset):
         # duration = self.session_len_sec
 
         uniq_id = self.get_uniq_id_with_range(sample)
-        ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(uniq_id=uniq_id, 
-                                                                      offset=offset,
-                                                                      duration=self.session_len_sec,
-                                                                      feat_per_sec=self.feat_per_sec, 
+        ms_seg_timestamps, ms_seg_counts = self.get_ms_seg_timestamps(duration=self.session_len_sec,
                                                                       min_subsegment_duration=self.scale_dict[self.scale_n-1][0])
         
         scale_mapping = torch.stack(get_argmin_mat(ms_seg_timestamps))
@@ -902,10 +896,7 @@ class _AudioMSDDInferDataset(Dataset):
         offset_index = max(int((offset / self.scale_dict[ms_seg_counts.shape[0]-1][1]) - global_offset_index), 0) 
         
         seq_length = ms_seg_counts[-1]
-        try:
-            ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
-        except:
-            import ipdb; ipdb.set_trace()
+        ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
         if self.mc_late_fusion:
             clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
         else:
