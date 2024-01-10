@@ -122,7 +122,7 @@ model:
     # context_vector_type: 'cos_sim_cross_scale' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
     use_amsl_layer: True
 
-  msdd_classifier:
+  transformer_encoder:
     _target_: nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder
     # _target_: nemo.collections.asr.modules.transformer.transformer_decoders.TransformerDecoder
     num_layers: 4

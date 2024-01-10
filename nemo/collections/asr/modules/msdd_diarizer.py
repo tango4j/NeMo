@@ -463,7 +463,6 @@ class MSDD_module(NeuralModule, Exportable):
     @typecheck()
     def forward(self, ms_emb_seq, length, ms_avg_embs):
         if self.n_stream > 1:
-            ms_avg_embs_r = ms_avg_embs.reshape(ms_avg_embs.shape[0]*self.n_stream, ms_avg_embs.shape[1], ms_avg_embs.shape[2], self.unit_n_spks)
             split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
             ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, split_tup, dim=3), dim=0)
             ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
