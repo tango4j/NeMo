@@ -36,13 +36,7 @@ def simple_cut(
         for p in (supervision_manifest, feature_manifest, recording_manifest)
     ]
 
-    if (
-        all(
-            m is None or m.is_lazy
-            for m in (supervision_set, feature_set, recording_set)
-        )
-        and not force_eager
-    ):
+    if all(m is None or m.is_lazy for m in (supervision_set, feature_set, recording_set)) and not force_eager:
         # Create the CutSet lazily; requires sorting by recording_id
         CutSet.from_manifests(
             recordings=recording_set,
@@ -52,9 +46,7 @@ def simple_cut(
             lazy=True,
         )
     else:
-        cut_set = CutSet.from_manifests(
-            recordings=recording_set, supervisions=supervision_set, features=feature_set
-        )
+        cut_set = CutSet.from_manifests(recordings=recording_set, supervisions=supervision_set, features=feature_set)
         cut_set.to_file(output_cut_manifest)
 
 
@@ -120,4 +112,3 @@ def trim_to_supervisions(
             keep_all_channels=keep_all_channels,
         ):
             writer.write(cut)
-

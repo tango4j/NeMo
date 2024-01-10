@@ -4,16 +4,17 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-import tqdm
-from enhance_cuts import enhance_cuts as nemo_enhance_cuts
-from lhoste_cuts import simple_cut, trim_to_supervisions
-from lhoste_manifests import prepare_chime_manifests
-from mic_rank import get_gss_mic_ranks
 from omegaconf import OmegaConf
 
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
+
+
+from .enhance_cuts import enhance_cuts as nemo_enhance_cuts
+from .lhoste_cuts import simple_cut, trim_to_supervisions
+from .lhoste_manifests import prepare_chime_manifests
+from .mic_rank import get_gss_mic_ranks
 
 
 def convert_diar_results_to_falign(
@@ -221,7 +222,7 @@ def run_gss_process(cfg):
             )
 
             logging.info("Stage 3: Run GSS and prepare nemo manifests")
-            enhanced_dir = str(exp_dir.absolute() / "nemo_v1")
+            enhanced_dir = str(exp_dir.absolute())
             nemo_enhance_cuts(
                 cuts_per_recording=cuts_manifest,
                 cuts_per_segment=cuts_seg_manifest,
@@ -255,7 +256,7 @@ def run_gss_process(cfg):
     return outputs
 
 
-@hydra_runner(config_path="./", config_name="gss_config")
+@hydra_runner(config_path="../", config_name="chime_config")
 def main(cfg):
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
     outputs = run_gss_process(cfg)

@@ -1,20 +1,17 @@
 import argparse
-import glob
-import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
 
-import soundfile as sf
 import torch
-import tqdm
-from chime7_enhancers import FrontEnd_v1
-from lhotse import Recording, SupervisionSet, load_manifest_lazy
+from lhotse import load_manifest_lazy
+
 from lhotse.audio import set_audio_duration_mismatch_tolerance
 from lhotse.cut import CutSet
 from lhotse.utils import fastcopy
+
+from .chime7_enhancers import FrontEnd_v1
 
 logging.basicConfig(
     format="%(asctime)s,%(msecs)d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s",
@@ -200,9 +197,7 @@ if __name__ == '__main__':
         '--context-duration', type=float, default=15, help='Context duration in seconds. Default: 15',
     )
     parser.add_argument(
-        '--use-garbage-class',
-        action="store_true",
-        help='Set this flag to use garbage class',
+        '--use-garbage-class', action="store_true", help='Set this flag to use garbage class',
     )
     parser.add_argument(
         '--min-segment-length', type=float, default=0.0,
@@ -238,12 +233,16 @@ if __name__ == '__main__':
     )
     parser.add_argument('--dereverb-filter-length', type=int, default=10, help='Dereverb filter length')
     parser.add_argument('--mc-mask-min-db', type=float, default=-60, help='Minimum mask value in dB')
-    parser.add_argument('--mc-postmask-min-db', type=float, default=0, help='Minimum postmask value in dB')    
+    parser.add_argument('--mc-postmask-min-db', type=float, default=0, help='Minimum postmask value in dB')
     parser.add_argument('--dereverb-prediction-delay', type=int, default=2, help='Prediction delay for dereverb')
     parser.add_argument('--dereverb-num-iterations', type=int, default=3, help='Number of iterations for dereverb')
     parser.add_argument('--mc-filter-type', type=str, default='pmwf', help='Filter type')
-    parser.add_argument('--mc-filter-num-iterations', type=int, default=5, help='Number of iterations for iterative filters')
-    parser.add_argument('--mc-filter-postfilter', type=lambda s: None if s == 'None' else str(s), default='ban', help='Postfilter type')
+    parser.add_argument(
+        '--mc-filter-num-iterations', type=int, default=5, help='Number of iterations for iterative filters'
+    )
+    parser.add_argument(
+        '--mc-filter-postfilter', type=lambda s: None if s == 'None' else str(s), default='ban', help='Postfilter type'
+    )
     args = parser.parse_args()
 
     enhance_cuts(
