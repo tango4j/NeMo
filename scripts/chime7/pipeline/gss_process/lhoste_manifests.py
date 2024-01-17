@@ -477,7 +477,6 @@ def prepare_chime_manifests(
         ignore_shorter: Ignore segments that are shorter than this value in the supervision.
         output_root: Path where the new CHiME-7 Task 1 dataset will be saved. Note that for audio files symbolic links are used.
     """
-
     if diar_json:
         diarization_json_dir = diar_json
 
@@ -494,9 +493,13 @@ def prepare_chime_manifests(
         )
     else:
         diarization_json_dir = None
-    assert scenario in ["chime6", "dipco", "mixer6"], (
+        
+    try:
+        assert scenario in ["chime6", "dipco", "mixer6"], (
         "Datasets supported in this script " "are chime6, dipco and mixer6"
-    )
+        )
+    except:
+        import ipdb; ipdb.set_trace()
     assert subset in ["train", "dev", "eval",], "Option --subset should be 'train', 'dev' or 'eval'"
 
     if subset == "train" and scenario == "dipco":
@@ -514,7 +517,7 @@ def prepare_chime_manifests(
                 subset,
                 mic=mic,
                 ignore_shorter=ignore_shorter,
-                json_dir=diarization_json_dir,
+                json_dir=os.path.join(diarization_json_dir, scenario),
                 normalize_text=text_norm,
             )
         elif scenario == "dipco":
@@ -524,7 +527,7 @@ def prepare_chime_manifests(
                 subset,
                 mic=mic,
                 ignore_shorter=ignore_shorter,
-                json_dir=diarization_json_dir,
+                json_dir=os.path.join(diarization_json_dir, scenario),
                 normalize_text=text_norm,
             )
 
@@ -542,7 +545,7 @@ def prepare_chime_manifests(
                         subset,
                         mic=mic,
                         ignore_shorter=ignore_shorter,
-                        json_dir=diarization_json_dir,
+                        json_dir=os.path.join(diarization_json_dir, scenario),
                         normalize_text=text_norm,
                     )
 
@@ -567,7 +570,7 @@ def prepare_chime_manifests(
                     subset,
                     mic=mic,
                     ignore_shorter=ignore_shorter,
-                    json_dir=diarization_json_dir,
+                    json_dir=os.path.join(diarization_json_dir, scenario),
                     normalize_text=text_norm,
                 )
 

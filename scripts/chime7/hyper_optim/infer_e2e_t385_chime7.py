@@ -57,7 +57,7 @@ else:
     CHIME7_ROOT=f"/ws/chime7_official_cleaned_v2" # this contains sub-folders: chime6, dipco, mixer6
     
 NEMO_CHIME7_ROOT=f"{NEMO_ROOT}/scripts/chime7"
-
+SUBSETS="dev"
 def scale_weights(r, K):
     return [r - kvar * (r - 1) / (K - 1) for kvar in range(K)]
 
@@ -286,6 +286,7 @@ def infer_chime7_mcmsasr(
             asr_model_path=asr_model_path,
             lm_path=lm_path,
             diar_config=config.diarizer.msdd_model.parameters.system_name,
+            diar_param="T",
             scenarios=scenarios,
             subsets=subsets,
         )
@@ -335,7 +336,7 @@ if __name__ == "__main__":
     parser.add_argument("--keep_mixer6", help="Keep mixer6 in the evaluation", action="store_true")
     parser.add_argument("--tune_vad", help="whether to tune VAD", type=bool, default=True)
     parser.add_argument("--scenarios", help="Scenarios to run on", type=str)
-    parser.add_argument("--subsets", help="Subsets to run on", type=str, default=SUBSETS)
+    parser.add_argument("--subsets", help="Subsets to run on", type=str)
     parser.add_argument("--pattern", help="Pattern to match manifest files", type=str, default="*-dev.json")
     parser.add_argument("--gpu_id", help="GPU ID to run on", type=int, default=0)  
 

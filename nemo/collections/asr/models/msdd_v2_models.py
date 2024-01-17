@@ -44,8 +44,9 @@ from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDInfer
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
-from nemo.collections.asr.models import ClusteringDiarizer
 from nemo.collections.asr.models.asr_model import ExportableEncDecModel
+# from nemo.collections.asr.models import ClusteringDiarizer
+from nemo.collections.asr.models import ClusteringMultiChDiarizer
 from nemo.collections.asr.models.clustering_diarizer import (
     _MODEL_CONFIG_YAML,
     _SPEAKER_MODEL,
@@ -81,7 +82,7 @@ write_manifest,
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types import AudioSignal, LengthsType, NeuralType
-from nemo.core.neural_types.elements import ProbsType, LabelsType, LossType
+from nemo.core.neural_types.elements import ProbsType
 from nemo.utils import logging
 
 try:
@@ -353,20 +354,11 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             self.alpha = self.cfg_msdd_model.loss.alpha
             self.mu =  self.cfg_msdd_model.diarizer.vad.parameters.mu 
             self.vad_thres =  self.cfg_msdd_model.diarizer.vad.parameters.vad_threshold
-            self.power_p_aff = self.cfg_msdd_model.get('power_p_aff', 3)
-            self.thres_aff = self.cfg_msdd_model.get('thres_aff', 0.25)
-            self.mc_max_vad = self.cfg_msdd_model.get('mc_max_vad', True) 
-            self.mc_audio_normalize = self.cfg_msdd_model.get('mc_audio_normalize', True)
-            self.power_p = self.cfg_msdd_model.get('power_p', 2)
-            self.mix_count = self.cfg_msdd_model.get('mix_count', 3)
-            # self.multichannel_mixing = self.cfg_msdd_model.get('multichannel_mixing', False)
-            self.multichannel_mixing = self.cfg_msdd_model.get('multichannel_mixing', True)
         else:
             self.msdd._speaker_model = EncDecSpeakerLabelModel.from_config_dict(cfg.speaker_model_cfg)
             self.msdd._vad_model = EncDecMultiClassificationModel.from_config_dict(cfg.vad_model_cfg)
             self.subsample_vad = int(self.cfg_msdd_model.diarizer.vad.parameters.shift_length_in_sec / 0.01) 
-            self.multichannel_mixing = self.cfg_msdd_model.get('multichannel_mixing', True)
-        self.affinity_weighting = self.cfg_msdd_model.get('affinity_weighting', True)
+        self.multichannel_mixing = self.cfg_msdd_model.get('multichannel_mixing', True)
         self.msdd_overlap_add = self.cfg_msdd_model.get("msdd_overlap_add", True)
         self.use_1ch_from_ch_clus = self.cfg_msdd_model.get("use_1ch_from_ch_clus", True)
         if self.cfg_msdd_model.get("multichannel", None) is not None:
@@ -543,7 +535,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 model_name=model_path, map_location=rank_id
             )
         
-        if self.cfg_msdd_model.get("speaker_decoder", None) is not None:
+        if self.cfg_msdd_model.speaker_decoder is not None:
             self.msdd._speaker_model_decoder = EncDecSpeakerLabelModel.from_config_dict(self.cfg_msdd_model.speaker_decoder)
             self.msdd._speaker_model.decoder.angular = True
             self.msdd._speaker_model.decoder.final = self.msdd._speaker_model_decoder.final
@@ -707,6 +699,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
                 self.segmented_manifest_list.append(segment_manifest_json)
                 self.uniq_id_segment_counts[uniq_id] += 1
         max_dur = max(session_durations_list)
+        max_duration_json = test_manifest_jsons[session_durations_list.index(max_dur)]
         scale_n = len(self.multiscale_args_dict['scale_dict'])
         max_len_ms_ts, ms_seg_counts = get_ms_seg_timestamps(uniq_id='[max_len]', 
                                                             offset=0, 
@@ -1148,6 +1141,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         ms_seg_counts, 
         scale_mapping, 
         ch_clus_mat,
+        mc_max_vad=True,
     ):
         """
         Encoder part for end-to-end diarizaiton model.
@@ -1157,23 +1151,20 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         self.msdd._vad_model = self.msdd._vad_model.to(self.device)
         self.msdd._speaker_model = self.msdd._speaker_model.to(self.device)
         self.msdd_classifier = self.msdd_classifier.to(self.device)
-        # if self.mc_audio_normalize:
-        audio_signal = (1/(audio_signal.max()+self.eps)) * audio_signal 
+        if self.mc_audio_normalize:
+            audio_signal = (1/(audio_signal.max()+self.eps)) * audio_signal 
             
         if self.multichannel_mixing and len(audio_signal.shape) > 2: # Check if audio_signal is multichannel
             audio_signal, mc_vad_logits = self._mix_to_mono(audio_signal_batch=audio_signal, 
                                                             audio_signal_len_batch=audio_signal_length, 
                                                             ch_clus_mat=ch_clus_mat, 
                                                             eval_mode=True)
-        else:
-            mc_vad_logits = None
-            
+             
         processed_signal, processed_signal_length = self.msdd._speaker_model.preprocessor(
             input_signal=audio_signal, length=audio_signal_length
         )
         
-        if self.multichannel_mixing and self.mc_max_vad and mc_vad_logits is not None:
-        # if self.multichannel_mixing:
+        if self.multichannel_mixing and self.mc_max_vad:
             vad_probs_frame = self.mix_mc_vad(mc_log_probs=mc_vad_logits)
         else:
             vad_probs_frame = self.forward_vad(audio_signal=audio_signal, audio_signal_length=audio_signal_length)
@@ -1271,6 +1262,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             ms_seg_counts=ms_seg_counts,
             scale_mapping=scale_mapping,
             ch_clus_mat=ch_clus_mat,
+            mc_max_vad=self.mc_max_vad,
         )
         ms_pools_seq = ms_pools_seq.mean(dim=2)
         # Step 2: Clustering for initialization
@@ -1304,14 +1296,13 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
             ch_clus_mat=ch_clus_mat,
         )
-        spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths) 
-        # vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2))
-        vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2),  signal_lengths=sequence_lengths)
+        spk_loss = self.loss(probs=preds, labels=targets) 
+        vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2))
         loss_glb = self.global_loss(logits=ms_pools_seq.reshape(-1, ms_pools_seq.shape[-1]), labels=global_spk_labels.view(-1))
         loss_1 = (1 - self.mu) * spk_loss + self.mu * vad_loss
         loss_2 = self.affinity_loss.forward(batch_affinity_mat=batch_affinity_mat, targets=targets)
-        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
-        # loss = (1-self.alpha) * loss_1 + self.alpha * loss_2 + self.global_loss_ratio*loss_glb
+        # loss = (1-self.alpha) * loss_1 + self.alpha * loss_2
+        loss = (1-self.alpha) * loss_1 + self.alpha * loss_2 + self.global_loss_ratio*loss_glb
         self._accuracy_train(preds, targets, sequence_lengths)
         self._accuracy_vad_train(vad_probs.unsqueeze(2), targets.max(dim=2)[0].unsqueeze(2), sequence_lengths)
         torch.cuda.empty_cache()
@@ -1328,7 +1319,6 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         return {'loss': loss}
 
     def validation_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
-    # def validation_step(self, batch: list, batch_idx: int):
         audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
         sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
         preds, vad_probs, _, batch_affinity_mat, ms_pools_seq = self.forward(
@@ -1342,10 +1332,8 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         )
         # batch_global_spk_labels = clus_label_index.unsqueeze(2).repeat(1,1,ms_emb_seq.shape[2]).reshape(clus_label_index.shape[0], -1)
         loss_glb = self.global_loss(logits=ms_pools_seq.reshape(-1, ms_pools_seq.shape[-1]), labels=global_spk_labels.view(-1))
-        # spk_loss = self.loss(probs=preds, labels=targets) 
-        spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
-        # vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2))
-        vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2), signal_lengths=sequence_lengths)
+        spk_loss = self.loss(probs=preds, labels=targets) 
+        vad_loss = self.loss(probs=vad_probs.unsqueeze(2), labels=targets.max(dim=2)[0].unsqueeze(2))
         loss_1 = (1 - self.mu) * spk_loss + self.mu * vad_loss
         loss_2 = self.affinity_loss.forward(batch_affinity_mat=batch_affinity_mat, targets=targets)
         loss = (1-self.alpha) * loss_1 + self.alpha * loss_2 + self.global_loss_ratio*loss_glb
@@ -1450,7 +1438,7 @@ class ClusterEmbedding(torch.nn.Module):
         ms_weights = cfg_diar_infer.diarizer.speaker_embeddings.parameters.multiscale_weights
         self.cfg_diar_infer.diarizer.speaker_embeddings.parameters = self.msdd_model.cfg_msdd_model.diarizer.speaker_embeddings.parameters
         self.cfg_diar_infer.diarizer.speaker_embeddings.parameters.multiscale_weights = ms_weights
-        self.clus_diar_model = ClusteringDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model, is_modular=False)
+        self.clus_diar_model = ClusteringMultiChDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model)
 
     def prepare_cluster_embs_infer(self, mc_input: bool = False, use_mc_embs: bool = False):
         """
@@ -1486,7 +1474,7 @@ class ClusterEmbedding(torch.nn.Module):
         self.cfg_diar_infer.diarizer.manifest_filepath = manifest_filepath
         self.cfg_diar_infer.diarizer.out_dir = emb_dir
 
-        # Run ClusteringDiarizer which includes system VAD or oracle VAD.
+        # Run ClusteringMultiChDiarizer which includes system VAD or oracle VAD.
         self._out_dir = self.clus_diar_model._diarizer_params.out_dir
         self.out_rttm_dir = os.path.join(self._out_dir, 'pred_rttms')
         os.makedirs(self.out_rttm_dir, exist_ok=True)
@@ -1498,7 +1486,7 @@ class ClusterEmbedding(torch.nn.Module):
         self.clus_diar_model._diarizer_params.speaker_embeddings.parameters = (
             self.cfg_diar_infer.diarizer.speaker_embeddings.parameters
         )
-        self.clus_diar_model = ClusteringDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model, is_modular=False)
+        self.clus_diar_model = ClusteringMultiChDiarizer(cfg=self.cfg_diar_infer, speaker_model=self.msdd_model)
         
     def run_clustering_diarizer(self, manifest_filepath: str, emb_dir: str, mc_input: bool = False, use_mc_embs: bool = False):
         """
@@ -1559,7 +1547,7 @@ class ClusterEmbedding(torch.nn.Module):
         self.msdd_model.power_p_aff = cfg.diarizer.msdd_model.parameters.power_p_aff
         self.msdd_model.thres_aff = cfg.diarizer.msdd_model.parameters.thres_aff
         self.msdd_model.mc_max_vad = cfg.diarizer.multichannel.parameters.mc_max_vad
-        # self.msdd_model.mc_audio_normalize = cfg.diarizer.multichannel.parameters.mc_audio_normalize
+        self.msdd_model.mc_audio_normalize = cfg.diarizer.multichannel.parameters.mc_audio_normalize
        
         self.msdd_model.power_p = cfg.diarizer.multichannel.parameters.power_p
         self.msdd_model.mix_count = cfg.diarizer.multichannel.parameters.mix_count
