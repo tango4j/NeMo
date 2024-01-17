@@ -5,7 +5,7 @@
 
 - [x] Push NeMo manifest creation script to `https://github.com/tango4j/NeMo/tree/dev/chime7/scripts/chime7`.  
 
-- [ ] Convert two bash scripts (GSS, RNNT-ASR-BSD) to python based script.  
+- [x] Convert two bash scripts (GSS, RNNT-ASR-BSD) to python based script.  
 
 - [ ] Add Whisper text-normalization (as in the original challenge implementation)
 
@@ -13,7 +13,7 @@
 
 - [ ] Make inference script in (1) Class based structure (2) And make separate yaml file or dataConfig-class
 
-- [ ] Clean and organize environment setting again 
+- [x] Clean and organize environment setting again 
 
 - [ ] Setup and check the training script of NeMo multichannel diarization
 
