@@ -27,10 +27,6 @@ def convert_diar_results_to_falign(
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
     diarization_system = diarization_dir.split('/')[-1]
-
-    # if output_dir == "":
-    #     output_dir = f'./alignments/{diarization_system}-{diarization_params}'
-
     diar_json_dir = os.path.join(diarization_dir, "pred_jsons_T")
 
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
@@ -145,8 +141,6 @@ def run_gss_process(cfg):
     gss_output_dir = Path(cfg.gss_output_dir, "processed", f"{cfg.diar_config}-{cfg.diar_param}")
     gss_output_dir.mkdir(parents=True, exist_ok=True)
     alignments_output_dir = Path(cfg.gss_output_dir, "alignments")
-    # , f"{cfg.diar_config}-{cfg.diar_param}")
-    # alignments_output_dir = Path(cfg.diarizer.out_dir, "pred_jsons_T")
     alignments_output_dir.mkdir(parents=True, exist_ok=True)
     manifests_output_dir = Path(cfg.gss_output_dir, "manifests/lhotse", f"{cfg.diar_config}-{cfg.diar_param}")
     manifests_output_dir.mkdir(parents=True, exist_ok=True)
@@ -176,8 +170,6 @@ def run_gss_process(cfg):
             # alignments_dir = alignments_output_dir / scenario
             alignments_dir = alignments_output_dir 
             alignments_dir.mkdir(parents=True, exist_ok=True)
-            # try:
-            
             prepare_chime_manifests(
                     data_root=str(cfg.chime_data_root),
                     diar_json=str(alignments_dir),
@@ -187,8 +179,6 @@ def run_gss_process(cfg):
                     ignore_shorter=cfg.preprocess.ignore_shorter,
                     text_norm=cfg.preprocess.text_norm,
                 )
-            # except:
-            #     import ipdb; ipdb.set_trace()
 
             manifest_dir = manifests_output_dir / scenario / subset
             manifest_dir.mkdir(parents=True, exist_ok=True)
