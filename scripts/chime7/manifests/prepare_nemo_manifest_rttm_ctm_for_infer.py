@@ -290,19 +290,6 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
             sc_audio_files = sc_audio_files_loaded
         sc_audio_files.sort()
 
-        # Double-check that the channel count is correct
-        # if dataset == 'chime6':
-        #     try:
-        #         assert len(sc_audio_files) in [20, 24], f'Expected 20 or 24 files, found {len(sc_audio_files)}'
-        #     except:
-        #         import ipdb; ipdb.set_trace()
-        # elif dataset == 'dipco':
-        #     assert len(sc_audio_files) == 35, f'Expected 35 files, found {len(sc_audio_files)}'
-        # elif dataset == 'mixer6':
-        #     assert len(sc_audio_files) == 13, f'Expected 13 files, found {len(sc_audio_files)}'
-        # else:
-        #     raise ValueError(f'Unknown dataset: {dataset}')
-
         # Make filepaths absolute
         mc_audio_to_list_of_sc_files[mc_audio_file] = sc_audio_files
     
@@ -312,6 +299,31 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
 
     return mc_audio_file_list
 
+def get_data_stats(session_duration_list: list, output_precision: int) -> Dict[str, float]:
+    """
+    Get data statistics from the list of session durations.
+
+    Args:
+        session_duration_list (list): List of session durations.
+
+    Returns:
+        data_stats (dict): Dictionary of data statistics.
+        keys:
+            max_session_duration (float): Maximum session duration.
+            min_session_duration (float): Minimum session duration.
+            avg_session_duration (float): Average session duration.
+            total_duration (float): Total duration of all sessions.
+            num_files (int): Number of sessions.
+    """
+    data_stats = {}
+    if len(session_duration_list) == 0:
+        raise ValueError('session_duration_list is empty.')
+    data_stats['max_session_duration'] = round(max(session_duration_list), output_precision)
+    data_stats['min_session_duration'] = round(min(session_duration_list), output_precision)
+    data_stats['avg_session_duration'] = round(np.mean(np.array(session_duration_list)), output_precision)
+    data_stats['total_duration'] = round(sum(session_duration_list), output_precision)
+    data_stats['num_files'] = len(session_duration_list)
+    return data_stats
 
 def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     """
@@ -456,31 +468,6 @@ def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
     # Display data statistics 
     print(json.dumps(total_data_stats, indent=4, default=str))
 
-def get_data_stats(session_duration_list: list, output_precision: int) -> Dict[str, float]:
-    """
-    Get data statistics from the list of session durations.
-
-    Args:
-        session_duration_list (list): List of session durations.
-
-    Returns:
-        data_stats (dict): Dictionary of data statistics.
-        keys:
-            max_session_duration (float): Maximum session duration.
-            min_session_duration (float): Minimum session duration.
-            avg_session_duration (float): Average session duration.
-            total_duration (float): Total duration of all sessions.
-            num_files (int): Number of sessions.
-    """
-    data_stats = {}
-    if len(session_duration_list) == 0:
-        raise ValueError('session_duration_list is empty.')
-    data_stats['max_session_duration'] = round(max(session_duration_list), output_precision)
-    data_stats['min_session_duration'] = round(min(session_duration_list), output_precision)
-    data_stats['avg_session_duration'] = round(np.mean(np.array(session_duration_list)), output_precision)
-    data_stats['total_duration'] = round(sum(session_duration_list), output_precision)
-    data_stats['num_files'] = len(session_duration_list)
-    return data_stats
 
 if __name__ == '__main__':
 

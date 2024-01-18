@@ -446,10 +446,12 @@ def prepare_mixer6(
                     speaker=spk_id,
                 )
             )
-
-    recording_set, supervision_set = fix_manifests(
-        RecordingSet.from_recordings(recordings), SupervisionSet.from_segments(supervisions),
-    )
+    try:
+        recording_set, supervision_set = fix_manifests(
+            RecordingSet.from_recordings(recordings), SupervisionSet.from_segments(supervisions),
+        )
+    except:
+        import ipdb; ipdb.set_trace()
     # Fix manifests
     validate_recordings_and_supervisions(recording_set, supervision_set)
 

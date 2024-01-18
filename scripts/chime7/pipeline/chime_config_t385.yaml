@@ -21,8 +21,7 @@ scenarios:
 subsets: 
 - dev
 
-diar_base_dir: "/media/data2/chime7-challenge/chime7_diar_results"
-diar_config: "chime8-baseline"
+diar_config: "chime8-baseline-1a"
 diar_param: "T0.5"
 
 
@@ -30,6 +29,7 @@ asr_model_path: /media/data2/chime7-challenge/checkpoints/rno_chime7_chime6_ft_p
 lm_model_path: /media/data2/chime7-challenge/checkpoints/7gram_0001.kenlm
 
 
+diar_base_dir: ${output_root}/diar_outputs
 gss_output_dir: ${output_root}/gss_outputs
 asr_output_dir: ${output_root}/asr_outputs
 eval_output_dir: ${output_root}/eval_outputs
@@ -43,8 +43,8 @@ preprocess:
 
 diarizer:
   use_saved_embeddings: True # True or False
-  manifest_filepath: ???
-  out_dir: ???
+  manifest_filepath: ${diar_base_dir}/diar_manifest.json
+  out_dir: ${diar_base_dir}
   speaker_out_dir: speaker_outputs
   oracle_vad: False # If True, uses RTTM files provided in the manifest file to get speech activity (VAD) timestamps
   collar: 0.25 # Collar value for scoring
@@ -58,6 +58,7 @@ diarizer:
       multi_channel_mode: 'mc_vad_cc_mixer' # Multichannel model: 'mc_vad', 'mc_vad_cc', 'mc_avg' and 'mc_1st_ch'. Default is "mc_vad"
       mc_max_vad: False
       mc_audio_normalize: True
+
   vad:
     model_path: vad_multilingual_marblenet # .nemo local model path or pretrained VAD model name 
     external_vad_manifest: null # This option is provided to use external vad and provide its speech activity labels for speaker embeddings extraction. Only one of model_path or external_vad_manifest should be set
@@ -83,7 +84,7 @@ diarizer:
     parameters:
       window_length_in_sec: [3.0,1.5,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
       shift_length_in_sec: [1.5,0.75,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
-      multiscale_weights: [1.7,1.35,1.0]
+      multiscale_weights: [2.15, 1.575, 1.0]
       interpolate_scale: 0.1
       save_embeddings: True # If True, save speaker embeddings in pickle format. This should be True if clustering result is used for other models, such as `msdd_model`.
   
@@ -125,7 +126,7 @@ diarizer:
       multi_ch_late_fusion_mode: True # True or False
       mc_late_fusion_mode: "post_mean" 
       infer_mode: "vad_masked_logits_force_1spk_rel_thres"
-      system_name: "chime8-baseline"
+      system_name: ${diar_config}
       use_var_weights: False
   
 
@@ -169,7 +170,7 @@ asr:
 
   # General configs
   output_filename: null
-  batch_size: 8
+  batch_size: 16
   num_workers: ${num_workers}
   append_pred: False  # Sets mode of work, if True it will add new field transcriptions.
   pred_name_postfix: null # If you need to use another model name, rather than standard one.

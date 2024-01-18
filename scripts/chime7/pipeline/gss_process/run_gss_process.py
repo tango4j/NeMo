@@ -39,6 +39,7 @@ def convert_diar_results_to_falign(
 
             if len(manifests) == 0:
                 print(f'No subdirectory found for {scenario} and {subset}')
+                import ipdb; ipdb.set_trace()
                 continue
 
             # Process each manifest
