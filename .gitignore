@@ -16,7 +16,6 @@ fastspeech_output
 
 # chime7
 alignments/
-manifests/
 processed/
 *_heh*
 optuna_output*
