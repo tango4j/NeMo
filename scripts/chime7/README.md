@@ -128,14 +128,19 @@ python ${NEMO_ROOT}/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_
 
 ## 2. Setup global varialbes (This is temporary, will be removed in the final format)
 
-Modify the path in the inference script: `<NeMo Root>/scripts/chime7/hyper_optim/infer_e2e_t385_chime7.py`
+Use the main inference script: `<NeMo Root>//scripts/chime7/pipeline/run_full_pipeline.py`
+
+You need to fill the paths to the following variables.
+Make sure to setup your CHIME8 Data path, temporary directory with write permissions and NeMo root path where NeMo toolkit is cloned.
 
 ```python
-NEMO_ROOT="/your/path/to/NeMo" 
-ESPNET_ROOT="/your/path/to/espnet/egs2/chime7_task1/asr1"
-CHIME7_ROOT="/your/path/to/chime7_official_cleaned" 
+NEMO_ROOT="/path/to/NeMo"
+CHECKPOINTS="/path/to/checkpoints"
+TEMP_DIR="/temp/path/to/chime8_baseline_each1sess"
+CHIME_DATA_ROOT="/path/to/chime7_official_cleaned"
+SCENARIOS="[mixer6,chime6,dipco]"
+DIAR_CONFIG="chime8-baseline-mixer6-short1"
 ```
-
 
 ## 3. Launch CHiME-8 Baseline 
 
@@ -144,7 +149,7 @@ Before launch the following script, make sure to activate your Conda environment
 conda activate chime8_baseline
 ```
 
-Make sure to setup your CHIME8 Data path, temporary directory with write permissions and NeMo root path where NeMo toolkit is cloned.
+Launch the following script after plugging in all the varialbes needed.
 
 ```bash
 ###########################################################################
