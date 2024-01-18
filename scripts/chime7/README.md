@@ -32,6 +32,8 @@
 ## Environment Setup
 
 This README outlines the steps to set up your environment for the required operations. Please follow these steps in the order presented to ensure a proper setup.
+This baseline package is based on CUDA 11.8 version. Make sure to install the right version of `torch` that supports the CUDA version you want.
+
 
 ### Prerequisites
 
@@ -115,20 +117,10 @@ Run the script to install the language model.
 
 # How to launch NeMo CHiME-8 Baseline
 
-## 1. Create NeMo style manifest files
 
-This script will generate NeMo style 
+## 1. Setup global varialbes (This is temporary, will be removed in the final format)
 
-```bash
-NEMO_ROOT="/your/path/to/NeMo" # cloned NeMo branch: dev/chime7
-NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest" # Folder that contains nemo manifest .json files
-CHIME7_CLEANED_DATA_FOLDER="/your/path/to/chime7_official_cleaned" # Folder that contains sub-folders named: chime6, dipco, mixer6
-python ${NEMO_ROOT}/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_infer.py --data-dir ${CHIME7_CLEANED_DATA_FOLDER} --subset ${DATA_SPLIT} --output-dir ${NEMO_MSASR_MANIFEST} \
-```
-
-## 2. Setup global varialbes (This is temporary, will be removed in the final format)
-
-Use the main inference script: `<NeMo Root>//scripts/chime7/pipeline/run_full_pipeline.py`
+Use the main inference script: `<NeMo Root>/scripts/chime7/pipeline/run_full_pipeline.py`
 
 You need to fill the paths to the following variables.
 Make sure to setup your CHIME8 Data path, temporary directory with write permissions and NeMo root path where NeMo toolkit is cloned.
@@ -142,7 +134,7 @@ SCENARIOS="[mixer6,chime6,dipco]"
 DIAR_CONFIG="chime8-baseline-mixer6-short1"
 ```
 
-## 3. Launch CHiME-8 Baseline 
+## 2. Launch CHiME-8 Baseline 
 
 Before launch the following script, make sure to activate your Conda environment.
 ```bash
