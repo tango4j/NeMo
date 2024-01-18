@@ -52,7 +52,7 @@ pip install git+http://github.com/desh2608/gss
 pip install optuna
 pip install lhotse==1.14.0
 pip install --upgrade jiwer
-./ngc_install_lm.sh "/your/path/to/NeMo"
+./hyper_optim/ngc_install_lm.sh "/your/path/to/NeMo"
 ```
 
 ### Detailed Installation Steps for ESPnet and Related Tools
@@ -110,7 +110,7 @@ pip install --upgrade jiwer
 Run the script to install the language model.
 
 ```bash
-./ngc_install_lm.sh
+./hyper_optim/ngc_install_lm.sh
 ```
 
 # How to launch NeMo CHiME-8 Baseline
@@ -139,47 +139,52 @@ CHIME7_ROOT="/your/path/to/chime7_official_cleaned"
 
 ## 3. Launch CHiME-8 Baseline 
 
+Before launch the following script, make sure to activate your Conda environment.
 ```bash
-CHECKPOINTS=/your/path/to/checkpoints
+conda activate chime8_baseline
+```
 
-NEMO_ROOT="/your/path/to/NeMo"
-NEMO_PATH=${NEMO_ROOT}/nemo
+Make sure to setup your CHIME8 Data path, temporary directory with write permissions and NeMo root path where NeMo toolkit is cloned.
 
-OPTUNA_JOB_NAME=infer-e2e-t385-tango4j-NOd-dev_chime7
-DATA_SPLIT=dev
-PATTERN="*-"${DATA_SPLIT}".json"
-SCENARIOS=mixer6
+```bash
+###########################################################################
+### YOUR CUSTOMIZED CONFIGURATIONS HERE ###################################
+NEMO_ROOT=/path/to/NeMo
+CHECKPOINTS=/path/to/checkpoints
+TEMP_DIR=/temp/path/to/chime8_baseline_each1sess
+CHIME_DATA_ROOT=/path/to/chime7_official_cleaned
+SCENARIOS="[mixer6,chime6,dipco]"
+DIAR_CONFIG="chime8-baseline-mixer6-short1"
+###########################################################################
+cd $NEMO_ROOT
+export CUDA_VISIBLE_DEVICES="0"
 
-
-TEMP_DIR=/path/to/temp_dir/chime7_outputs/${OPTUNA_JOB_NAME}  
-SCRIPT_NAME=infer_e2e_t385_chime7.py
-
-OPTUNA_LOG=${OPTUNA_JOB_NAME}.log
-STORAGE=sqlite:///${OPTUNA_JOB_NAME}.db
-DIAR_BATCH_SIZE=11
-
-export KENLM_LIB=$NEMO_PATH/decoders/kenlm/build/bin
-export KENLM_ROOT=$NEMO_PATH/decoders/kenlm
-export PYTHONPATH=$NEMO_PATH/decoders:$PYTHONPATH
-export PYTHONPATH=/usr/lib/python3.8/site-packages:$PYTHONPATH
-export PYTHONPATH=/usr/lib/python3.8/site-packages/kenlm-0.0.0-py3.8-linux-x86_64.egg:$PYTHONPATH
-
-NEMO_MSASR_MANIFEST="/your/path/to/nemo_msasr_manifest"
-MANIFEST_BASE_PATH="${NEMO_MSASR_MANIFEST}/mixer6/mulspk_asr_manifest"
-
+SCRIPT_NAME=${NEMO_ROOT}/scripts/chime7/pipeline/run_full_pipeline.py
 python -c "import kenlm; print('kenlm imported successfully')" || exit 1
 
-python ${SCRIPT_NAME} --n_trials 1 --n_jobs 1 --output_log ${OPTUNA_LOG} --storage ${STORAGE} --output_dir ./speaker_outputs_v3 \
---subsets ${DATA_SPLIT} --pattern ${PATTERN} --scenarios ${SCENARIOS} \
---gpu_id 0 \
---manifest_path ${MANIFEST_BASE_PATH} \
---config_url ${NEMO_ROOT}/examples/speaker_tasks/diarization/conf/inference/diar_infer_msdd_v2.yaml \
---vad_model_path ${CHECKPOINTS}/frame_vad_chime7_acrobat.nemo \
---msdd_model_path ${CHECKPOINTS}/msdd_v2_PALO_bs6_a003_version6_e53.ckpt \
---asr_model_path ${CHECKPOINTS}/rnnt_ft_chime6ANDmixer6_26jun_avged.nemo \
---lm_path ${CHECKPOINTS}/rnnt_chime6_mixer6_dipco_train_dev.kenlm \
---batch_size ${DIAR_BATCH_SIZE} \
---scenarios ${SCENARIOS} \
---subsets "dev" \
---temp_dir $TEMP_DIR
+CONFIG_PATH=${NEMO_ROOT}/scripts/chime7/pipeline
+YAML_NAME="chime_config_t385.yaml"
+
+ASR_MODEL_PATH=${CHECKPOINTS}/rnnt_ft_chime6ANDmixer6_26jun_avged.nemo
+LM_MODEL_PATH=${CHECKPOINTS}/7gram_0001.kenlm
+VAD_MODEL_PATH=${CHECKPOINTS}/frame_vad_chime7_acrobat.nemo
+MSDD_MODEL_PATH=${CHECKPOINTS}/msdd_v2_PALO_bs6_a003_version6_e53.ckpt 
+
+SITE_PACKAGES=`$(which python) -c 'import site; print(site.getsitepackages()[0])'`
+export KENLM_ROOT=$NEMO_ROOT/decoders/kenlm
+export KENLM_LIB=$NEMO_ROOT/decoders/kenlm/build/bin
+export PYTHONPATH=$NEMO_ROOT/decoders:$PYTHONPATH
+export PYTHONPATH=$SITE_PACKAGES/kenlm-0.2.0-py3.10-linux-x86_64.egg:$PYTHONPATH
+export PYTHONPATH=$NEMO_ROOT:$PYTHONPATH
+
+python ${SCRIPT_NAME} --config-path="${CONFIG_PATH}" --config-name="$YAML_NAME" \
+diar_config=${DIAR_CONFIG} \
+chime_data_root=${CHIME_DATA_ROOT} \
+output_root=${TEMP_DIR} \
+scenarios=${SCENARIOS} \
+subsets="[dev]" \
+asr_model_path=${ASR_MODEL_PATH} \
+lm_model_path=${LM_MODEL_PATH} \
+diarizer.vad.model_path=${VAD_MODEL_PATH} \
+diarizer.msdd_model.model_path=${MSDD_MODEL_PATH} \
 ```
