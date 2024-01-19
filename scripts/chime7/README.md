@@ -162,10 +162,10 @@ python -c "import kenlm; print('kenlm imported successfully')" || exit 1
 CONFIG_PATH=${NEMO_ROOT}/scripts/chime7/pipeline
 YAML_NAME="chime_config_t385.yaml"
 
-ASR_MODEL_PATH=${CHECKPOINTS}/rnnt_ft_chime6ANDmixer6_26jun_avged.nemo
-LM_MODEL_PATH=${CHECKPOINTS}/7gram_0001.kenlm
-VAD_MODEL_PATH=${CHECKPOINTS}/frame_vad_chime7_acrobat.nemo
-MSDD_MODEL_PATH=${CHECKPOINTS}/msdd_v2_PALO_bs6_a003_version6_e53.ckpt 
+VAD_MODEL_PATH=${CHECKPOINTS}/vad_model.nemo
+MSDD_MODEL_PATH=${CHECKPOINTS}/msdd_model.ckpt
+ASR_MODEL_PATH=${CHECKPOINTS}/asr_model.nemo
+LM_MODEL_PATH=${CHECKPOINTS}/lm_model.kenlm
 
 SITE_PACKAGES=`$(which python) -c 'import site; print(site.getsitepackages()[0])'`
 export KENLM_ROOT=$NEMO_ROOT/decoders/kenlm
