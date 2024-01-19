@@ -17,16 +17,9 @@ from .lhoste_manifests import prepare_chime_manifests
 from .mic_rank import get_gss_mic_ranks
 
 
-def convert_diar_results_to_falign(
-    scenarios: list,
-    diarization_dir: str, 
-    diarization_params: str, 
-    output_dir: str, 
-    subsets: list = ['dev']
-):
+def convert_diar_results_to_falign(scenarios: list, diarization_dir: str, output_dir: str, subsets: list = ['dev']):
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
-    diarization_system = diarization_dir.split('/')[-1]
     diar_json_dir = os.path.join(diarization_dir, "pred_jsons_T")
 
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
@@ -39,7 +32,9 @@ def convert_diar_results_to_falign(
 
             if len(manifests) == 0:
                 print(f'No subdirectory found for {scenario} and {subset}')
-                import ipdb; ipdb.set_trace()
+                import ipdb
+
+                ipdb.set_trace()
                 continue
 
             # Process each manifest
@@ -150,7 +145,6 @@ def run_gss_process(cfg):
     convert_diar_results_to_falign(
         scenarios=cfg.scenarios,
         diarization_dir=str(diar_output_dir),
-        diarization_params=cfg.diar_param,
         output_dir=str(alignments_output_dir),
         subsets=cfg.subsets,
     )
@@ -169,17 +163,17 @@ def run_gss_process(cfg):
             # The script will ignore segments shorter than 0.2 seconds.
             logging.info(f"Prepare manifests for {scenario}/{subset}...")
             # alignments_dir = alignments_output_dir / scenario
-            alignments_dir = alignments_output_dir 
+            alignments_dir = alignments_output_dir
             alignments_dir.mkdir(parents=True, exist_ok=True)
             prepare_chime_manifests(
-                    data_root=str(cfg.chime_data_root),
-                    diar_json=str(alignments_dir),
-                    scenario=scenario,
-                    subset=subset,
-                    output_root=str(manifests_output_dir),
-                    ignore_shorter=cfg.preprocess.ignore_shorter,
-                    text_norm=cfg.preprocess.text_norm,
-                )
+                data_root=str(cfg.chime_data_root),
+                diar_json=str(alignments_dir),
+                scenario=scenario,
+                subset=subset,
+                output_root=str(manifests_output_dir),
+                ignore_shorter=cfg.preprocess.ignore_shorter,
+                text_norm=cfg.preprocess.text_norm,
+            )
 
             manifest_dir = manifests_output_dir / scenario / subset
             manifest_dir.mkdir(parents=True, exist_ok=True)

@@ -42,9 +42,9 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
 )
 from nemo.collections.asr.parts.utils.vad_utils import (
     generate_overlap_vad_seq,
+    generate_vad_frame_pred,
     generate_vad_segment_table,
     get_vad_stream_status,
-    generate_vad_frame_pred,
     prepare_manifest,
 )
 from nemo.core.classes import Model
@@ -80,6 +80,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
     Extract Embeddings, Clustering, Resegmentation and Scoring. 
     All the parameters are passed through config file 
     """
+
     def __init__(self, cfg: Union[DictConfig, Any], speaker_model=None):
         super().__init__()
         if isinstance(cfg, DictConfig):
@@ -317,18 +318,18 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         self._embeddings_file = name + f'_embeddings.pkl'
         pkl.dump(self.embeddings, open(self._embeddings_file, 'wb'))
         logging.info("Saved embedding files to {}".format(embedding_dir))
-        
+
     def _get_all_embs(self, all_embs, audio_signal, audio_signal_len):
         with autocast():
             _, embs = self._speaker_model.forward(input_signal=audio_signal, input_signal_length=audio_signal_len)
             embs = embs.view(-1, embs.shape[-1])
             all_embs = torch.cat((all_embs, embs.cpu().detach()), dim=0)
         return all_embs
-       
-    @staticmethod 
+
+    @staticmethod
     def _get_seg_timestamps(embeddings, time_stamps, line, all_embs, idx):
         dic = json.loads(line.strip())
-        if 'uniq_id' in dic: 
+        if 'uniq_id' in dic:
             uniq_name = dic['uniq_id']
         else:
             uniq_name = get_uniqname_from_filepath(dic['audio_filepath'])
@@ -368,7 +369,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         with open(manifest_file, 'r', encoding='utf-8') as manifest:
             for idx, line in enumerate(manifest.readlines()):
                 embeddings, time_stamps = self._get_seg_timestamps(embeddings, time_stamps, line, all_embs, idx)
-        
+
         self.embeddings, self.time_stamps = embeddings, time_stamps
         if self._speaker_params.save_embeddings:
             self._save_embeddings(manifest_file)
@@ -380,12 +381,12 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                 entry = {'audio_filepath': audio_file, 'offset': 0.0, 'duration': None, 'text': '-', 'label': 'infer'}
                 fp.write(json.dumps(entry) + '\n')
 
-    def _init_clus_diarizer(self, paths2audio_files: List[str] =None, batch_size: int=None):
+    def _init_clus_diarizer(self, paths2audio_files: List[str] = None, batch_size: int = None):
         self._out_dir = self._diarizer_params.out_dir
-        self._speaker_dir = os.path.join(self._diarizer_params.out_dir, 'speaker_outputs')
+        # self._speaker_dir = os.path.join(self._diarizer_params.out_dir, 'speaker_outputs')
+        self._speaker_dir = self._diarizer_params.speaker_out_dir
         if os.path.exists(self._speaker_dir):
             logging.warning("Found previous clustering diarizer outputs.")
-            # shutil.rmtree(self._speaker_dir, ignore_errors=True)
         else:
             os.makedirs(self._speaker_dir)
 
@@ -397,7 +398,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
 
         if batch_size:
             self._cfg.batch_size = batch_size
-        
+
         if paths2audio_files:
             if type(paths2audio_files) is list:
                 self._diarizer_params.manifest_filepath = os.path.join(self._out_dir, 'paths2audio_filepath.json')
@@ -419,7 +420,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         batch_size (int): batch_size considered for extraction of speaker embeddings and VAD computation
         """
         out_rttm_dir = self._init_clus_diarizer(paths2audio_files, batch_size)
-        
+
         # Speech Activity Detection
         self._perform_speech_activity_detection()
 
