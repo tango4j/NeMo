@@ -141,6 +141,15 @@ def objective(
             wer = float(f.read().strip())
         logging.info(f"Time taken for trial {trial.number}: {(time.time() - start_time)/60:.2f} mins")
         logging.info(f"Trial {trial.number} SA-WER: {wer}")
+
+        if not cfg.optuna.get("save_gss_output", False):
+            os.system(f"rm -rf {cfg.gss_output_dir}")
+        if not cfg.optuna.get("save_diar_output", False):
+            os.system(f"rm -rf {cfg.diar_base_dir}")
+        if not cfg.optuna.get("save_asr_output", False):
+            os.system(f"rm -rf {cfg.asr_output_dir}")
+        if not cfg.optuna.get("save_eval_output", False):
+            os.system(f"rm -rf {cfg.eval_output_dir}")
         return wer
 
 
