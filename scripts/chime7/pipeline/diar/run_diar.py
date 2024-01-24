@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,11 +16,12 @@ import os
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
-from scripts.chime7.manifests.prepare_nemo_diar_manifest import generate_annotations
 
 from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
+
+from .prepare_nemo_diar_manifest import generate_annotations
 
 
 def run_diarization(cfg):

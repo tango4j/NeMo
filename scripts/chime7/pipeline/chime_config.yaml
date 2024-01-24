@@ -2,7 +2,11 @@
 name: &name "chime8-notsofar"
 
 chime_data_root: /media/data2/chime7-challenge/datasets/chime7_official_cleaned_v2
-output_root: ./nemo_experiments
+
+vad_model_path: /media/data2/chime7-challenge/checkpoints/frame_vad_chime7_acrobat.nemo
+msdd_model_path: /media/data2/chime7-challenge/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt 
+asr_model_path: /media/data2/chime7-challenge/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo
+lm_model_path: /media/data2/chime7-challenge/checkpoints/7gram_0001.kenlm
 
 scenarios: 
  - mixer6
@@ -14,20 +18,10 @@ num_workers: 16
 sample_rate: 16000
 batch_size: 8  # batch size for diarization and ASR
 verbose: True # enable additional logging
-# channel_selector: null
-
-gpu_id: 0
-device: cpu  # used when initializing msdd, then overwritten by gpu_id
-audio_type: "flac"
+output_root: ./nemo_experiments
 
 diar_config: "chime8-baseline"  # alias of the diarization model
-diar_param: "v1"  # tag of the diarization model
-
-vad_model_path: /media/data2/chime7-challenge/checkpoints/frame_vad_chime7_acrobat.nemo
-msdd_model_path: /media/data2/chime7-challenge/checkpoints/msdd_v2_PALO_bs6_a003_version6_e53.ckpt 
-asr_model_path: /media/data2/chime7-challenge/checkpoints/rno_chime7_chime6_ft_ptDataSetasrset3_frontend_nemoGSSv1_prec32_layers24_heads8_conv5_d1024_dlayers2_dsize640_bs128_adamw_CosineAnnealing_lr0.0001_wd1e-2_spunigram1024.nemo
-lm_model_path: /media/data2/chime7-challenge/checkpoints/7gram_0001.kenlm
-
+diar_param: "v1"  # optional tag of the diarization model
 
 ########### Don't change ##################
 diar_base_dir: ${output_root}/diar_outputs
@@ -35,13 +29,16 @@ gss_output_dir: ${output_root}/gss_outputs
 asr_output_dir: ${output_root}/asr_outputs
 eval_output_dir: ${output_root}/eval_outputs
 prepared_manifest_vad_input: null  # automatically set by the scripts
+gpu_id: 0  # set CUDA_VISIBLE_DEVICES to control which gpu to use
+device: cpu  # NO NEED TO CHANGE THIS, it's used when initializing msdd, then overwritten by gpu_id
+audio_type: "flac"
 ###########################################
 
 
 optuna:
-  study_name: chime8_optuna
-  storage: sqlite:///optuna-chime8.db
-  output_log: ./optuna-chime8.log
+  study_name: chime8_optuna  # name of the optuna job
+  storage: sqlite:///optuna-chime8.db  # data will be stored at ./optuna-chime8.db
+  output_log: ./optuna-chime8.log  # where optuna log will be stored
   n_trials: 10000  # Number of trials to run with optuna
   n_jobs: -1  # Number of parallel jobs to run, set -1 to use all GPUs
   speaker_output_dir: ${output_root}  # directory for pre-computed embeddings for diarization

@@ -15,7 +15,7 @@ SCRIPT_NAME=${NEMO_ROOT}/scripts/chime7/pipeline/run_full_pipeline.py
 python -c "import kenlm; print('kenlm imported successfully')" || exit 1
 
 CONFIG_PATH=${NEMO_ROOT}/scripts/chime7/pipeline
-YAML_NAME="chime_config_t385.yaml"
+YAML_NAME="chime_config.yaml"
 
 VAD_MODEL_PATH=${CHECKPOINTS}/vad_model.nemo
 MSDD_MODEL_PATH=${CHECKPOINTS}/msdd_model.ckpt
@@ -30,12 +30,12 @@ export PYTHONPATH=$SITE_PACKAGES/kenlm-0.2.0-py3.10-linux-x86_64.egg:$PYTHONPATH
 export PYTHONPATH=$NEMO_ROOT:$PYTHONPATH
 
 python ${SCRIPT_NAME} --config-path="${CONFIG_PATH}" --config-name="$YAML_NAME" \
-diar_config=${DIAR_CONFIG} \
-chime_data_root=${CHIME_DATA_ROOT} \
-output_root=${TEMP_DIR} \
-scenarios=${SCENARIOS} \
-subsets="[dev]" \
-asr_model_path=${ASR_MODEL_PATH} \
-lm_model_path=${LM_MODEL_PATH} \
-diarizer.vad.model_path=${VAD_MODEL_PATH} \
-diarizer.msdd_model.model_path=${MSDD_MODEL_PATH} \
+    diar_config=${DIAR_CONFIG} \
+    chime_data_root=${CHIME_DATA_ROOT} \
+    output_root=${TEMP_DIR} \
+    scenarios=${SCENARIOS} \
+    subsets="[dev]" \
+    asr_model_path=${ASR_MODEL_PATH} \
+    lm_model_path=${LM_MODEL_PATH} \
+    diarizer.vad.model_path=${VAD_MODEL_PATH} \
+    diarizer.msdd_model.model_path=${MSDD_MODEL_PATH}

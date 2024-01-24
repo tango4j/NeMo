@@ -1,7 +1,21 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Slighly modified versions of lhotse recipes scripts in
 https://github.com/lhotse-speech/lhotse/blob/master/lhotse/recipes/
 """
+
 import argparse
 import glob
 import json
@@ -16,9 +30,10 @@ import soundfile as sf
 from jiwer.transforms import RemoveKaldiNonWords
 from lhotse import fix_manifests, validate_recordings_and_supervisions
 from lhotse.audio import AudioSource, Recording, RecordingSet
-from lhotse.recipes.chime6 import TimeFormatConverter, normalize_text_chime6
+from lhotse.recipes.chime6 import normalize_text_chime6
 from lhotse.supervision import SupervisionSegment, SupervisionSet
-from lhotse.utils import Pathlike, add_durations, safe_extract, urlretrieve_progress
+from lhotse.utils import Pathlike, add_durations
+
 
 jiwer_chime6_scoring = jiwer.Compose(
     [
@@ -451,7 +466,9 @@ def prepare_mixer6(
             RecordingSet.from_recordings(recordings), SupervisionSet.from_segments(supervisions),
         )
     except:
-        import ipdb; ipdb.set_trace()
+        import ipdb
+
+        ipdb.set_trace()
     # Fix manifests
     validate_recordings_and_supervisions(recording_set, supervision_set)
 
@@ -495,13 +512,15 @@ def prepare_chime_manifests(
         )
     else:
         diarization_json_dir = None
-        
+
     try:
         assert scenario in ["chime6", "dipco", "mixer6"], (
-        "Datasets supported in this script " "are chime6, dipco and mixer6"
+            "Datasets supported in this script " "are chime6, dipco and mixer6"
         )
     except:
-        import ipdb; ipdb.set_trace()
+        import ipdb
+
+        ipdb.set_trace()
     assert subset in ["train", "dev", "eval",], "Option --subset should be 'train', 'dev' or 'eval'"
 
     if subset == "train" and scenario == "dipco":

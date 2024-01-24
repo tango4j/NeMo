@@ -1,29 +1,34 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import argparse
-import os
-import json
 import glob
-import tqdm
+import json
+import os
 import time
-import sox
+from collections import Counter
+from typing import Dict, List, Tuple
 
 import numpy as np
 import soundfile as sf
+import sox
+import tqdm
+
+from nemo.collections.asr.parts.utils.diarization_utils import convert_word_dict_seq_to_ctm, write_txt
+from nemo.collections.asr.parts.utils.manifest_utils import get_path_dict, read_file, write_file
+from nemo.collections.asr.parts.utils.speaker_utils import labels_to_rttmfile, rttm_to_labels
 from nemo.utils import logging
-from collections import Counter
-from nemo.collections.asr.parts.utils.manifest_utils import (
-    get_path_dict,
-    read_file,
-    write_file,
-)
-from nemo.collections.asr.parts.utils.diarization_utils import (
-    convert_word_dict_seq_to_ctm,
-    write_txt
-)
-from nemo.collections.asr.parts.utils.speaker_utils import (
-    rttm_to_labels,
-    labels_to_rttmfile,
-)
-from typing import Dict, List, Tuple
 
 """
 This script is used to prepare the manifest files for VAD or diarization inference.
@@ -41,6 +46,7 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 
 scenarios = ['chime6', 'dipco', 'mixer6']
 
+
 def get_rttm_info(rttm_filepath: str) -> Tuple[int, float, float]:
     """
     Get the number of speakers, the minimum and maximum time from an RTTM file
@@ -55,6 +61,7 @@ def get_rttm_info(rttm_filepath: str) -> Tuple[int, float, float]:
     rttm_min = np.min(label_array[:, 0])
     rttm_max = np.max(label_array[:, 1])
     return num_speakers, rttm_min, rttm_max
+
 
 def create_multichannel_manifest(
     uniq_id_path: str,
@@ -78,7 +85,7 @@ def create_multichannel_manifest(
         ctm_path (str): Path to list of ctm files
         add_duration (bool): Whether to add durations to the manifest file
     """
-    uniq_id_list = [ x.strip() for x in read_file(uniq_id_path) ]
+    uniq_id_list = [x.strip() for x in read_file(uniq_id_path)]
     uniqids = sorted(uniq_id_list)
     len_wavs = len(uniq_id_list)
 
@@ -89,7 +96,7 @@ def create_multichannel_manifest(
 
     if os.path.exists(manifest_filepath):
         os.remove(manifest_filepath)
-    wav_pathlist = [ x.strip() for x in read_file(wav_path) ]
+    wav_pathlist = [x.strip() for x in read_file(wav_path)]
     wav_pathdict = {}
     for uniq_id, cs_wav_paths in zip(uniqids, wav_pathlist):
         wav_pathdict[uniq_id] = cs_wav_paths
@@ -121,7 +128,6 @@ def create_multichannel_manifest(
             uem_lines = open(uem).readlines()
             uem_abs_stt = float(uem_lines[0].split()[-2])
             uem_abs_end = float(uem_lines[-1].split()[-1])
-                
 
         if text is not None:
             with open(text.strip()) as f:
@@ -134,18 +140,26 @@ def create_multichannel_manifest(
 
         duration = None
         audio_duration_list = []
-        for audio_line in tqdm.tqdm(audio_line_list, desc=f"Measuring multichannel audio duration for {uid} {count}/{total_file_count}", unit=" files"):
+        for audio_line in tqdm.tqdm(
+            audio_line_list,
+            desc=f"Measuring multichannel audio duration for {uid} {count}/{total_file_count}",
+            unit=" files",
+        ):
             try:
                 duration = sox.file_info.duration(audio_line)
             except:
-                import ipdb; ipdb.set_trace()
+                import ipdb
+
+                ipdb.set_trace()
             audio_duration_list.append(duration)
         min_duration, max_duration = min(audio_duration_list), max(audio_duration_list)
         if min_duration < (uem_abs_end - uem_abs_stt):
-            print(f"WARNING: {uid} has shorter min duration {min_duration} than UEM file duraiton {uem_abs_end - uem_abs_stt}")
+            print(
+                f"WARNING: {uid} has shorter min duration {min_duration} than UEM file duraiton {uem_abs_end - uem_abs_stt}"
+            )
             time.sleep(2)
         # target_duration = min(min_duration-rttm_min, rttm_dur)
-        target_duration = min(uem_abs_end-uem_abs_stt, min_duration-uem_abs_stt)
+        target_duration = min(uem_abs_end - uem_abs_stt, min_duration - uem_abs_stt)
         meta = [
             {
                 "audio_filepath": audio_line_list,
@@ -167,6 +181,7 @@ def create_multichannel_manifest(
 
     write_file(manifest_filepath, lines, range(len(lines)))
 
+
 def create_speaker_line(start: int, end: int, speaker_id: int, output_precision: int = 3) -> List[str]:
     """
     Create new RTTM entries from the segments input
@@ -184,6 +199,7 @@ def create_speaker_line(start: int, end: int, speaker_id: int, output_precision:
     t_end = float(round(end, output_precision))
     speaker_segment_str = f"{t_stt} {t_end} {speaker_id}"
     return speaker_segment_str
+
 
 def create_word_dict_lines(data):
     """
@@ -210,15 +226,15 @@ def create_word_dict_lines(data):
         new_word_dict_lines.append(word_dict_line)
     return new_word_dict_lines
 
+
 def parse_uem_lines(uem_lines):
     uem_dict = {}
     for line in uem_lines:
         line_str = line.strip()
         uniq_id = line_str.split()[0]
         uem_dict[uniq_id] = line_str
-    return uem_dict 
-    
-    
+    return uem_dict
+
 
 def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str):
     """
@@ -250,6 +266,7 @@ def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str
     end_time = float(offset + duration)
     return offset, duration, end_time, audio_filename
 
+
 def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_dir: str):
     """
     This function was originated from prepare_manifest_dev_eval.py.
@@ -277,7 +294,7 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
 
         # Get single-channel files
         sc_audio_files_loaded = glob.glob(os.path.join(dataset_dir, filepath_base + file_ext))
-        sc_audio_files = [] 
+        sc_audio_files = []
         if dataset == 'mixer6':
             for i, sc_audio_file in enumerate(sc_audio_files_loaded):
                 if os.path.basename(sc_audio_file).split("CH")[1].split(".")[0] not in ["01", "02", "03"]:
@@ -292,12 +309,13 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
 
         # Make filepaths absolute
         mc_audio_to_list_of_sc_files[mc_audio_file] = sc_audio_files
-    
+
     mc_audio_file_list = []
-    for base_name, sc_audio_files in mc_audio_to_list_of_sc_files.items(): 
+    for base_name, sc_audio_files in mc_audio_to_list_of_sc_files.items():
         mc_audio_file_list.append(",".join(sc_audio_files))
 
     return mc_audio_file_list
+
 
 def get_data_stats(session_duration_list: list, output_precision: int) -> Dict[str, float]:
     """
@@ -326,13 +344,15 @@ def get_data_stats(session_duration_list: list, output_precision: int) -> Dict[s
     return data_stats
 
 
-def generate_annotations(data_dir: str, subset: str, output_dir: str, output_precision: int=2, scenarios_list: str=None):
+def generate_annotations(
+    data_dir: str, subset: str, output_dir: str, output_precision: int = 2, scenarios_list: str = None
+):
     """
     Take original CHiME-7 data and prepare
     multichannel audio files and the corresponding manifests for inference and evaluation.
     """
     total_data_stats = {}
-    
+
     if subset == 'dev':
         scenarios = ['chime6', 'dipco', 'mixer6']
         # scenarios = ['mixer6']
@@ -342,10 +362,10 @@ def generate_annotations(data_dir: str, subset: str, output_dir: str, output_pre
         scenarios = ['chime6']
     elif subset in ['train_intv', 'train_call']:
         scenarios = ['mixer6']
-        
+
     if scenarios_list is not None:
         scenarios = scenarios_list
-        
+
     for dataset in scenarios:
         dataset_dir = os.path.join(data_dir, dataset)
         dataset_output_dir = os.path.join(output_dir, dataset)
@@ -383,19 +403,23 @@ def generate_annotations(data_dir: str, subset: str, output_dir: str, output_pre
             session_duration_list.append(session_end_time)
             for data in file_data:
                 offset, duration, end_time, audio_filename = parse_chime7_json_file(dataset, data, file_path, subset)
-                speaker_line = create_speaker_line(start=offset, end=end_time, speaker_id=data['speaker'], output_precision=output_precision)
+                speaker_line = create_speaker_line(
+                    start=offset, end=end_time, speaker_id=data['speaker'], output_precision=output_precision
+                )
                 speaker_line_list.append(speaker_line)
                 new_word_dict_lines = create_word_dict_lines(data)
                 word_dict_list.extend(new_word_dict_lines)
-                
+
                 # path is relative to dataset_output_dir
                 for key in ['audio_filepath', 'offset', 'duration', 'text']:
                     assert key not in data
                 data.update(
-                    {'audio_filepath': os.path.join('audio', subset, audio_filename),
-                     'offset': float(data['start_time']),
-                     'duration': float(data['end_time']) - offset,
-                     'text': data['words'],}
+                    {
+                        'audio_filepath': os.path.join('audio', subset, audio_filename),
+                        'offset': float(data['start_time']),
+                        'duration': float(data['end_time']) - offset,
+                        'text': data['words'],
+                    }
                 )
                 manifest_data.append(data)
 
@@ -411,18 +435,20 @@ def generate_annotations(data_dir: str, subset: str, output_dir: str, output_pre
             os.makedirs(os.path.join(dataset_output_dir, 'ctm'), exist_ok=True)
 
             # Write RTTM file with the name convention: <dataset>-<subset>-<session_id>.rttm
-            uniq_id = f"{dataset}-{subset}-{session_id}" 
+            uniq_id = f"{dataset}-{subset}-{session_id}"
             out_rttm_path = os.path.join(dataset_output_dir, 'rttm', f'{uniq_id}.rttm')
-            labels_to_rttmfile(labels=speaker_line_list, uniq_id=uniq_id, out_rttm_dir=os.path.join(dataset_output_dir, 'rttm'))
+            labels_to_rttmfile(
+                labels=speaker_line_list, uniq_id=uniq_id, out_rttm_dir=os.path.join(dataset_output_dir, 'rttm')
+            )
 
             # Write CTM file with the name convention: <dataset>-<subset>-<session_id>.ctm
             ctm_lines_list = convert_word_dict_seq_to_ctm(word_dict_seq_list=word_dict_list, uniq_id=uniq_id)
-            out_ctm_path=os.path.join(os.path.join(dataset_output_dir, 'ctm'), f'{uniq_id}.ctm')
-            out_uem_path=os.path.join(os.path.join(dataset_output_dir, 'ctm'), f'{uniq_id}.uem')
+            out_ctm_path = os.path.join(os.path.join(dataset_output_dir, 'ctm'), f'{uniq_id}.ctm')
+            out_uem_path = os.path.join(os.path.join(dataset_output_dir, 'ctm'), f'{uniq_id}.uem')
             write_txt(w_path=out_ctm_path, val='\n'.join(ctm_lines_list))
             uem_lines_list = [uem_dict[session_id]]
             write_txt(w_path=out_uem_path, val='\n'.join(uem_lines_list))
-            
+
             rttm_path_list.append(out_rttm_path)
             ctm_path_list.append(out_ctm_path)
             uem_path_list.append(out_uem_path)
@@ -439,43 +465,44 @@ def generate_annotations(data_dir: str, subset: str, output_dir: str, output_pre
         multichannel_audio_files = [data['audio_filepath'] for data in manifest_data]
         multichannel_audio_files = sorted(set(multichannel_audio_files))
         mc_audio_path_list = get_mc_audio_filepaths(multichannel_audio_files, dataset, dataset_dir)
-        
+
         # If dataset_output_dir does not exist, create it
         os.makedirs(os.path.join(dataset_output_dir, 'filelist'), exist_ok=True)
         os.makedirs(os.path.join(dataset_output_dir, 'mulspk_asr_manifest'), exist_ok=True)
 
-        split_id = f"{dataset}-{subset}" 
+        split_id = f"{dataset}-{subset}"
         out_mc_audio_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.mc_audio.list')
         out_rttm_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.rttm.list')
         out_ctm_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.ctm.list')
         out_uem_file_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.uem.list')
         out_uniqid_list_path = os.path.join(dataset_output_dir, 'filelist', f'{split_id}.uniq_id.list')
-        
+
         out_manifest_path = os.path.join(dataset_output_dir, 'mulspk_asr_manifest', f'{split_id}.json')
         logging.info(f"Creating diarizaiton manifest file: {out_manifest_path}")
-         
+
         write_txt(w_path=out_mc_audio_file_list_path, val='\n'.join(mc_audio_path_list))
         write_txt(w_path=out_rttm_file_list_path, val='\n'.join(rttm_path_list))
         write_txt(w_path=out_ctm_file_list_path, val='\n'.join(ctm_path_list))
         write_txt(w_path=out_uem_file_list_path, val='\n'.join(uem_path_list))
         write_txt(w_path=out_uniqid_list_path, val='\n'.join(uniq_id_list))
 
-        create_multichannel_manifest(uniq_id_path=out_uniqid_list_path,
-                                     wav_path=out_mc_audio_file_list_path,
-                                     manifest_filepath=out_manifest_path,
-                                     rttm_path=out_rttm_file_list_path,
-                                     ctm_path=out_ctm_file_list_path,
-                                     uem_path=out_uem_file_list_path,
-                                     add_duration = True
+        create_multichannel_manifest(
+            uniq_id_path=out_uniqid_list_path,
+            wav_path=out_mc_audio_file_list_path,
+            manifest_filepath=out_manifest_path,
+            rttm_path=out_rttm_file_list_path,
+            ctm_path=out_ctm_file_list_path,
+            uem_path=out_uem_file_list_path,
+            add_duration=True,
         )
 
-    # Display data statistics 
+    # Display data statistics
     print(json.dumps(total_data_stats, indent=4, default=str))
 
 
-def main(data_dir: str, subset: str, output_dir: str, output_precision: int=2):
+def main(data_dir: str, subset: str, output_dir: str, output_precision: int = 2):
     return generate_annotations(data_dir, subset, output_dir, output_precision)
-    
+
 
 if __name__ == '__main__':
 
