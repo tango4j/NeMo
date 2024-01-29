@@ -56,7 +56,7 @@ pip install optuna-fast-fanova gunicorn
 pip install optuna-dashboard
 pip install lhotse==1.14.0
 pip install --upgrade jiwer
-./hyper_optim/ngc_install_lm.sh "/your/path/to/NeMo"
+./run_install_lm.sh "/your/path/to/NeMo"
 ```
 
 ### Detailed Installation Steps for ESPnet and Related Tools
