@@ -194,4 +194,6 @@ nemo_experiments/
 
 *.nemo
 
-scripts/chime7/hyper_optim/text/
+scripts/chime7/text/
+scripts/chime7/boost_*
+
