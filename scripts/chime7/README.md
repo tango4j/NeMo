@@ -56,6 +56,7 @@ pip install optuna-fast-fanova gunicorn
 pip install optuna-dashboard
 pip install lhotse==1.14.0
 pip install --upgrade jiwer
+pip install cmake>=3.18
 ./run_install_lm.sh "/your/path/to/NeMo"
 ```
 
