@@ -243,13 +243,13 @@ class CutEnhancer(metaclass=ABCMeta):
                         break  # succesfully processed the batch
                     except torch.cuda.OutOfMemoryError as e:
                         # try again with more chunks
-                        logger.warning('OOM exception: %s', e)
+                        #logger.warning('OOM exception: %s', e)
                         num_chunks = num_chunks + 1
                         logging.warning(
                             f'Out of memory error while processing the batch. Trying again with {num_chunks} chunks.'
                         )
                     except Exception as e:
-                        logging.error(f'Error enhancing batch: {e}')
+                        logging.error(f'Error enhancing batch: {e}, using channel 0 instead of enhanced signal.')
                         num_errors += 1
                         # Keep the original signal (only load channel 0)
                         x_hat = batch.audio[0].cpu().numpy()
@@ -369,29 +369,29 @@ class FrontEnd_v1(CutEnhancer):
             a_enc = activity_time_to_timefreq(activity, win_length=self.fft_length, hop_length=self.hop_length)
 
             # processing is running in chunks
-            T = x_enc.size(-1)
-            chunk_size = int(math.ceil(T / num_chunks))
+            F = x_enc.size(-2)
+            chunk_size = int(math.ceil(F / num_chunks))
 
             # run dereverb and gss on chunks
             mask = []
             for n in range(num_chunks):
                 n_start = n * chunk_size
-                n_end = min(T, (n + 1) * chunk_size)
+                n_end = min(F, (n + 1) * chunk_size)
 
-                x_enc_n = x_enc[..., n_start:n_end]
+                x_enc_n = x_enc[..., n_start:n_end, :]
 
                 # dereverb
                 x_enc_n, _ = self.dereverb(input=x_enc_n)
-                x_enc[..., n_start:n_end] = x_enc_n
+                x_enc[..., n_start:n_end, :] = x_enc_n
 
                 # mask estimator
-                mask_n = self.gss(x_enc_n, a_enc[..., n_start:n_end])
+                mask_n = self.gss(x_enc_n, a_enc)
 
                 # append mask to the list
                 mask.append(mask_n)
 
             # concatenate estimated masks
-            mask = torch.concatenate(mask, dim=-1)
+            mask = torch.concatenate(mask, dim=-2)
 
             # drop context
             mask[..., :left_context_frames] = 0
@@ -406,26 +406,24 @@ class FrontEnd_v1(CutEnhancer):
             target_enc = []
             for n in range(num_chunks):
                 n_start = n * chunk_size
-                n_end = min(T, (n + 1) * chunk_size)
+                n_end = min(F, (n + 1) * chunk_size)
 
                 # multichannel filter
                 target_enc_n, _ = self.mc(
-                    input=x_enc[..., n_start:n_end],
-                    mask=mask_target[..., n_start:n_end],
-                    mask_undesired=mask_undesired[..., n_start:n_end],
+                    input=x_enc[..., n_start:n_end, :],
+                    mask=mask_target[..., n_start:n_end, :],
+                    mask_undesired=mask_undesired[..., n_start:n_end, :],
                 )
 
                 # append target to the list
                 target_enc.append(target_enc_n)
-
             # concatenate estimates
-            target_enc = torch.concatenate(target_enc, axis=-1)
+            target_enc = torch.concatenate(target_enc, axis=-2)
             target, _ = self.synthesis(input=target_enc)
 
         # drop context from the estimated audio
-        target = target[0].detach().cpu().numpy().squeeze()
+        target = target[0, 0].detach().cpu().numpy().squeeze()
         target = target[left_context:]
         if right_context > 0:
             target = target[:-right_context]
-
         return target
