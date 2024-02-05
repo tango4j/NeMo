@@ -16,7 +16,7 @@ subsets:
 
 num_workers: 16
 sample_rate: 16000
-batch_size: 8  # batch size for diarization and ASR
+batch_size: 1  # batch size for diarization and ASR
 verbose: True # enable additional logging
 output_root: ./nemo_experiments
 
