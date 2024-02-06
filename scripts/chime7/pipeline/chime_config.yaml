@@ -14,9 +14,14 @@ scenarios:
 subsets: 
 - dev
 
+stage: 0 # 0,1,2,3 --> diarization,GSS,ASR,scoring
+stop_stage: 100
+skip_stages:
 num_workers: 16
 sample_rate: 16000
-batch_size: 1  # batch size for diarization and ASR
+batch_size: 12  # batch size for diarization 8 is max value on A100 40GB
+asr_batch_size: 4 # batch size for asr
+max_utt_length: 20 #
 verbose: True # enable additional logging
 output_root: ./nemo_experiments
 
@@ -122,7 +127,7 @@ diarizer:
       sparse_search_volume: 25 # The higher the number, the more values will be examined with more time. 
       maj_vote_spk_count: False  # If True, take a majority vote on multiple p-values to estimate the number of speakers.
       clustering_scale_index: 2 # The index of scale to be used for clustering. 
-      sync_score_thres: 0.9 # Cascaed clustering threshold for deciding whether to proceed to the finer scale.
+      sync_score_thres: 0.9 # Cascaded clustering threshold for deciding whether to proceed to the finer scale.
       max_mc_ch_num: 5
       
        
@@ -130,7 +135,7 @@ diarizer:
     model_path: ${msdd_model_path} # .nemo local model path or pretrained model name for multiscale diarization decoder (MSDD)
     parameters:
       use_speaker_model_from_ckpt: True # If True, use speaker embedding model in checkpoint. If False, the provided speaker embedding model in config will be used.
-      infer_batch_size: ${batch_size} # Batch size for MSDD inference. 
+      infer_batch_size: ${batch_size} # Batch size for MSDD inference.
       sigmoid_threshold: [0.55] # Sigmoid threshold for generating binarized speaker labels. The smaller the more generous on detecting overlaps.
       seq_eval_mode: False # If True, use oracle number of speaker and evaluate F1 score for the given speaker sequences. Default is False.
       split_infer: True # If True, break the input audio clip to short sequences and calculate cluster average embeddings for inference.
@@ -153,8 +158,9 @@ diarizer:
       system_name: ${diar_config}
       use_var_weights: False
   
-
-gss:  
+# note these were tuned on a 40GB A100
+gss:
+  num_workers: ${num_workers}
   top_k_channels: 80  # select top_k percentage of best channels from audios [0,100]
   # Args similar to the original GSS implementaion
   # See https://github.com/desh2608/gss for parameter explanations
@@ -162,8 +168,8 @@ gss:
   context_duration: 15
   use_garbage_class: true
   min_segment_length: 0.0
-  max_segment_length: 30
-  max_batch_duration: 100
+  max_segment_length: 30 # reduce if you encounter OOM (may raise WER however)
+  max_batch_duration: 100 # not used right now
   max_batch_cuts: 1
   num_buckets: 4
   force_overwrite: false
@@ -179,7 +185,6 @@ gss:
   mc_filter_num_iterations: 5
   mc_filter_postfilter: "ban"
 
-
 asr:
   # Normalize audio to this dB level
   normalize_db: null  
@@ -194,7 +199,7 @@ asr:
 
   # General configs
   output_filename: null
-  batch_size: ${batch_size}  # use a smaller batch if beam size is large
+  batch_size: ${asr_batch_size}  # use a smaller batch if beam size is large
   num_workers: ${num_workers}
   append_pred: False  # Sets mode of work, if True it will add new field transcriptions.
   pred_name_postfix: null # If you need to use another model name, rather than standard one.
