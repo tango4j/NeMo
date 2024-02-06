@@ -7,11 +7,13 @@
 
 - [x] Convert two bash scripts (GSS, RNNT-ASR-BSD) to python based script.  
 
+- [x] Support dataset name "notsofar1" on top of the previous ones: "chime6", "dipco", "mixer6". + Added max. number of speakers
+
 - [ ] Add Whisper text-normalization (as in the original challenge implementation)
 
-- [ ] Add Ante's pre-dereverbration to NeMo Multichannel diarization.
+- [x] Add Ante's pre-dereverbration to NeMo Multichannel diarization.
 
-- [ ] Make inference script in (1) Class based structure (2) And make separate yaml file or dataConfig-class
+- [x] Make inference script in (1) Class based structure (2) And make separate yaml file or dataConfig-class
 
 - [x] Clean and organize environment setting again 
 
@@ -153,8 +155,9 @@ NEMO_ROOT=/path/to/NeMo
 CHECKPOINTS=/path/to/checkpoints
 TEMP_DIR=/temp/path/to/chime8_baseline_each1sess
 CHIME_DATA_ROOT=/path/to/chime7_official_cleaned
-SCENARIOS="[mixer6,chime6,dipco]"
-DIAR_CONFIG="chime8-baseline-mixer6-short1"
+SCENARIOS="[mixer6,chime6,dipco,notsofar1]"
+DIAR_CONFIG="chime8-baseline-allfour-short1"
+MAX_NUM_SPKS=8 # 4 or 8
 ###########################################################################
 cd $NEMO_ROOT
 export CUDA_VISIBLE_DEVICES="0"
@@ -179,6 +182,7 @@ export PYTHONPATH=$NEMO_ROOT:$PYTHONPATH
 
 python ${SCRIPT_NAME} --config-path="${CONFIG_PATH}" --config-name="$YAML_NAME" \
 diar_config=${DIAR_CONFIG} \
+max_num_spks=${MAX_NUM_SPKS} \
 chime_data_root=${CHIME_DATA_ROOT} \
 output_root=${TEMP_DIR} \
 scenarios=${SCENARIOS} \

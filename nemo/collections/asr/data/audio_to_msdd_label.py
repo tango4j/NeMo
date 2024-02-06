@@ -902,10 +902,7 @@ class _AudioMSDDInferDataset(Dataset):
         offset_index = max(int((offset / self.scale_dict[ms_seg_counts.shape[0]-1][1]) - global_offset_index), 0) 
         
         seq_length = ms_seg_counts[-1]
-        try:
-            ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
-        except:
-            import ipdb; ipdb.set_trace()
+        ms_emb_seq = self.emb_seq[uniq_id][offset_index:(offset_index+seq_length)]
         if self.mc_late_fusion:
             clus_label_index = self.clus_label_dict[uniq_id][offset_index:(offset_index+seq_length)]
         else:

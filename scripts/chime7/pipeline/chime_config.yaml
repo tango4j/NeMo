@@ -22,6 +22,7 @@ output_root: ./nemo_experiments
 
 diar_config: "chime8-baseline"  # alias of the diarization model
 diar_param: "v1"  # optional tag of the diarization model
+max_num_spks: 8  # maximum number of speakers in the dataset
 
 ########### Don't change ##################
 diar_base_dir: ${output_root}/diar_outputs
@@ -54,6 +55,17 @@ preprocess:
 
 
 diarizer:
+  dereverberation: 
+    toggle: True # True or False
+    block_length_sec: 40 # process one block at a time seconds at a time
+    block_overlap_sec: 2 # overlap between blocks, apply averaging
+    fft_length: 1024
+    hop_length: 256
+    dereverb: 
+      filter_length: 10
+      prediction_delay: 3
+      num_iterations: 10
+    use_dtype: torch.cfloat # About 10x faster than torch.cdouble
   use_saved_embeddings: True # True or False
   manifest_filepath: ${diar_base_dir}/diar_manifest.json
   out_dir: ${diar_base_dir}
@@ -103,7 +115,7 @@ diarizer:
   clustering:
     parameters:
       oracle_num_speakers: False # If True, use num of speakers value provided in manifest file.
-      max_num_speakers: 4 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
+      max_num_speakers: ${max_num_spks} # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       min_num_speakers: 2 # Max number of speakers for each recording. If an oracle number of speakers is passed, this value is ignored.
       enhanced_count_thres: 80 # If the number of segments is lower than this number, enhanced speaker counting is activated.
       max_rp_threshold: 0.06
@@ -254,5 +266,3 @@ eval:
   # If ignore_missing=True, it will ignore missing JSON for a particular scenario, in case you want to score e.g. only DiPCo. 
   # If False, missing the corresponding JSON for a particular scenario will raise an error.
   ignore_missing: True 
-
-

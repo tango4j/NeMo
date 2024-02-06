@@ -55,6 +55,5 @@ def main(cfg):
     logging.info("Running Diarization")
     run_diarization(cfg)
 
-
 if __name__ == "__main__":
     main()  # noqa pylint: disable=no-value-for-parameter

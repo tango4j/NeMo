@@ -126,6 +126,23 @@ class MSDD_module(NeuralModule, Exportable):
         weighting_scheme: str = 'conv_scale_weight',
         context_vector_type: str = 'cos_sim',
     ):
+        """
+        Initialize the MSDD module. 
+
+        Args:
+            num_spks (int): Max number of speakers that are processed by the model. In `MSDD_module`, `num_spks=2` for pairwise inference.
+            hidden_size (int): Number of hidden units in sequence models and intermediate layers.
+            num_lstm_layers (int): Number of the stacked LSTM layers.
+            dropout_rate (float): Dropout rate for linear layers, CNN and LSTM.
+            cnn_output_ch (int): Number of channels per each CNN layer.
+            emb_dim (int): Dimension of the embedding vectors.
+            scale_n (int): Number of scales in multi-scale
+            clamp_max (float): Maximum value for limiting the scale weight values.
+            conv_repeat (int): Number of CNN layers after the first CNN layer.
+            use_amsl_layer (bool): If True, the model uses the AMSL layer for the speaker label estimation.
+            weighting_scheme (str): Name of the methods for estimating the scale weights.
+            context_vector_type (str): If 'cos_sim', cosine similarity values are used for the input of the sequence models.
+        """
         super().__init__()
         self._speaker_model = None
         self._vad_model = None
@@ -137,6 +154,7 @@ class MSDD_module(NeuralModule, Exportable):
         if self.num_spks % self.unit_n_spks != 0:
             raise ValueError("The number of speakers must be divisible by unit_n_spks.")
         elif self.num_spks > self.unit_n_spks:
+            # `self.n_stream` is the number of streams for multi-stream processing.
             self.n_stream = self.num_spks // self.unit_n_spks
         
         self.scale_n: int = scale_n
@@ -463,8 +481,7 @@ class MSDD_module(NeuralModule, Exportable):
     @typecheck()
     def forward(self, ms_emb_seq, length, ms_avg_embs):
         if self.n_stream > 1:
-            split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
-            ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, split_tup, dim=3), dim=0)
+            ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, self.n_stream, dim=3), dim=0)
             ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
             length = length.repeat(self.n_stream)
             ms_avg_embs = ms_avg_embs_concat
@@ -473,16 +490,15 @@ class MSDD_module(NeuralModule, Exportable):
         preds, scale_weights = self.lstm_classifier(context_emb, scale_weights)
 
         if self.n_stream > 1:
-            preds_split_tup = (int(preds.shape[0]/self.n_stream),) * (self.n_stream - 1)
-            preds_reshaped = torch.cat(torch.tensor_split(preds, preds_split_tup, dim=0), dim=2)
-            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, preds_split_tup, dim=0), dim=3)
+            preds_reshaped = torch.cat(torch.tensor_split(preds, self.n_stream, dim=0), dim=2)
+            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, self.n_stream, dim=0), dim=3)
             preds, scale_weights = preds_reshaped, scale_weights_reshaped
         return preds, scale_weights
     
     def forward_context(self, ms_emb_seq, length, ms_avg_embs):
         if self.n_stream > 1:
-            seg_split_tup = (self.unit_n_spks,) * (self.n_stream - 1)
-            ms_avg_embs_concat = torch.cat(torch.tensor_split(ms_avg_embs, seg_split_tup, dim=3), dim=0)
+            split_ms_avg_embs = torch.tensor_split(ms_avg_embs, self.n_stream, dim=3)
+            ms_avg_embs_concat = torch.cat(split_ms_avg_embs, dim=0)
             ms_emb_seq = ms_emb_seq.repeat(self.n_stream, 1, 1, 1)  
             length = length.repeat(self.n_stream)
             ms_avg_embs = ms_avg_embs_concat
@@ -497,9 +513,8 @@ class MSDD_module(NeuralModule, Exportable):
         preds = nn.Sigmoid()(spk_preds)
 
         if self.n_stream > 1:
-            preds_split_tup = (int(preds.shape[0]/self.n_stream),) * (self.n_stream - 1)
-            preds_reshaped = torch.cat(torch.tensor_split(preds, preds_split_tup, dim=0), dim=2)
-            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, preds_split_tup, dim=0), dim=3)
+            preds_reshaped = torch.cat(torch.tensor_split(preds, self.n_stream, dim=0), dim=2)
+            scale_weights_reshaped = torch.cat(torch.tensor_split(scale_weights, self.n_stream, dim=0), dim=3)
             preds, scale_weights = preds_reshaped, scale_weights_reshaped
         return preds, scale_weights
 
