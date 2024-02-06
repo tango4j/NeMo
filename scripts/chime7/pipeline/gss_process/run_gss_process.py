@@ -34,7 +34,7 @@ from .mic_rank import get_gss_mic_ranks
 def convert_diar_results_to_falign(scenarios: list, diarization_dir: str, output_dir: str, subsets: list = ['dev']):
     # Assumption:
     # Output of diarization is organized in 3 subdirectories, with each subdirectory corresponding to one scenario (chime6, dipco, mixer6)
-    diar_json_dir = os.path.join(diarization_dir, "pred_jsons_T0.55")
+    diar_json_dir = os.path.join(diarization_dir, "pred_jsons_T")
 
 
     # assert len(scenario_dirs) == 3, f'Expected 3 subdirectories, found {len(scenario_dirs)}'
@@ -228,7 +228,7 @@ def run_gss_process(cfg):
                 cuts_per_recording=cuts_manifest,
                 cuts_per_segment=cuts_seg_manifest,
                 enhanced_dir=enhanced_dir,
-                num_workers=cfg.num_workers,
+                num_workers=cfg.gss.num_workers,
                 bss_iterations=cfg.gss.bss_iterations,
                 context_duration=cfg.gss.context_duration,
                 use_garbage_class=cfg.gss.use_garbage_class,
