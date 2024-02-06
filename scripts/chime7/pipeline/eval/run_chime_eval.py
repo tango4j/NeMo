@@ -512,10 +512,9 @@ def run_chime_evaluation(cfg):
         spk_wise_df = []
         sess_wise_df = []
         scenario_wise_df = []
-        scenarios = ["chime6", "dipco", "mixer6"]
+        org_scenarios = ["chime6", "dipco", "mixer6", "notsofar1"]
         Path(eval_cfg.output_folder).mkdir(exist_ok=True)
-        for indx, scenario in enumerate(scenarios):
-            # hyp_json = os.path.join(eval_cfg.hyp_folder, scenario + ".json")
+        for indx, scenario in enumerate(cfg.scenarios):
             hyp_json = glob.glob(os.path.join(eval_cfg.hyp_folder, scenario, "*.json",))
 
             if len(hyp_json) == 0 and bool(eval_cfg.ignore_missing):
@@ -530,9 +529,12 @@ def run_chime_evaluation(cfg):
                 os.path.join(eval_cfg.dasr_root, scenario, "transcriptions_scoring", eval_cfg.partition, "*.json",)
             )
             uem = os.path.join(eval_cfg.dasr_root, scenario, "uem", eval_cfg.partition, "all.uem")
-            assert len(reference_json) > 0, "Reference JSONS not found, is the path {} correct ?".format(
+            try:
+                assert len(reference_json) > 0, "Reference JSONS not found, is the path {} correct ?".format(
                 os.path.join(eval_cfg.dasr_root, scenario, "transcriptions_scoring", eval_cfg.partition, "*.json",)
             )
+            except:
+                import ipdb; ipdb.set_trace() 
             scenario_stats, all_sess_stats, all_spk_stats = score(
                 hyp_json,
                 reference_json,

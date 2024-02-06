@@ -455,7 +455,7 @@ def generate_cluster_labels(segment_ranges: List[str], cluster_labels: List[int]
     diar_hyp = merge_stamps(cont_lines)
     return diar_hyp, lines
                 
-def divide_and_conquer_clustering(ms_silsp_embs, cluster_labels_infer, unit_clus_len, base_scale_idx, sync_score_thres=0.75):
+def divide_and_conquer_clustering(ms_silsp_embs, cluster_labels_infer, unit_clus_len, max_num_speakers, base_scale_idx, sync_score_thres=0.75):
     """
     For long form audio files, perform divide and conquer clustering to get fine-grained speaker labels.
 
@@ -485,6 +485,7 @@ def divide_and_conquer_clustering(ms_silsp_embs, cluster_labels_infer, unit_clus
         speaker_clustering = SpeakerClustering(cuda=True)
         _cluster_labels = speaker_clustering.forward_embs(
             embs=sample_ms_emb_seq[vad_mask].mean(dim=1),
+            max_num_speakers=max_num_speakers,
             oracle_num_speakers=int(num_speakers),
             max_rp_threshold= 0.05,
             use_drop_and_recluster=False,
@@ -723,6 +724,7 @@ def perform_clustering_embs(
             cluster_base_labels = divide_and_conquer_clustering(embeddings, 
                                                                 cluster_labels_infer, 
                                                                 unit_clus_len=unit_clus_len, 
+                                                                max_num_speakers=int(clustering_params.max_num_speakers),
                                                                 base_scale_idx=base_scale_idx, 
                                                                 sync_score_thres=clustering_params.sync_score_thres)
             cluster_labels_infer = cluster_base_labels.cpu()

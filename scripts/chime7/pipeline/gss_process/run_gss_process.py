@@ -99,6 +99,8 @@ def prepare_nemo_manifests(data_dir: str, audio_type: str = 'flac'):
         scenario = 'dipco'
     elif 'mixer6' in data_dir:
         scenario = 'mixer6'
+    elif 'notsofar1' in data_dir:
+        scenario = 'notsofar1'
     else:
         raise ValueError(f'Unknown setup: {data_dir}')
 
@@ -219,7 +221,7 @@ def run_gss_process(cfg):
             logging.info("Stage 2: Trim cuts to supervisions (1 cut per supervision)")
             cuts_seg_manifest = str(exp_dir / f"cuts_per_segment.jsonl.gz")
             trim_to_supervisions(
-                cuts=cuts_manifest, output_cuts=cuts_seg_manifest, keep_overlapping=False,
+                cuts=cuts_manifest, output_cuts=cuts_seg_manifest, keep_overlapping=False, 
             )
 
             logging.info("Stage 3: Run GSS and prepare nemo manifests")

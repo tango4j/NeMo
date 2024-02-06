@@ -94,9 +94,7 @@ def cos_similarity_batch(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.ten
     res = torch.bmm(a_norm, b_norm.transpose(1, 2))
     return res
 
-def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, drop_length_thres, n_clusters, cuda, reclus_thres=0.85, method='spectral'):
-    max_aff = 1.0
-    
+def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, drop_length_thres, n_clusters, cuda, reclus_thres=0.85, method='spectral', max_aff = 1.0):
     if embs.shape[0] < drop_length_thres:
         print(f"Short form drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
         spectral_model = SpectralClustering(
@@ -1674,7 +1672,7 @@ class SpeakerClustering(torch.nn.Module):
         # Clip the estimated number of speakers to the range of [min_num_speakers, max_num_speakers]
         est_num_of_spk = torch.clamp(est_num_of_spk, min=min_num_speakers, max=max_num_speakers)
 
-        # n_clusters is number of speakers estimated from spectral clustering.
+        # `n_clusters` is number of speakers estimated from spectral clustering.
         if oracle_num_speakers > 0:
             n_clusters = int(oracle_num_speakers)
         else:

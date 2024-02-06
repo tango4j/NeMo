@@ -44,7 +44,7 @@ python <NeMo-Root>/scripts/chime7/manifests/prepare_nemo_manifest_rttm_ctm_for_i
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
-scenarios = ['chime6', 'dipco', 'mixer6']
+scenarios = ['chime6', 'dipco', 'mixer6', 'notsofar1']
 
 
 def get_rttm_info(rttm_filepath: str) -> Tuple[int, float, float]:
@@ -252,7 +252,7 @@ def parse_chime7_json_file(dataset: str, data: Dict, file_path: str, subset: str
         end_time (float): End time of the segment.
         audio_filename (str): Name of the audio file.
     """
-    if dataset in ['chime6', 'dipco']:
+    if dataset in ['chime6', 'dipco', 'notsofar1']:
         audio_filename = data['session_id']
     elif dataset in ['mixer6']:
         # drop json extension
@@ -287,8 +287,10 @@ def get_mc_audio_filepaths(multichannel_audio_files: str, dataset: str, dataset_
         # drop the absolute
         filepath_base, _ = os.path.splitext(mc_audio_file)
 
-        if dataset in ['chime6', 'dipco']:
+        if dataset in ['chime6', 'dipco']: 
             file_ext = '_U??.CH?.wav'
+        elif dataset in  ['notsofar1']:
+            file_ext = '_U??_CH?.wav'
         elif dataset in ['mixer6']:
             file_ext = '_CH??.wav'
 
@@ -354,7 +356,8 @@ def generate_annotations(
     total_data_stats = {}
 
     if subset == 'dev':
-        scenarios = ['chime6', 'dipco', 'mixer6']
+        # scenarios = ['chime6', 'dipco', 'mixer6']
+        scenarios = ['chime6', 'dipco', 'mixer6', 'notsofar1']
         # scenarios = ['mixer6']
     elif subset == 'eval':
         scenarios = ['chime6', 'dipco', 'mixer6']
