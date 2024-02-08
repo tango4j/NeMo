@@ -14,13 +14,13 @@ scenarios:
 subsets: 
 - dev
 
-stage: 0 # 0,1,2,3 --> diarization,GSS,ASR,scoring
+stage: 0 # [stage 0] diarization [stage 1] GSS [stage 2] ASR [stage 3] scoring
 stop_stage: 100
 skip_stages:
 num_workers: 16
 sample_rate: 16000
 batch_size: 12  # batch size for diarization 8 is max value on A100 40GB
-asr_batch_size: 4 # batch size for asr
+asr_batch_size: 16 # batch size for asr
 max_utt_length: 20 #
 verbose: True # enable additional logging
 output_root: ./nemo_experiments
@@ -158,12 +158,12 @@ diarizer:
       system_name: ${diar_config}
       use_var_weights: False
   
-# note these were tuned on a 40GB A100
+# Note these were tuned on a 40GB A100
+# Args similar to the original GSS implementaion
+# See https://github.com/desh2608/gss for parameter explanations
 gss:
   num_workers: ${num_workers}
   top_k_channels: 80  # select top_k percentage of best channels from audios [0,100]
-  # Args similar to the original GSS implementaion
-  # See https://github.com/desh2608/gss for parameter explanations
   bss_iterations: 5
   context_duration: 15
   use_garbage_class: true

@@ -122,8 +122,23 @@ Run the script to install the language model.
 
 # How to launch NeMo CHiME-8 Baseline
 
+## 1. Download models for CHiME-8 baseline system from Hugging Face
 
-## 1. Setup global varialbes (This is temporary, will be removed in the final format)
+Visit Hugging Face CHIME-DASR Repository and download the four model files.
+You need to agree on Hugging Face's terms and conditions to download the files.
+https://huggingface.co/chime-dasr/nemo_baseline_models
+
+
+Prepare the model files as followings:
+```
+VAD_MODEL_PATH=${CHECKPOINTS}/vad_model.nemo
+MSDD_MODEL_PATH=${CHECKPOINTS}/msdd_model.ckpt
+ASR_MODEL_PATH=${CHECKPOINTS}/asr_model.nemo
+LM_MODEL_PATH=${CHECKPOINTS}/lm_model.kenlm
+```
+
+
+## 2. Setup global varialbes (This is temporary, will be removed in the final format)
 
 Use the main inference script: `<NeMo Root>/scripts/chime7/pipeline/run_full_pipeline.py`
 
@@ -139,7 +154,7 @@ SCENARIOS="[mixer6,chime6,dipco]"
 DIAR_CONFIG="chime8-baseline-mixer6-short1"
 ```
 
-## 2. Launch CHiME-8 Baseline 
+## 3. Launch CHiME-8 Baseline 
 
 Before launch the following script, make sure to activate your Conda environment.
 ```bash
@@ -158,6 +173,7 @@ CHIME_DATA_ROOT=/path/to/chime7_official_cleaned
 SCENARIOS="[mixer6,chime6,dipco,notsofar1]"
 DIAR_CONFIG="chime8-baseline-allfour-short1"
 MAX_NUM_SPKS=8 # 4 or 8
+STAGE=0 # 
 ###########################################################################
 cd $NEMO_ROOT
 export CUDA_VISIBLE_DEVICES="0"
@@ -181,6 +197,7 @@ export PYTHONPATH=$SITE_PACKAGES/kenlm-0.2.0-py3.10-linux-x86_64.egg:$PYTHONPATH
 export PYTHONPATH=$NEMO_ROOT:$PYTHONPATH
 
 python ${SCRIPT_NAME} --config-path="${CONFIG_PATH}" --config-name="$YAML_NAME" \
+stage=${STAGE} \
 diar_config=${DIAR_CONFIG} \
 max_num_spks=${MAX_NUM_SPKS} \
 chime_data_root=${CHIME_DATA_ROOT} \

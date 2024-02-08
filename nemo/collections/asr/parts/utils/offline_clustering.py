@@ -37,7 +37,6 @@ import torch
 from torch.linalg import eigh, eigvalsh
 import logging
 from sklearn.cluster import AgglomerativeClustering as AHC
-
 import importlib
 
 def ts_vad_post_processing(ts_vad_binary_vec, vad_params, hop_length):
@@ -46,7 +45,6 @@ def ts_vad_post_processing(ts_vad_binary_vec, vad_params, hop_length):
     speech_segments = vad_utils.binarization(ts_vad_binary_frames, vad_params)
     speech_segments = vad_utils.filtering(speech_segments, vad_params)
     return speech_segments
-
 
 def cos_similarity(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.tensor(3.5e-4)) -> torch.Tensor:
     """
@@ -94,9 +92,51 @@ def cos_similarity_batch(emb_a: torch.Tensor, emb_b: torch.Tensor, eps=torch.ten
     res = torch.bmm(a_norm, b_norm.transpose(1, 2))
     return res
 
-def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, drop_length_thres, n_clusters, cuda, reclus_thres=0.85, method='spectral', max_aff = 1.0):
+def drop_and_recluster(
+    embs: torch.Tensor,
+    affinity_mat: torch.Tensor,
+    min_num_speakers: int,
+    max_num_speakers: int,
+    drop_length_thres: int,
+    n_clusters: int,
+    cuda: bool,
+    reclus_thres: float = 0.85,
+    method: str = 'spectral',
+    max_aff: float = 1.0,
+) -> Tuple[torch.Tensor, int]:
+    """
+    Drop the number of speakers and re-cluster the embeddings if the max affinity is too high.
+
+    Args:
+        embs (Tensor):
+            Matrix containing speaker representation vectors. (N x embedding_dim)
+        affinity_mat (Tensor):
+            Matrix containing cosine similarity values among embedding vectors (N x N)
+        min_num_speakers (int):
+            Minimum number of speakers for estimating number of speakers.
+        max_num_speakers (int):
+            Maximum number of speakers for estimating number of speakers.
+        drop_length_thres (int):
+            The threshold for the length of the embeddings.
+        n_clusters (int):
+            The estimated number of speakers.
+        cuda (bool):
+            Boolean variable to check whether the current device is CUDA or not.
+        reclus_thres (float):
+            The threshold for re-clustering.
+        method (str):
+            The method that is used for re-clustering. The default method is 'spectral'.
+        max_aff (float):
+            The maximum affinity value.
+
+    Returns:
+        Y (Tensor):
+            The assigned cluster labels from the re-clustering.
+        n_clusters (int):
+            The estimated number of speakers.
+    """
     if embs.shape[0] < drop_length_thres:
-        print(f"Short form drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
+        logging.info(f"[Speaker Counting] Short form drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
         spectral_model = SpectralClustering(
             n_clusters=n_clusters, n_random_trials=30, cuda=cuda, device=embs.device
         )
@@ -105,7 +145,7 @@ def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, d
     else:
         running_num_of_spks = max_num_speakers 
         # Run re-clustering if the max affinity is too high
-        print(f"Long form drop_and_cluster: argument - Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
+        logging.info(f"[Speaker Counting] Long form drop_and_cluster: Detected n_clusters: {n_clusters} embs.shape: {embs.shape} drop_length_thres: {drop_length_thres}")
         while max_aff > reclus_thres and running_num_of_spks >= min_num_speakers and embs.shape[0] >= drop_length_thres:
             if method == 'spectral':
                 spectral_model = SpectralClustering(
@@ -135,13 +175,12 @@ def drop_and_recluster(embs, affinity_mat, min_num_speakers, max_num_speakers, d
             spk_aff_org_flat = spk_aff_org.flatten()
             
             non_diag_spk_aff = spk_aff_org_flat[spk_aff_org_flat > 0.0]
-            sorted_aff, sorted_idx = non_diag_spk_aff.flatten().sort()
+            sorted_aff, _ = non_diag_spk_aff.flatten().sort()
             max_aff = sorted_aff[-1].item()
-            print(f"sorted aff: {sorted_aff}")
-            print(f"Max affinity: {max_aff:.4f}, reclus_thres: {reclus_thres},  running_num_of_spks: {torch.max(Y)+1}")
+            logging.info(f"[Speaker Counting] max affinity: {max_aff:.4f},\n[Speaker Counting] reclus_thres: {reclus_thres:.3f}\n[Speaker Counting] running_num_of_spks: {torch.max(Y)+1}\n[Speaker Counting] sorted aff: {sorted_aff}")
             running_num_of_spks -= 1
         n_clusters = Y.cpu().numpy().max() + 1
-        print(f"Final n_clusters: {n_clusters}")
+        logging.info(f"[Speaker Counting] Final n_clusters: {n_clusters}")
         return Y, n_clusters
 
 def ScalerMinMax(X: torch.Tensor) -> torch.Tensor:
@@ -430,8 +469,6 @@ def getAffinityGraphMat(affinity_mat_raw: torch.Tensor, p_value: int) -> torch.T
     Calculate a binarized graph matrix and
     symmetrize the binarized graph matrix.
     """
-    # X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value)
-    # X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value, mask_method='drop')
     X = affinity_mat_raw if p_value <= 0 else getKneighborsConnections(affinity_mat_raw, p_value, mask_method='sigmoid')
     X = X.float()
     symm_affinity_mat = 0.5 * (X + X.T)
@@ -1253,8 +1290,6 @@ class NMESC:
             est_num_of_spk = torch.mode(est_num_of_spk_list)[0]
         else:
             est_num_of_spk = est_spk_n_dict[rp_p_value.item()]
-        # if not limit_lambda_gap:
-        #     logging.info(f"List of estimated number of speakers: {est_num_of_spk_list}")
         return est_num_of_spk, p_hat_value
 
     def subsampleAffinityMat(self, nme_mat_size: int) -> torch.Tensor:

@@ -24,6 +24,7 @@ from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from functools import partial
 from functools import partial
+import numpy as np
 
 def run_stage(stage_num, start_stage=-1, stop_stage=np.inf, skip_stages=None):
     """Simple helper function to avoid boilerplate code for stages"""
@@ -53,7 +54,6 @@ def main(cfg):
     cfg = DictConfig(OmegaConf.to_container(cfg, resolve=True))
     # split manifests here by session
     # scenario loop should be here
-
     if run_stage_flag(0):
         logging.info("Running Diarization")
         run_diarization(cfg)
