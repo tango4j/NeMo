@@ -1011,7 +1011,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         feature_count_range = target_timestamps[:, 1] - target_timestamps[:, 0]
         
         # Pre-compute feature indices for faster assigning:
-        feature_frame_length_range, feature_frame_interval_range= self.get_feat_range_matirx(max_feat_len=processed_signal.shape[2], 
+        feature_frame_length_range, feature_frame_interval_range= self.get_feat_range_matrix(max_feat_len=processed_signal.shape[2], 
                                                                                              feature_count_range=feature_count_range, 
                                                                                              target_timestamps=target_timestamps, 
                                                                                              device=processed_signal.device)
@@ -1118,7 +1118,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
             vad_probs_steps = None 
         return embs, pools, vad_probs_steps, vad_prob_segments
     
-    def get_feat_range_matirx(self, max_feat_len, feature_count_range, target_timestamps, device):
+    def get_feat_range_matrix(self, max_feat_len, feature_count_range, target_timestamps, device):
         """ 
         """
         feat_index_range = torch.arange(0, max_feat_len).to(device) 
@@ -1131,7 +1131,7 @@ class EncDecDiarLabelModel(ModelPT, ExportableEncDecModel):
         max_seq_len = torch.min(torch.tensor([ms_seg_timestamps.shape[2], max_seq_len]))
         target_timestamps = ms_seg_timestamps[0, -1].to(torch.int64)
         feature_count_range = target_timestamps[:, 1] - target_timestamps[:, 0]
-        _, ffir = self.get_feat_range_matirx(max_feat_len, feature_count_range, target_timestamps, device=ms_seg_timestamps.device)
+        _, ffir = self.get_feat_range_matrix(max_feat_len, feature_count_range, target_timestamps, device=ms_seg_timestamps.device)
         vad_probs_steps = vad_probs_frame[:, ffir].reshape(vad_probs_frame.shape[0], max_seq_len, -1).mean(dim=2)
         return vad_probs_steps
 

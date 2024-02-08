@@ -18,7 +18,6 @@ import pathlib
 from abc import ABCMeta, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-
 import numpy as np
 import soundfile as sf
 import torch
@@ -28,6 +27,7 @@ from gss.utils.data_utils import GssDataset, create_sampler
 from lhotse import CutSet, Recording, RecordingSet, SupervisionSegment, SupervisionSet
 from lhotse.utils import add_durations, compute_num_samples
 from torch.utils.data import DataLoader
+import decimal
 
 from nemo.collections.asr.modules.audio_modules import MaskBasedBeamformer, MaskBasedDereverbWPE, MaskEstimatorGSS
 from nemo.collections.asr.modules.audio_preprocessing import AudioToSpectrogram, SpectrogramToAudio
@@ -84,6 +84,14 @@ def activity_time_to_timefreq_stft(a, stft):
     A = torch.mean(A, axis=-2) > 0.5
     return A
 
+
+def get_int_divisors(n):
+    divs = [1]
+    for i in range(2,int(math.sqrt(n))+1):
+        if n%i == 0:
+            divs.extend([i,n/i])
+    divs.extend([int(n)])
+    return sorted([int(x) for x in list(set(divs))])
 
 def save_worker(exp_dir, orig_cuts, x_hat, recording_id, speaker, sample_rate, force_overwrite):
     """Save all cuts from orig_cuts into their respective files.
@@ -206,7 +214,7 @@ class CutEnhancer(metaclass=ABCMeta):
                 batch = SimpleNamespace(**batch)
 
                 logging.info(
-                    f'Processing batch {batch_idx+1} {batch.recording_id, batch.speaker}: '
+                    f'Processing batch {batch_idx + 1} {batch.recording_id, batch.speaker}: '
                     f'{len(batch.orig_cuts)} segments = {batch.duration}s (total: {total_processed} segments)'
                 )
                 total_processed += len(batch.orig_cuts)
@@ -219,45 +227,58 @@ class CutEnhancer(metaclass=ABCMeta):
                     for cut in batch.orig_cuts:
                         save_path = pathlib.Path(
                             output_file_name(
-                                recording_id=batch.recording_id, speaker=batch.speaker, start=cut.start, end=cut.end
+                                recording_id=batch.recording_id,
+                                speaker=batch.speaker, start=cut.start,
+                                end=cut.end
                             )
                         )
                         file_exists.append((out_dir / save_path).exists())
 
                     if all(file_exists):
-                        logging.info("All files already exist. Skipping this batch.")
+                        logging.info(
+                            "All files already exist. Skipping this batch.")
                         continue
 
-                num_chunks = 1  # TODO
+                num_chunks_indx = 0
+                num_chunks = get_int_divisors(self.fft_length // 2 + 1)
+
                 # If hitting OOM, split the batch into smaller chunks
+                # chunks are integer divisors here, makes it faster
                 while True:
-                    try:
-                        x_hat = self.enhance_batch(
-                            batch.audio,
-                            batch.activity,
-                            batch.speaker_idx,
-                            num_chunks=num_chunks,
-                            left_context=batch.left_context,
-                            right_context=batch.right_context,
-                        )
-                        break  # succesfully processed the batch
-                    except torch.cuda.OutOfMemoryError as e:
-                        # try again with more chunks
-                        logger.warning('OOM exception: %s', e)
-                        num_chunks = num_chunks + 1
-                        logging.warning(
-                            f'Out of memory error while processing the batch. Trying again with {num_chunks} chunks.'
-                        )
-                    except Exception as e:
-                        logging.error(f'Error enhancing batch: {e}')
+                    if num_chunks_indx >= len(num_chunks):
+                        logging.error(
+                            f'Please reduce "max_segment_length" ! '
+                            f'Error enhancing batch OOM error.\nTotal audio length {batch.duration}, '
+                            f'recording id {batch.recording_id}, speaker {batch.speaker}, '
+                            f'start time {cut.start} s, end time {cut.end} s.\n.'
+                            f'Maximum number of chunks reached {num_chunks[-1]}.\n'
+                            f'Using channel 0 instead of enhanced signal.')
                         num_errors += 1
-                        # Keep the original signal (only load channel 0)
+                        x_hat = batch.audio[0].cpu().numpy()
+                        break
+                    try:
+                        x_hat = self.enhance_batch(batch.audio, batch.activity,
+                                                   batch.speaker_idx,
+                                                   num_chunks=num_chunks[
+                                                       num_chunks_indx],
+                                                   left_context=batch.left_context,
+                                                   right_context=batch.right_context)
+                        break  # succesfully processed the batch
+                    except (
+                            torch.cuda.OutOfMemoryError,
+                            decimal.InvalidOperation) as e:
+                        # try again with more chunks
+                        num_chunks_indx += 1
+
+                    except Exception as e:
+                        logging.error(
+                            f'Error enhancing batch: {e}, using channel 0 instead of enhanced signal.')
+                        num_errors += 1
                         x_hat = batch.audio[0].cpu().numpy()
                         break
 
                 # Save the enhanced cut to disk
-                batch_save = executor.submit(
-                    save_worker,
+                batch_save = executor.submit(save_worker,
                     exp_dir,
                     batch.orig_cuts,
                     x_hat,
@@ -267,6 +288,7 @@ class CutEnhancer(metaclass=ABCMeta):
                     force_overwrite,
                 )
                 futures.append(batch_save)
+
 
         # Prepare output
         out_recordings = []
@@ -281,7 +303,11 @@ class CutEnhancer(metaclass=ABCMeta):
         return num_errors, CutSet.from_manifests(recordings=out_recordings, supervisions=out_supervisions)
 
     @abstractmethod
-    def enhance_batch(self, mic, activity, speaker_id, num_chunks=1, left_context=0, right_context=0) -> np.ndarray:
+    def enhance_batch(self, mic, activity,
+                      speaker_id,
+                      num_chunks=1,
+                      left_context=0,
+                      right_context=0) -> np.ndarray:
         """Enhance a batch of cuts
 
         This method should be implemented by the child class.
@@ -340,7 +366,8 @@ class FrontEnd_v1(CutEnhancer):
             postmask_min_db=mc_postmask_min_db,
         ).cuda()
 
-    def enhance_batch(self, audio, activity, speaker_id, num_chunks=1, left_context=0, right_context=0) -> np.ndarray:
+    def enhance_batch(self, audio, activity, speaker_id, num_chunks=1,
+                      left_context=0, right_context=0) -> np.ndarray:
         """Enhance batch, as implemented in GSS package
 
         Args:
@@ -363,35 +390,35 @@ class FrontEnd_v1(CutEnhancer):
         audio = audio.unsqueeze(0)
         activity = activity.unsqueeze(0)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             # Analysis
             x_enc, _ = self.analysis(input=audio)
             a_enc = activity_time_to_timefreq(activity, win_length=self.fft_length, hop_length=self.hop_length)
 
             # processing is running in chunks
-            T = x_enc.size(-1)
-            chunk_size = int(math.ceil(T / num_chunks))
+            F = x_enc.size(-2)
+            chunk_size = int(math.ceil(F / num_chunks))
 
             # run dereverb and gss on chunks
             mask = []
             for n in range(num_chunks):
                 n_start = n * chunk_size
-                n_end = min(T, (n + 1) * chunk_size)
+                n_end = min(F, (n + 1) * chunk_size)
 
-                x_enc_n = x_enc[..., n_start:n_end]
+                x_enc_n = x_enc[..., n_start:n_end, :]
 
                 # dereverb
                 x_enc_n, _ = self.dereverb(input=x_enc_n)
-                x_enc[..., n_start:n_end] = x_enc_n
+                x_enc[..., n_start:n_end, :] = x_enc_n
 
                 # mask estimator
-                mask_n = self.gss(x_enc_n, a_enc[..., n_start:n_end])
+                mask_n = self.gss(x_enc_n, a_enc)
 
                 # append mask to the list
                 mask.append(mask_n)
 
             # concatenate estimated masks
-            mask = torch.concatenate(mask, dim=-1)
+            mask = torch.concatenate(mask, dim=-2)
 
             # drop context
             mask[..., :left_context_frames] = 0
@@ -406,26 +433,24 @@ class FrontEnd_v1(CutEnhancer):
             target_enc = []
             for n in range(num_chunks):
                 n_start = n * chunk_size
-                n_end = min(T, (n + 1) * chunk_size)
+                n_end = min(F, (n + 1) * chunk_size)
 
                 # multichannel filter
                 target_enc_n, _ = self.mc(
-                    input=x_enc[..., n_start:n_end],
-                    mask=mask_target[..., n_start:n_end],
-                    mask_undesired=mask_undesired[..., n_start:n_end],
+                    input=x_enc[..., n_start:n_end, :],
+                    mask=mask_target[..., n_start:n_end, :],
+                    mask_undesired=mask_undesired[..., n_start:n_end, :],
                 )
 
                 # append target to the list
                 target_enc.append(target_enc_n)
-
             # concatenate estimates
-            target_enc = torch.concatenate(target_enc, axis=-1)
+            target_enc = torch.concatenate(target_enc, axis=-2)
             target, _ = self.synthesis(input=target_enc)
 
         # drop context from the estimated audio
-        target = target[0].detach().cpu().numpy().squeeze()
+        target = target[0, 0].detach().cpu().numpy().squeeze()
         target = target[left_context:]
         if right_context > 0:
             target = target[:-right_context]
-
         return target

@@ -969,7 +969,7 @@ class MaskEstimatorGSS(NeuralModule):
 
         return gamma
 
-
+#FIXME DUPLICATED
 class MaskEstimatorGSS(torch.nn.Module):
     """Estimate masks using guided source separation with a complex
     angular Central Gaussian Mixture Model (cACGMM).
@@ -1668,6 +1668,7 @@ class WPEFilter(NeuralModule):
             Q = Q + torch.diag_embed(diag_reg.unsqueeze(-1) * torch.ones(Q.shape[-1], device=Q.device))
 
         # Solve for the filter
+        fail = False
         try:
             # Use Cholesky decomposition
             QL = torch.linalg.cholesky(Q)
@@ -1675,9 +1676,10 @@ class WPEFilter(NeuralModule):
             G = torch.linalg.solve_triangular(QL, R, upper=False)
             G = torch.linalg.solve_triangular(QL.conj().transpose(-2, -1), G, upper=True)
         except torch.linalg.LinAlgError as e:
-            # Fallback to linsolve
-            logging.warning('Cholesky failed with exception: %s', e)
-            logging.info('Fallback to linsolve')
+            fail = True
+
+        if fail:
+            logging.warning('Cholesky failed, fallback to linsolve')
             G = torch.linalg.solve(Q, R)
 
         # Reshape to desired representation: (B, F, input channels, filter_length, output channels)

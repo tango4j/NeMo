@@ -111,7 +111,7 @@ def channel_cluster(
     oracle_num_channels: int = -1,
     max_rp_threshold: float = 0.5,
     max_num_channels: int = 7,
-    min_num_channels: int = 1,
+    min_num_channels: int = 3,
     sparse_search: bool = True,
     sparse_search_volume: int = 30,
     fixed_thres: float = -1.0,
@@ -119,7 +119,7 @@ def channel_cluster(
     kmeans_random_trials: int = 10,
     cuda: bool = True,
 ) -> torch.LongTensor:
-    
+
     nmesc = NMESC(
         mat,
         max_num_speakers=max_num_channels,
