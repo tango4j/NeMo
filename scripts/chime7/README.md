@@ -1,35 +1,5 @@
 
-### TODO: Administrative Section
-
-- [x] Clone internal NVIDIA NeMo Gitlab repo branch to `github.com/tango4j/NeMo/tree/dev/chime7`.  
-
-- [x] Push NeMo manifest creation script to `https://github.com/tango4j/NeMo/tree/dev/chime7/scripts/chime7`.  
-
-- [x] Convert two bash scripts (GSS, RNNT-ASR-BSD) to python based script.  
-
-- [x] Support dataset name "notsofar1" on top of the previous ones: "chime6", "dipco", "mixer6". + Added max. number of speakers
-
-- [ ] Add Whisper text-normalization (as in the original challenge implementation)
-
-- [x] Add Ante's pre-dereverbration to NeMo Multichannel diarization.
-
-- [x] Make inference script in (1) Class based structure (2) And make separate yaml file or dataConfig-class
-
-- [x] Clean and organize environment setting again 
-
-- [ ] Setup and check the training script of NeMo multichannel diarization
-
-- [ ] Setup Optuna script and re-optimize including the new dataset
-
-- [ ] Plug-in 3rd party ASR (Whisper-v3, wavLM) and report the dev/eval-set performance.
-
-# CHiME-8 DASR Baseline Environment Setup
-
-## SubTracks
-
-### SubTrack-1
-### SubTrack-2
-
+# CHiME-8 DASR Baseline System Setup and Launch Guide
 
 ## Environment Setup
 
@@ -42,7 +12,7 @@ This baseline package is based on CUDA 11.8 version. Make sure to install the ri
 - Ensure that you have `git`, `pip`, and `bash` installed on your system.
 - It's assumed that you have CUDA 11.x compatible hardware and drivers installed for `cupy-cuda11x` to work properly.
 
-## TLDR; 
+## Package Installation
 
 This environment is based on the assumption that you installed the latest `NeMo` on your conda environment named `chime8_baseline`
 
@@ -117,19 +87,39 @@ pip install --upgrade jiwer
 Run the script to install the language model.
 
 ```bash
-./hyper_optim/ngc_install_lm.sh
+./run_install_lm.sh "/your/path/to/NeMo"
 ```
 
-# How to launch NeMo CHiME-8 Baseline
+# A Step-by-Step Guide for launching NeMo CHiME-8 Baseline
+
+## 0. Data Preparation
+
+Please find the data preparation scripts at chime-utils repository.   
+https://github.com/chimechallenge/chime-utils
+
+You will provide a folder containing datasets and annotations as follows.
+```
+CHIME_DATA_ROOT=/path/to/chime8_official_cleaned
+```
+
+After you finish the dataset preparation, the following needes to be placed in the directory `chime8_official_cleaned`.
+```
+chime8_official_cleaned/
+├── chime6/
+├── dipco/
+├── mixer6/
+└── notsofar1/
+```
+
 
 ## 1. Download models for CHiME-8 baseline system from Hugging Face
 
-Visit Hugging Face CHIME-DASR Repository and download the four model files.
-You need to agree on Hugging Face's terms and conditions to download the files.
+Visit Hugging Face CHIME-DASR Repository and download the four model files.   
+You need to agree on Hugging Face's terms and conditions to download the files.  
 https://huggingface.co/chime-dasr/nemo_baseline_models
 
 
-Prepare the model files as followings:
+Prepare the four model files as followings:
 ```
 VAD_MODEL_PATH=${CHECKPOINTS}/vad_model.nemo
 MSDD_MODEL_PATH=${CHECKPOINTS}/msdd_model.ckpt
@@ -149,7 +139,7 @@ Make sure to setup your CHIME8 Data path, temporary directory with write permiss
 NEMO_ROOT="/path/to/NeMo"
 CHECKPOINTS="/path/to/checkpoints"
 TEMP_DIR="/temp/path/to/chime8_baseline_each1sess"
-CHIME_DATA_ROOT="/path/to/chime7_official_cleaned"
+CHIME_DATA_ROOT="/path/to/chime8_official_cleaned"
 SCENARIOS="[mixer6,chime6,dipco]"
 DIAR_CONFIG="chime8-baseline-mixer6-short1"
 ```
@@ -166,22 +156,22 @@ Launch the following script after plugging in all the varialbes needed.
 ```bash
 ###########################################################################
 ### YOUR CUSTOMIZED CONFIGURATIONS HERE ###################################
-NEMO_ROOT=/path/to/NeMo
+NEMO_ROOT=/path/to/NeMo # Cloned NeMo folder 
 CHECKPOINTS=/path/to/checkpoints
 TEMP_DIR=/temp/path/to/chime8_baseline_each1sess
-CHIME_DATA_ROOT=/path/to/chime7_official_cleaned
+CHIME_DATA_ROOT=/path/to/chime8_official_cleaned
 SCENARIOS="[mixer6,chime6,dipco,notsofar1]"
 DIAR_CONFIG="chime8-baseline-allfour-short1"
 MAX_NUM_SPKS=8 # 4 or 8
-STAGE=0 # 
+STAGE=0 # [stage 0] diarization [stage 1] GSS [stage 2] ASR [stage 3] scoring
 ###########################################################################
 cd $NEMO_ROOT
 export CUDA_VISIBLE_DEVICES="0"
 
-SCRIPT_NAME=${NEMO_ROOT}/scripts/chime7/pipeline/run_full_pipeline.py
+SCRIPT_NAME=${NEMO_ROOT}/scripts/chime8/pipeline/run_full_pipeline.py
 python -c "import kenlm; print('kenlm imported successfully')" || exit 1
 
-CONFIG_PATH=${NEMO_ROOT}/scripts/chime7/pipeline
+CONFIG_PATH=${NEMO_ROOT}/scripts/chime8/pipeline
 YAML_NAME="chime_config_t385.yaml"
 
 VAD_MODEL_PATH=${CHECKPOINTS}/vad_model.nemo
