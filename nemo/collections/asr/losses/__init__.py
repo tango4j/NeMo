@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from nemo.collections.asr.losses.angularloss import AngularSoftmaxLoss
+from nemo.collections.asr.losses.affinity_loss import AffinityLoss
 from nemo.collections.asr.losses.audio_losses import SDRLoss
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.losses.lattice_losses import LatticeLoss

@@ -13,41 +13,30 @@
 # limitations under the License.
 
 import copy
-import json
-import sox
-import os
 import pickle as pkl
-import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from statistics import mode
 from typing import Any, Dict, List, Optional, Tuple, Union
 from operator import attrgetter
 
-import numpy as np
 import time
 import torch
 from torch import nn
 import torch.nn.functional as F
 from hydra.utils import instantiate
 from omegaconf import DictConfig, open_dict
-from pyannote.core import Annotation
-from pyannote.metrics.diarization import DiarizationErrorRate
-from pytorch_lightning import LightningModule, Trainer
+from pytorch_lightning import Trainer
 from pytorch_lightning.utilities import rank_zero_only
-from tqdm import tqdm
 import torch.nn.functional as F
-from omegaconf import OmegaConf
 
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 
 from nemo.collections.asr.data.audio_to_msdd_label import AudioToSpeechMSDDTrainDataset
-from nemo.collections.asr.data.audio_to_msdd_mock_label import get_ms_seg_timestamps, generate_mock_embs
 from nemo.collections.asr.data.audio_to_msdd_mock_label import AudioToSpeechMSDDTrainDataset as AudioToSpeechMSDDTrainMockEmbDataset
 from nemo.collections.asr.models.multi_classification_models import EncDecMultiClassificationModel
 from nemo.collections.asr.metrics.der import score_labels
 from nemo.collections.asr.metrics.multi_binary_acc import MultiBinaryAccuracy
-from nemo.collections.asr.models import ClusteringDiarizer
 from nemo.collections.asr.models.asr_model import ExportableEncDecModel
 from nemo.collections.asr.models.clustering_diarizer import (
     _MODEL_CONFIG_YAML,
@@ -56,30 +45,13 @@ from nemo.collections.asr.models.clustering_diarizer import (
 )
 
 
-from nemo.collections.asr.models.configs.diarizer_config import NeuralDiarizerInferenceConfig
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
 from nemo.collections.asr.parts.utils.offline_clustering import (
-    get_argmin_mat_large,
     cos_similarity_batch,
-    SpeakerClustering,
 )
 
-from nemo.collections.asr.parts.utils.speaker_utils import (
-    audio_rttm_map,
-    get_top_k_for_each_row,
-    get_uniq_id_list_from_manifest,
-    get_uniqname_from_filepath,
-    parse_scale_configs,
-    labels_to_pyannote_object,
-    make_rttm_with_overlap,
-    rttm_to_labels,
-    get_selected_channel_embs,
-)
-from nemo.collections.asr.parts.utils.manifest_utils import (
-read_manifest,
-write_manifest,
-)
+from nemo.collections.asr.parts.utils.speaker_utils import parse_scale_configs
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types import AudioSignal, LengthsType, NeuralType
@@ -96,7 +68,6 @@ except ImportError:
         yield
 
 
-# __all__ = ['EncDecDiarLabelModel', 'ClusterEmbedding', 'NeuralDiarizer']
 __all__ = ['EncDecDiarLabelModel']
 
 from nemo.core.classes import Loss, Typing, typecheck
@@ -153,9 +124,8 @@ class AffinityLoss(Loss, Typing):
         """
         return {"loss": NeuralType(elements_type=LossType())}
 
-    def __init__(self, reduction='sum', gamma=0.0, negative_margin=0.5, positive_margin=0.05):
+    def __init__(self, gamma=0.0, negative_margin=0.5, positive_margin=0.05):
         super().__init__()
-        self.reduction = reduction
         self.gamma = gamma # weights for loss values of [different, same] speaker segments
         self.negative_margin = negative_margin
         self.positive_margin = positive_margin
@@ -182,8 +152,7 @@ class AffinityLoss(Loss, Typing):
         elem_affinity_loss = torch.abs(gt_affinity_margin - batch_affinity_mat_margin)
         positive_samples = gt_affinity * elem_affinity_loss
         negative_samples = (1-gt_affinity) * elem_affinity_loss
-        # affinity_loss = (1-self.gamma) * positive_samples.sum() + self.gamma * negative_samples.sum()
-        affinity_loss = (1-self.gamma) * positive_samples.sum() 
+        affinity_loss = (1-self.gamma) * positive_samples.sum() + self.gamma * negative_samples.sum()
         return affinity_loss
 
 
@@ -349,18 +318,14 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             self._init_speaker_model()
             self.add_speaker_model_config(cfg)
             self.loss = instantiate(self.cfg_e2e_diarizer_model.loss)
-            # self.global_loss = instantiate(self.cfg_e2e_diarizer_model.global_loss)
-            self.affinity_loss = AffinityLoss()
-            # self.alpha = self.cfg_e2e_diarizer_model.alpha
+            self.affinity_loss = instantiate(self.cfg_e2e_diarizer_model.affinity_loss) 
             self.power_p_aff = self.cfg_e2e_diarizer_model.get('power_p_aff', 3)
             self.thres_aff = self.cfg_e2e_diarizer_model.get('thres_aff', 0.25)
             self.mc_audio_normalize = self.cfg_e2e_diarizer_model.get('mc_audio_normalize', True)
             self.power_p = self.cfg_e2e_diarizer_model.get('power_p', 2)
             self.mix_count = self.cfg_e2e_diarizer_model.get('mix_count', 3)
-            # self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', False)
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         else:
-            # self.sortformer_diarizer._speaker_model = EncDecSpeakerLabelModel.from_config_dict(cfg.speaker_model_cfg)
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         self.alpha = self.cfg_e2e_diarizer_model.alpha
         self.affinity_weighting = self.cfg_e2e_diarizer_model.get('affinity_weighting', True)
@@ -433,8 +398,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
     def setup_optimizer_param_groups(self):
         """
         Override function in ModelPT to allow for different parameter groups for the speaker model and the MSDD model.
-
-
         """
         if not hasattr(self, "parameters"):
             self._optimizer_param_groups = None
@@ -578,7 +541,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             global_rank=global_rank,
             encoder_infer_mode=self.encoder_infer_mode,
         )
-        print(f"AAB: Dataloader dataset is created, starting torch.utils.data.Dataloader step B: {time.time() - time_flag}")
+        logging.info(f"AAB: Dataloader dataset is created, starting torch.utils.data.Dataloader step B: {time.time() - time_flag}")
 
         self.data_collection = dataset.collection
         self.collate_ds = dataset
@@ -910,7 +873,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             )
             # Step 2: Clustering for initialization
             # Compute the cosine similarity between the input and the cluster average embeddings
-            batch_cos_sim = get_batch_cosine_sim(ms_emb_seq)
             emb_seq = ms_emb_seq.mean(dim=2)
         # Step 3: SortFormer Diarization Inference
         preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward_infer(emb_seq)
@@ -953,13 +915,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
     
     def compute_aux_f1(self, preds, targets):
         preds_bin = (preds > 0.5).to(torch.int64).detach()
-        # preds_ovl = (preds_bin.sum(dim=2) > 2)
         targets_ovl_mask = (targets.sum(dim=2) > 2)
         preds_vad_mask = (preds_bin.sum(dim=2) > 0)
         targets_vad_mask = (targets.sum(dim=2) > 0)
-        preds_vad = preds[targets_vad_mask, :].unsqueeze(0)
         preds_ovl = preds[targets_ovl_mask, :].unsqueeze(0)
-        targets_vad = targets[targets_vad_mask, :].unsqueeze(0)
         targets_ovl = targets[targets_ovl_mask, :].unsqueeze(0)
         preds_vad_mask_ = preds_vad_mask.int().unsqueeze(0)
         targets_vad_mask_ = targets_vad_mask.int().unsqueeze(0) 
@@ -990,10 +949,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             targets = self.sort_probs_and_labels(targets, discrete=True)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
-            # Only mid-layer outputs 
-            preds_mid_all = torch.cat(preds_list).reshape(-1, *preds.shape)
             torch.cat(preds_list).reshape(-1, *preds.shape)
-            preds_mean = preds_mid_all.mean(dim=0)
             # All mid-layer outputs + final layer output
             preds_list.append(_preds)
             preds_all = torch.cat(preds_list)

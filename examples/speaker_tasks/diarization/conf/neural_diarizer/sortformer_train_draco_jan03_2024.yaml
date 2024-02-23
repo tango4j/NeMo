@@ -23,7 +23,7 @@ model:
         multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
         save_embeddings: True # Save embeddings as pickle file for each audio input.
   
-  use_mock_embs: True 
+  use_mock_embs: False
   perm_mock_embs: True
   variance_in_mock_embs: 0.05
   alpha: 0.5 # mix ratio between final pred and skip pred connections
@@ -40,26 +40,11 @@ model:
   soft_label_thres: 0.5 # Threshold for creating discretized speaker label from continuous speaker label in RTTM files.
   session_len_sec: 15
   freeze_speaker_model: True # If True, speaker model is frozen and only MSDD module is trained.
-  # freeze_speaker_model: False
   random_flip: True
   restore_from: null
-  # global_loss_ratio: 30 # Ratio of global loss weight against speaker loss weight
   global_loss_ratio: 0 # Ratio of global loss weight against speaker loss weight
   num_classes: 5000 
   layer_arrival_time_sort: True
-
-
-  # multichannel:
-  #   parameters:
-  #     mix_count: 2
-  #     power_p: 4
-
-  # augmentor:
-  #   noise:
-  #     manifest_path: null
-  #     prob: 0.5
-  #     min_snr_db: 0
-  #     max_snr_db: 40
 
   train_ds:
     manifest_filepath: ???
@@ -126,10 +111,8 @@ model:
     dither: 0.00001
 
   diarizer_module:
-    # _target_: nemo.collections.asr.modules.sortformer.SortformerEncoder
     _target_: nemo.collections.asr.modules.sortformer_diarizer.SortformerDiarizer
     num_spks: ${model.max_num_of_spks} # Number of speakers per model. This is currently fixed at 2.
-    # hidden_size: 256 # Hidden layer size for linear layers in MSDD module
     hidden_size: 192 # Hidden layer size for linear layers in MSDD module
     num_lstm_layers: 3 # Number of stacked LSTM layers
     dropout_rate: 0.5 # Dropout rate
@@ -138,9 +121,7 @@ model:
     emb_dim: 192 # Dimension of the speaker embedding vectors
     scale_n: ${model.scale_n} # Number of scales for multiscale segmentation input
     weighting_scheme: 'attn_scale_weight' # Type of weighting algorithm. Options: ('conv_scale_weight', 'attn_scale_weight')
-    # context_vector_type: 'cos_sim_vad' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
     context_vector_type: 'cos_sim' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
-    # context_vector_type: 'cos_sim_cross_scale' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
     use_amsl_layer: True
     sort_final_layer_on: False
   
@@ -159,7 +140,6 @@ model:
     unit_dim: 5
     sort_layer_on: ${model.sort_layer_on}
     sort_layer_type: "parallel"
-    # sort_layer_on: False
     seq_var_sort: False
     sort_bin_order: ${model.sort_bin_order}
     layer_arrival_time_sort: ${model.layer_arrival_time_sort}
@@ -178,7 +158,6 @@ model:
     hidden_act: relu
     pre_ln: False
     pre_ln_final_layer_norm: True
-
 
   transformer_encoder:
     _target_: nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder
@@ -204,19 +183,21 @@ model:
   loss: 
     _target_: nemo.collections.asr.losses.bce_loss.BCELoss
     weight: null # Weight for binary cross-entropy loss. Either `null` or list type input. (e.g. [0.5,0.5])
-    # alpha: 0.003 # Ratio between BCE loss and affinity loss
     reduction: none
     alpha: 0.0 # Ratio between BCE loss and affinity loss
-    # sorted_loss: True # If True, labels are sorted to make first-come first-serve order.
     sorted_loss: False # If True, labels are sorted to make first-come first-serve order.
     sorted_preds: False # If True, labels are sorted to make first-come first-serve order.
-    # class_normalization: True # If True, loss is normalized by the quantity of each class.
-    class_normalization: False # 'none', 'class', 'class_binary', 'binary'
+    class_normalization: False # If True, loss is normalized by the quantity of each class.
+
+  affinity_loss: 
+    _target_: nemo.collections.asr.losses.affinity_loss.AffinityLoss
+    gamma: 0.0
+    negative_margin: 0.5
+    positive_margin: 0.05
 
   global_loss:
     _target_: nemo.collections.asr.losses.angularloss.AngularSoftmaxLoss # you could also use cross-entrophy loss
     scale: 30
-    # margin: 0.2  # Original margin value
     margin: 0.1
 
   lr: 0.0001
@@ -242,14 +223,6 @@ model:
       warmup_ratio: null
       min_lr: 0.00005
 
-    # sched:
-      # name: InverseSquareRootAnnealing
-      # name: CosineAnnealing
-      # min_lr: 0.0005
-      # last_epoch: -1
-      # warmup_ratio: 0.5
-      # warmup_steps: 150
-
 trainer:
   devices: 1 # number of gpus (devices)
   accelerator: gpu 
@@ -257,7 +230,6 @@ trainer:
   max_steps: -1 # computed at runtime if not set
   num_nodes: 1
   strategy: ddp
-  # resume_from_checkpoint: null
   accumulate_grad_batches: 1
   deterministic: True
   enable_checkpointing: False
@@ -268,6 +240,8 @@ trainer:
 exp_manager:
   exp_dir: null
   name: ${name}
+  resume_if_exists: True
+  resume_ignore_no_checkpoint: True
   create_tensorboard_logger: True
   create_checkpoint_callback: True
   create_wandb_logger: False
