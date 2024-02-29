@@ -238,6 +238,7 @@ trainer:
   val_check_interval: 1.0  # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
 
 exp_manager:
+  use_datetime_version: False
   exp_dir: null
   name: ${name}
   resume_if_exists: True
@@ -251,5 +252,6 @@ exp_manager:
     save_top_k: 30
     every_n_epochs: 1
   wandb_logger_kwargs:
+    resume: True
     name: null
     project: null
