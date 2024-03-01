@@ -229,7 +229,7 @@ trainer:
   max_epochs: 800
   max_steps: -1 # computed at runtime if not set
   num_nodes: 1
-  strategy: ddp
+  strategy: ddp_find_unused_parameters_true # Could be "ddp"
   accumulate_grad_batches: 1
   deterministic: True
   enable_checkpointing: False
