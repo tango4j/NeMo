@@ -472,10 +472,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if not torch.cuda.is_available():
             rank_id = torch.device('cpu')
         elif self._trainer:
-            rank_id = torch.device(self._trainer.global_rank)
+            rank_id = torch.device(self._trainer.local_rank)
         else:
             rank_id = None
-
+        
         if model_path is not None and model_path.endswith('.nemo'):
             self.sortformer_diarizer._speaker_model = EncDecSpeakerLabelModel.restore_from(model_path, map_location=rank_id)
             logging.info("Speaker Model restored locally from {}".format(model_path))
