@@ -472,7 +472,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if not torch.cuda.is_available():
             rank_id = torch.device('cpu')
         elif self._trainer:
-            rank_id = torch.device(self._trainer.local_rank)
+            if self._trainer.global_rank > torch.cuda.device_count() - 1:
+                rank_id = torch.device(self._trainer.global_rank % torch.cuda.device_count())
+            else:
+                rank_id = torch.device(self._trainer.global_rank)
         else:
             rank_id = None
         
