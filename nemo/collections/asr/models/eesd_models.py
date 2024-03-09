@@ -926,6 +926,11 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         preds_vad_mask_ = preds_vad_mask.int().unsqueeze(0)
         targets_vad_mask_ = targets_vad_mask.int().unsqueeze(0) 
         return preds_vad_mask_, preds_ovl, targets_vad_mask_, targets_ovl
+    
+    def _reset_train_f1_accs(self):
+        self._accuracy_train.reset() 
+        self._accuracy_train_vad.reset()
+        self._accuracy_train_ovl.reset()
 
     def training_step(self, batch: list, batch_idx: int):
         start = time.time()
@@ -962,7 +967,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         else:
             spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
             preds_mean = preds
-            
+           
+        self._reset_train_f1_accs()
         preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
         self._accuracy_train_vad(preds_vad, targets_vad, sequence_lengths)
         self._accuracy_train_ovl(preds_ovl, targets_ovl, sequence_lengths)
@@ -970,7 +976,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         train_f1_ovl = self._accuracy_train_ovl.compute()
         loss = spk_loss
         self._accuracy_train(preds, targets, sequence_lengths)
-        torch.cuda.empty_cache()
         f1_acc = self._accuracy_train.compute()
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
@@ -979,6 +984,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.log('train_f1_ovl_acc', train_f1_ovl, sync_dist=True)
         self._accuracy_train.reset()
         return {'loss': loss}
+    
+    def _reset_valid_f1_accs(self):
+        self._accuracy_valid.reset() 
+        self._accuracy_valid_vad.reset()
+        self._accuracy_valid_ovl.reset()
+        self._accuracy_valid_toplyr.reset()
+        self._accuracy_valid_prdmean.reset()
 
     def validation_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
         if self.cfg_e2e_diarizer_model.use_mock_embs:
@@ -1013,17 +1025,16 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             preds_all = torch.cat(preds_list)
             targets_rep = targets.repeat(mid_layer_count+1,1,1)
             sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
-            spk_loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
+            loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
         else:
-            spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
+            loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
             preds_mean = preds
-        
+        self._reset_valid_f1_accs()
         preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
         self._accuracy_valid_vad(preds_vad, targets_vad, sequence_lengths)
-        self._accuracy_valid_ovl(preds_ovl, targets_ovl, sequence_lengths)
         valid_f1_vad = self._accuracy_valid_vad.compute()
+        self._accuracy_valid_ovl(preds_ovl, targets_ovl, sequence_lengths)
         valid_f1_ovl = self._accuracy_valid_ovl.compute()
-        loss = spk_loss
         self._accuracy_valid(preds, targets, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
         self._accuracy_valid_toplyr(_preds, targets, sequence_lengths)
