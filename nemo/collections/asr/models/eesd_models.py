@@ -326,6 +326,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             self.mix_count = self.cfg_e2e_diarizer_model.get('mix_count', 3)
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         else:
+            self._init_speaker_model()
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         self.alpha = self.cfg_e2e_diarizer_model.alpha
         self.affinity_weighting = self.cfg_e2e_diarizer_model.get('affinity_weighting', True)
@@ -1074,6 +1075,62 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             'test_loss': test_loss_mean,
             'test_f1_acc': f1_acc,
         }
+    
+    def test_batch(self,):
+        import ipdb; ipdb.set_trace()
+        if self.cfg_e2e_diarizer_model.use_mock_embs:
+            audio_signal, audio_signal_length, targets = batch 
+        else: # In this case, audio_signal is emb_seed
+            audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
+        
+        batch_size = audio_signal.shape[0]
+        ms_seg_counts = self.ms_seg_counts.unsqueeze(0).repeat(batch_size, 1).to(audio_signal.device)
+        ms_seg_timestamps = self.ms_seg_timestamps.unsqueeze(0).repeat(batch_size, 1, 1, 1).to(audio_signal.device)
+        scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
+        sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
+        self.validation_mode = True
+        preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward(
+            audio_signal=audio_signal,
+            audio_signal_length=audio_signal_length,
+            ms_seg_timestamps=ms_seg_timestamps,
+            ms_seg_counts=ms_seg_counts,
+            scale_mapping=scale_mapping,
+        )
+        if self.loss.sorted_loss:
+            targets = self.sort_probs_and_labels(targets)
+        spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+        mid_layer_count = len(preds_list)
+        if mid_layer_count > 0:
+            # Only mid-layer outputs 
+            preds_mid_all = torch.cat(preds_list).reshape(-1, *preds.shape)
+            torch.cat(preds_list).reshape(-1, *preds.shape)
+            preds_mean = preds_mid_all.mean(dim=0)
+            # All mid-layer outputs + final layer output
+            preds_list.append(_preds)
+            preds_all = torch.cat(preds_list)
+            targets_rep = targets.repeat(mid_layer_count+1,1,1)
+            sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
+            loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
+        else:
+            loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
+            preds_mean = preds
+        self._reset_valid_f1_accs()
+        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+        self._accuracy_valid_vad(preds_vad, targets_vad, sequence_lengths)
+        valid_f1_vad = self._accuracy_valid_vad.compute()
+        self._accuracy_valid_ovl(preds_ovl, targets_ovl, sequence_lengths)
+        valid_f1_ovl = self._accuracy_valid_ovl.compute()
+        self._accuracy_valid(preds, targets, sequence_lengths)
+        f1_acc = self._accuracy_valid.compute()
+        self._accuracy_valid_toplyr(_preds, targets, sequence_lengths)
+        f1_acc_toplyr = self._accuracy_valid_toplyr.compute()
+        self._accuracy_valid_prdmean(preds_mean, targets, sequence_lengths)
+        f1_acc_prdmean = self._accuracy_valid_prdmean.compute()
+
+        pass
+        
+    def diarize(self,):
+        pass
 
     def compute_accuracies(self):
         """
