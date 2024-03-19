@@ -29,6 +29,8 @@ from omegaconf import DictConfig, open_dict
 from pytorch_lightning import Trainer
 from pytorch_lightning.utilities import rank_zero_only
 import torch.nn.functional as F
+from tqdm import tqdm
+from typing import List, Optional, Union, Dict 
 
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 
@@ -347,10 +349,16 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_valid = MultiBinaryAccuracy()
         self._accuracy_valid_toplyr = MultiBinaryAccuracy()
         self._accuracy_valid_prdmean = MultiBinaryAccuracy()
+        self._accuracy_valid = MultiBinaryAccuracy()
+        self._accuracy_test_toplyr = MultiBinaryAccuracy()
+        self._accuracy_test_prdmean = MultiBinaryAccuracy()
         self._accuracy_train_vad= MultiBinaryAccuracy()
         self._accuracy_valid_vad= MultiBinaryAccuracy()
+        self._accuracy_test_vad= MultiBinaryAccuracy()
         self._accuracy_train_ovl= MultiBinaryAccuracy()
         self._accuracy_valid_ovl= MultiBinaryAccuracy()
+        self._accuracy_test_ovl= MultiBinaryAccuracy()
+        self.max_f1_acc = 0.0
 
         self.time_flag = 0.0
         self.time_flag_end = 0.0
@@ -571,7 +579,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
     def setup_validation_data(self, val_data_layer_config: Optional[Union[DictConfig, Dict]]):
         self._validation_dl = self.__setup_dataloader_from_config(config=val_data_layer_config,)
     
-    def setup_test_data(self, test_data_config: Optional[Union[DictConfig, Dict]], global_input_segmentation=True):
+    def setup_test_data(self, test_data_config: Optional[Union[DictConfig, Dict]]):
         self._test_dl = self.__setup_dataloader_from_config(config=test_data_config,)
 
     def test_dataloader(self):
@@ -992,6 +1000,44 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_valid_ovl.reset()
         self._accuracy_valid_toplyr.reset()
         self._accuracy_valid_prdmean.reset()
+    
+    def _reset_test_f1_accs(self):
+        self._accuracy_valid.reset() 
+        self._accuracy_test_vad.reset()
+        self._accuracy_test_ovl.reset()
+        self._accuracy_test_toplyr.reset()
+        self._accuracy_test_prdmean.reset()
+        
+    def _cumulative_test_set_eval(self, score_dict: Dict[str, float], batch_idx: int, sample_count: int):
+        if batch_idx == 0:
+            self._reset_test_f1_accs()
+            self.total_sample_counts = 0
+            self.cumulative_f1_acc_sum = 0
+            self.cumulative_f1_toplyr_acc_sum = 0
+            self.cumulative_f1_prdmean_acc_sum = 0
+            self.cumulative_f1_vad_acc_sum = 0
+            self.cumulative_f1_ovl_acc_sum = 0
+            
+        self.total_sample_counts += sample_count
+        self.cumulative_f1_acc_sum += score_dict['f1_acc'] * sample_count
+        self.cumulative_f1_toplyr_acc_sum += score_dict['f1_toplyr_acc'] * sample_count
+        self.cumulative_f1_prdmean_acc_sum += score_dict['f1_prdmean_acc'] * sample_count
+        self.cumulative_f1_vad_acc_sum += score_dict['f1_vad_acc'] * sample_count
+        self.cumulative_f1_ovl_acc_sum += score_dict['f1_ovl_acc'] * sample_count
+        
+        cumulative_f1_acc = self.cumulative_f1_acc_sum / self.total_sample_counts
+        cumulative_f1_toplyr_acc = self.cumulative_f1_toplyr_acc_sum / self.total_sample_counts
+        cumulative_f1_prdmean_acc = self.cumulative_f1_prdmean_acc_sum / self.total_sample_counts
+        cumulative_f1_vad_acc = self.cumulative_f1_vad_acc_sum / self.total_sample_counts
+        cumulative_f1_ovl_acc = self.cumulative_f1_ovl_acc_sum / self.total_sample_counts
+        
+        return {"cum_test_f1_acc": cumulative_f1_acc,
+                "cum_test_f1_toplyr_acc": cumulative_f1_toplyr_acc,
+                "cum_test_f1_prdmean_acc": cumulative_f1_prdmean_acc,
+                "cum_test_f1_vad_acc": cumulative_f1_vad_acc,
+                "cum_test_f1_ovl_acc": cumulative_f1_ovl_acc,
+        }
+        
 
     def validation_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
         if self.cfg_e2e_diarizer_model.use_mock_embs:
@@ -1075,9 +1121,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             'test_loss': test_loss_mean,
             'test_f1_acc': f1_acc,
         }
-    
-    def test_batch(self,):
-        import ipdb; ipdb.set_trace()
+    def predict_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
+        # for batch in tqdm(self._test_dl): 
         if self.cfg_e2e_diarizer_model.use_mock_embs:
             audio_signal, audio_signal_length, targets = batch 
         else: # In this case, audio_signal is emb_seed
@@ -1114,20 +1159,127 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         else:
             loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
             preds_mean = preds
-        self._reset_valid_f1_accs()
+        # self._reset_test_f1_accs()
         preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
-        self._accuracy_valid_vad(preds_vad, targets_vad, sequence_lengths)
-        valid_f1_vad = self._accuracy_valid_vad.compute()
-        self._accuracy_valid_ovl(preds_ovl, targets_ovl, sequence_lengths)
-        valid_f1_ovl = self._accuracy_valid_ovl.compute()
-        self._accuracy_valid(preds, targets, sequence_lengths)
-        f1_acc = self._accuracy_valid.compute()
-        self._accuracy_valid_toplyr(_preds, targets, sequence_lengths)
-        f1_acc_toplyr = self._accuracy_valid_toplyr.compute()
-        self._accuracy_valid_prdmean(preds_mean, targets, sequence_lengths)
-        f1_acc_prdmean = self._accuracy_valid_prdmean.compute()
+        self._accuracy_test_vad(preds_vad, targets_vad, sequence_lengths)
+        test_f1_vad = self._accuracy_test_vad.compute()
+        self._accuracy_test_ovl(preds_ovl, targets_ovl, sequence_lengths)
+        test_f1_ovl = self._accuracy_test_ovl.compute()
+        self._accuracy_test(preds, targets, sequence_lengths)
+        f1_acc = self._accuracy_test.compute()
+        self._accuracy_test_toplyr(_preds, targets, sequence_lengths)
+        f1_acc_toplyr = self._accuracy_test_toplyr.compute()
+        self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths)
+        f1_acc_prdmean = self._accuracy_test_prdmean.compute()
+        return preds_all 
+   
+    def test_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
+        # for batch in tqdm(self._test_dl): 
+        if self.cfg_e2e_diarizer_model.use_mock_embs:
+            audio_signal, audio_signal_length, targets = batch 
+        else: # In this case, audio_signal is emb_seed
+            audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
+        
+        batch_size = audio_signal.shape[0]
+        ms_seg_counts = self.ms_seg_counts.unsqueeze(0).repeat(batch_size, 1).to(audio_signal.device)
+        ms_seg_timestamps = self.ms_seg_timestamps.unsqueeze(0).repeat(batch_size, 1, 1, 1).to(audio_signal.device)
+        scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
+        sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
+        preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward(
+            audio_signal=audio_signal,
+            audio_signal_length=audio_signal_length,
+            ms_seg_timestamps=ms_seg_timestamps,
+            ms_seg_counts=ms_seg_counts,
+            scale_mapping=scale_mapping,
+        )
+        mid_layer_count = len(preds_list)
+        if mid_layer_count > 0:
+            # Only mid-layer outputs 
+            preds_mid_all = torch.cat(preds_list).reshape(-1, *preds.shape)
+            torch.cat(preds_list).reshape(-1, *preds.shape)
+            preds_mean = preds_mid_all.mean(dim=0)
+            # All mid-layer outputs + final layer output
+            preds_list.append(_preds)
+            preds_all = torch.cat(preds_list)
+            targets_rep = targets.repeat(mid_layer_count+1,1,1)
+            sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
+        else:
+            preds_mean = preds
+        # self._reset_test_f1_accs()
+        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+        self._accuracy_test_vad(preds_vad, targets_vad, sequence_lengths, cumulative=True)
+        test_f1_vad = self._accuracy_test_vad.compute()
+        self._accuracy_test_ovl(preds_ovl, targets_ovl, sequence_lengths, cumulative=True)
+        test_f1_ovl = self._accuracy_test_ovl.compute()
+        self._accuracy_test(preds, targets, sequence_lengths, cumulative=True)
+        f1_acc = self._accuracy_test.compute()
+        self._accuracy_test_toplyr(_preds, targets, sequence_lengths, cumulative=True)
+        f1_acc_toplyr = self._accuracy_test_toplyr.compute()
+        self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths, cumulative=True)
+        f1_acc_prdmean = self._accuracy_test_prdmean.compute()
+        if f1_acc > self.max_f1_acc:
+            tags = f"bidx{batch_idx}_f1acc{f1_acc:.4f}_spk1"
+            directory = '/home/taejinp/projects/sortformer_script/tensor_image/'
+            torch.save(preds, f'{directory}preds_{tags}.pt')
+            torch.save(targets, f'{directory}targets_{tags}.pt')
+        self.max_f1_acc = max(self.max_f1_acc, f1_acc)
+        
+        batch_score_dict = {"f1_acc": f1_acc, "f1_toplyr_acc": f1_acc_toplyr, "f1_prdmean_acc": f1_acc_prdmean, "f1_vad_acc": test_f1_vad, "f1_ovl_acc": test_f1_ovl}
+        cum_score_dict = self._cumulative_test_set_eval(score_dict=batch_score_dict, batch_idx=batch_idx, sample_count=len(sequence_lengths))
+        print(cum_score_dict)
+        return preds_all
+    
+    def test_batch(self,):
+        for batch in tqdm(self._test_dl): 
+            if self.cfg_e2e_diarizer_model.use_mock_embs:
+                audio_signal, audio_signal_length, targets = batch 
+            else: # In this case, audio_signal is emb_seed
+                audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
+         
+            batch_size = audio_signal.shape[0]
+            ms_seg_counts = self.ms_seg_counts.unsqueeze(0).repeat(batch_size, 1).to(audio_signal.device)
+            ms_seg_timestamps = self.ms_seg_timestamps.unsqueeze(0).repeat(batch_size, 1, 1, 1).to(audio_signal.device)
+            scale_mapping = self.scale_mapping.unsqueeze(0).repeat(batch_size, 1, 1)
+            sequence_lengths = torch.tensor([x[-1] for x in ms_seg_counts])
+            self.validation_mode = True
+            preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward(
+                audio_signal=audio_signal,
+                audio_signal_length=audio_signal_length,
+                ms_seg_timestamps=ms_seg_timestamps,
+                ms_seg_counts=ms_seg_counts,
+                scale_mapping=scale_mapping,
+            )
+            if self.loss.sorted_loss:
+                targets = self.sort_probs_and_labels(targets)
+            spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+            mid_layer_count = len(preds_list)
+            if mid_layer_count > 0:
+                # Only mid-layer outputs 
+                preds_mid_all = torch.cat(preds_list).reshape(-1, *preds.shape)
+                torch.cat(preds_list).reshape(-1, *preds.shape)
+                preds_mean = preds_mid_all.mean(dim=0)
+                # All mid-layer outputs + final layer output
+                preds_list.append(_preds)
+                preds_all = torch.cat(preds_list)
+                targets_rep = targets.repeat(mid_layer_count+1,1,1)
+                sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
+                loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
+            else:
+                loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
+                preds_mean = preds
+            # self._reset_test_f1_accs()
+            preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+            self._accuracy_test_vad(preds_vad, targets_vad, sequence_lengths)
+            test_f1_vad = self._accuracy_test_vad.compute()
+            self._accuracy_test_ovl(preds_ovl, targets_ovl, sequence_lengths)
+            test_f1_ovl = self._accuracy_test_ovl.compute()
+            self._accuracy_valid(preds, targets, sequence_lengths)
+            f1_acc = self._accuracy_valid.compute()
+            self._accuracy_test_toplyr(_preds, targets, sequence_lengths)
+            f1_acc_toplyr = self._accuracy_test_toplyr.compute()
+            self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths)
+            f1_acc_prdmean = self._accuracy_test_prdmean.compute()
 
-        pass
         
     def diarize(self,):
         pass

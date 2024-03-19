@@ -81,7 +81,7 @@ class TranscriptionConfig:
 
     # General configs
     output_filename: Optional[str] = None
-    batch_size: int = 32
+    batch_size: int = 4
     num_workers: int = 0
     append_pred: bool = False  # Sets mode of work, if True it will add new field transcriptions.
     pred_name_postfix: Optional[str] = None  # If you need to use another model name, rather than standard one.
@@ -190,11 +190,15 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
 
     # diar_model, model_name = setup_model(cfg, map_location)
     # diar_model = SortformerEncLabelModel.restore_from(restore_path=cfg.model_path)
-    diar_model = SortformerEncLabelModel.load_from_checkpoint(checkpoint_path=cfg.model_path)
+    diar_model = SortformerEncLabelModel.load_from_checkpoint(checkpoint_path=cfg.model_path, map_location=map_location)
     trainer = pl.Trainer(devices=device, accelerator=accelerator)
     diar_model.set_trainer(trainer)
     diar_model = diar_model.eval()
-    import ipdb; ipdb.set_trace()
+    diar_model._cfg.test_ds.manifest_filepath = cfg.dataset_manifest
+    diar_model._cfg.test_ds.batch_size = cfg.batch_size
+    diar_model.setup_test_data(test_data_config=diar_model._cfg.test_ds)    
+    trainer.test(diar_model)
+    # import ipdb; ipdb.set_trace()
 
 if __name__ == '__main__':
     
