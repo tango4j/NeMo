@@ -18,9 +18,12 @@ from collections import Counter
 from collections import OrderedDict as od
 from pathlib import Path
 from typing import Dict, List, Union
+from tqdm import tqdm
 
 import librosa
 import numpy as np
+import soundfile as sf
+
 
 from nemo.collections.asr.parts.utils.speaker_utils import (
     audio_rttm_map,
@@ -32,6 +35,7 @@ from nemo.collections.asr.parts.utils.speaker_utils import (
 )
 from nemo.utils import logging
 from nemo.utils.data_utils import DataStoreObject
+import concurrent
 
 
 def get_rounded_str_float(num: float, output_precision: int, min_precision=1, max_precision=3) -> str:
@@ -208,7 +212,7 @@ def get_input_manifest_dict(input_manifest_path: str) -> Dict[str, dict]:
         for json_line in json_lines:
             dic = json.loads(json_line)
             dic["text"] = "-"
-            uniq_id = get_uniqname_from_filepath(dic["audio_filepath"])
+            uniq_id = get_uniq_id_with_period(dic["audio_filepath"])
             input_manifest_dict[uniq_id] = dic
     return input_manifest_dict
 
@@ -279,7 +283,7 @@ def read_file(pathlist: str) -> List[str]:
     return sorted(pathlist)
 
 
-def get_dict_from_wavlist(pathlist: List[str]) -> Dict[str, str]:
+def get_dict_from_wavlist(pathlist: List[str], use_enclosing_folder_as_label=False) -> Dict[str, str]:
     """
     Read dictionaries from list of lines
 
@@ -291,12 +295,15 @@ def get_dict_from_wavlist(pathlist: List[str]) -> Dict[str, str]:
     path_dict = od()
     pathlist = sorted(pathlist)
     for line_path in pathlist:
-        uniq_id = os.path.basename(line_path).split('.')[0]
+        if use_enclosing_folder_as_label: 
+            uniq_id = "@".join(line_path.strip().split('/')[-2:]).replace('.wav', '')
+        else:
+            uniq_id = os.path.basename(line_path).split('.wav')[0]
         path_dict[uniq_id] = line_path
     return path_dict
 
 
-def get_dict_from_list(data_pathlist: List[str], uniqids: List[str]) -> Dict[str, str]:
+def get_dict_from_list(data_pathlist: List[str], uniqids: List[str], use_enclosing_folder_as_label: bool, EXT: str) -> Dict[str, str]:
     """
     Create dictionaries from list of lines
 
@@ -308,7 +315,10 @@ def get_dict_from_list(data_pathlist: List[str], uniqids: List[str]) -> Dict[str
     """
     path_dict = {}
     for line_path in data_pathlist:
-        uniq_id = os.path.basename(line_path).split('.')[0]
+        if use_enclosing_folder_as_label:
+            uniq_id = "@".join(line_path.strip().split('/')[-2:]).replace(f'.{EXT}', '')
+        else:
+            uniq_id = ".".join(os.path.basename(line_path).split('.')[:-1])
         if uniq_id in uniqids:
             path_dict[uniq_id] = line_path
         else:
@@ -316,7 +326,7 @@ def get_dict_from_list(data_pathlist: List[str], uniqids: List[str]) -> Dict[str
     return path_dict
 
 
-def get_path_dict(data_path: str, uniqids: List[str], len_wavs: int = None) -> Dict[str, str]:
+def get_path_dict(data_path: str, uniqids: List[str], len_wavs: int, use_enclosing_folder_as_label: bool, EXT: str) -> Dict[str, str]:
     """
     Create dictionary from list of lines (using the get_dict_from_list function)
 
@@ -331,7 +341,7 @@ def get_path_dict(data_path: str, uniqids: List[str], len_wavs: int = None) -> D
         data_pathlist = read_file(data_path)
         if len_wavs is not None:
             assert len(data_pathlist) == len_wavs
-            data_pathdict = get_dict_from_list(data_pathlist, uniqids)
+            data_pathdict = get_dict_from_list(data_pathlist, uniqids, use_enclosing_folder_as_label=use_enclosing_folder_as_label, EXT=EXT)
     elif len_wavs is not None:
         data_pathdict = {uniq_id: None for uniq_id in uniqids}
     return data_pathdict
@@ -375,42 +385,9 @@ def create_segment_manifest(
     os.remove(segment_manifest_path)
     os.remove(subsegment_manifest_path)
 
-
-def create_manifest(
-    wav_path: str,
-    manifest_filepath: str,
-    text_path: str = None,
-    rttm_path: str = None,
-    uem_path: str = None,
-    ctm_path: str = None,
-    add_duration: bool = False,
-):
-    """
-    Create base manifest file
-
-    Args:
-        wav_path (str): Path to list of wav files
-        manifest_filepath (str): Path to output manifest file
-        text_path (str): Path to list of text files
-        rttm_path (str): Path to list of rttm files
-        uem_path (str): Path to list of uem files
-        ctm_path (str): Path to list of ctm files
-        add_duration (bool): Whether to add durations to the manifest file
-    """
-    if os.path.exists(manifest_filepath):
-        os.remove(manifest_filepath)
-    wav_pathlist = read_file(wav_path)
-    wav_pathdict = get_dict_from_wavlist(wav_pathlist)
-    len_wavs = len(wav_pathlist)
-    uniqids = sorted(wav_pathdict.keys())
-
-    text_pathdict = get_path_dict(text_path, uniqids, len_wavs)
-    rttm_pathdict = get_path_dict(rttm_path, uniqids, len_wavs)
-    uem_pathdict = get_path_dict(uem_path, uniqids, len_wavs)
-    ctm_pathdict = get_path_dict(ctm_path, uniqids, len_wavs)
-
+def create_subsegment_manifest(uniqids, wav_pathdict, text_pathdict, rttm_pathdict, uem_pathdict, ctm_pathdict, add_duration):
     lines = []
-    for uid in uniqids:
+    for uid in tqdm(uniqids, desc="Creating manifest", unit="file"):
         wav, text, rttm, uem, ctm = (
             wav_pathdict[uid],
             text_pathdict[uid],
@@ -441,8 +418,9 @@ def create_manifest(
 
         duration = None
         if add_duration:
-            y, sr = librosa.load(audio_line, sr=None)
-            duration = librosa.get_duration(y=y, sr=sr)
+            f = sf.SoundFile(audio_line)
+            duration = f"{(f.frames/f.samplerate):.6f}"
+
         meta = [
             {
                 "audio_filepath": audio_line,
@@ -457,6 +435,60 @@ def create_manifest(
             }
         ]
         lines.extend(meta)
+    return lines
+
+
+def create_manifest(
+    wav_path: str,
+    manifest_filepath: str,
+    text_path: str = None,
+    rttm_path: str = None,
+    uem_path: str = None,
+    ctm_path: str = None,
+    use_enclosing_folder_as_label: bool = True,
+    add_duration: bool = False,
+):
+    """
+    Create base manifest file
+
+    Args:
+        wav_path (str): Path to list of wav files
+        manifest_filepath (str): Path to output manifest file
+        text_path (str): Path to list of text files
+        rttm_path (str): Path to list of rttm files
+        uem_path (str): Path to list of uem files
+        ctm_path (str): Path to list of ctm files
+        add_duration (bool): Whether to add durations to the manifest file
+    """
+    if os.path.exists(manifest_filepath):
+        os.remove(manifest_filepath)
+    wav_pathlist = read_file(wav_path)
+    wav_pathdict = get_dict_from_wavlist(wav_pathlist, use_enclosing_folder_as_label=use_enclosing_folder_as_label)
+    len_wavs = len(wav_pathlist)
+    uniqids = sorted(wav_pathdict.keys())
+
+    text_pathdict = get_path_dict(text_path, uniqids, len_wavs, use_enclosing_folder_as_label, EXT='txt')
+    rttm_pathdict = get_path_dict(rttm_path, uniqids, len_wavs, use_enclosing_folder_as_label, EXT='rttm')
+    uem_pathdict = get_path_dict(uem_path, uniqids, len_wavs, use_enclosing_folder_as_label, EXT='uem')
+    ctm_pathdict = get_path_dict(ctm_path, uniqids, len_wavs, use_enclosing_folder_as_label, EXT='ctm')
+
+    multiprocessing = True
+    if multiprocessing:
+        num_workers = 16
+        chunk_size = len(uniqids) // num_workers + (len(uniqids) % num_workers > 0)
+        uniqids_chunks = [uniqids[i:i + chunk_size] for i in range(0, len(uniqids), chunk_size)]
+    
+        lines = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submitting tasks
+            futures = [executor.submit(create_subsegment_manifest, chunk, wav_pathdict, text_pathdict, rttm_pathdict, uem_pathdict, ctm_pathdict, add_duration) for chunk in uniqids_chunks]
+            
+            # Progress bar for completed futures
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing chunks", unit="chunk"):
+                lines.extend(future.result()) 
+    else:
+        lines = create_subsegment_manifest(uniqids, wav_pathdict, text_pathdict, rttm_pathdict, uem_pathdict, ctm_pathdict, add_duration)
+        write_file(manifest_filepath, lines, range(len(lines)))
 
     write_file(manifest_filepath, lines, range(len(lines)))
 
