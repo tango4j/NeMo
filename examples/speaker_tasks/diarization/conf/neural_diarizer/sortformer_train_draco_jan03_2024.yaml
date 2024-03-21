@@ -45,6 +45,8 @@ model:
   global_loss_ratio: 0 # Ratio of global loss weight against speaker loss weight
   num_classes: 5000 
   layer_arrival_time_sort: True
+  add_pil_loss: True # If True, adds permutation invariant loss to the loss function.
+  pil_loss_thres: 0.0 # Threshold for permutation invariant loss.
 
   train_ds:
     manifest_filepath: ???
@@ -247,8 +249,6 @@ exp_manager:
   create_checkpoint_callback: True
   create_wandb_logger: False
   checkpoint_callback_params:
-    # monitor: "val_loss"
-    # mode: "min"
     monitor: "val_f1_acc"
     mode: "max"
     save_top_k: 30

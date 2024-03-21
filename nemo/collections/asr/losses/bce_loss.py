@@ -43,14 +43,14 @@ class BCELoss(Loss, Typing):
         """
         return {"loss": NeuralType(elements_type=LossType())}
 
-    def __init__(self, reduction='sum', alpha=1.0, weight=torch.tensor([0.1, 0.9]), sorted_preds: bool=False, sorted_loss: bool=False, class_normalization: bool=False):
+    def __init__(self, reduction='mean', alpha=1.0, weight=torch.tensor([0.1, 0.9]), sorted_preds: bool=False, sorted_loss: bool=False, class_normalization: bool=False):
         super().__init__()
         self.class_normalization = class_normalization
         if class_normalization:
             self.reduction = 'none'
         else:
-            self.reduction = 'sum'
-        self.loss_weight = torch.tensor([0.1, 0.9]),
+            self.reduction = 'mean'
+        self.loss_weight = weight
         # self.loss_f = torch.nn.BCELoss(weight=self.loss_weight, reduction=self.reduction)
         self.loss_f = torch.nn.BCELoss(reduction=self.reduction)
         self.sorted_preds = sorted_preds
@@ -103,6 +103,8 @@ class BCELoss(Loss, Typing):
             
         if self.reduction == 'sum':
             return self.loss_f(probs, labels)
+        elif self.reduction == 'mean':
+            return self.loss_f(probs, labels).mean()
         elif self.reduction == 'none':
             if self.class_normalization in ['class', 'class_binary', 'binary']:
                 return (binary_weight * norm_weight * self.loss_f(probs, labels)).sum()
