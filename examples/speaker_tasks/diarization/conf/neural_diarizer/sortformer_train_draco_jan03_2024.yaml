@@ -183,7 +183,7 @@ model:
   loss: 
     _target_: nemo.collections.asr.losses.bce_loss.BCELoss
     weight: null # Weight for binary cross-entropy loss. Either `null` or list type input. (e.g. [0.5,0.5])
-    reduction: none
+    reduction: mean
     alpha: 0.0 # Ratio between BCE loss and affinity loss
     sorted_loss: False # If True, labels are sorted to make first-come first-serve order.
     sorted_preds: False # If True, labels are sorted to make first-come first-serve order.
@@ -247,8 +247,10 @@ exp_manager:
   create_checkpoint_callback: True
   create_wandb_logger: False
   checkpoint_callback_params:
-    monitor: "val_loss"
-    mode: "min"
+    # monitor: "val_loss"
+    # mode: "min"
+    monitor: "val_f1_acc"
+    mode: "max"
     save_top_k: 30
     every_n_epochs: 1
   wandb_logger_kwargs:
