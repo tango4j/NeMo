@@ -31,6 +31,7 @@ from pytorch_lightning.utilities import rank_zero_only
 import torch.nn.functional as F
 from tqdm import tqdm
 from typing import List, Optional, Union, Dict 
+import itertools
 
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 
@@ -131,6 +132,7 @@ class AffinityLoss(Loss, Typing):
         self.gamma = gamma # weights for loss values of [different, same] speaker segments
         self.negative_margin = negative_margin
         self.positive_margin = positive_margin
+        
 
     def forward(self, batch_affinity_mat, targets):
         """
@@ -307,6 +309,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.sortformer_encoder = SortformerEncLabelModel.from_config_dict(self.cfg_e2e_diarizer_model.sortformer_encoder)
         self.transformer_encoder = SortformerEncLabelModel.from_config_dict(self.cfg_e2e_diarizer_model.transformer_encoder)
         self.global_loss_ratio = self.cfg_e2e_diarizer_model.get('global_loss_ratio', 300)
+   
         self.original_audio_offsets = {}
         self.eps = 1e-3
         self.emb_dim = self.cfg_e2e_diarizer_model.diarizer_module.emb_dim
@@ -329,6 +332,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         else:
             self._init_speaker_model()
+            self.loss = instantiate(self.cfg_e2e_diarizer_model.loss)
             self.multichannel_mixing = self.cfg_e2e_diarizer_model.get('multichannel_mixing', True)
         self.alpha = self.cfg_e2e_diarizer_model.alpha
         self.affinity_weighting = self.cfg_e2e_diarizer_model.get('affinity_weighting', True)
@@ -363,6 +367,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.time_flag = 0.0
         self.time_flag_end = 0.0
 
+        speaker_inds = list(range(self.cfg_e2e_diarizer_model.max_num_of_spks))
+        # Get all permutations
+        self.spk_perm = torch.tensor(list(itertools.permutations(speaker_inds)))
+        
     def _init_msdd_scales(self,):
         window_length_in_sec = self.cfg_e2e_diarizer_model.diarizer.speaker_embeddings.parameters.window_length_in_sec
         self.msdd_multiscale_args_dict = self.multiscale_args_dict
@@ -901,7 +909,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         mask_max_indices[mask_max_values == 0] = max_cap_val
         return mask_max_indices
 
-        
     def sort_probs_and_labels(self, labels, discrete=True, thres=0.5):
         """
         Sorts probs and labels in descending order of signal_lengths.
@@ -924,6 +931,23 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         sorted_inds = torch.sort(label_fz)[1]
         sorted_labels = labels.transpose(0,1)[:, torch.arange(labels.shape[0]).unsqueeze(1), sorted_inds].transpose(0, 1)
         return sorted_labels 
+        
+    def sort_targets_with_preds(self, labels, preds, discrete=True, thres=0.5, add_pil_loss=False, pil_loss_thres=0.1):
+        """
+        Sorts probs and labels in descending order of signal_lengths.
+        """
+        max_cap_val = labels.shape[1] + 1 
+        perm_size = self.spk_perm.shape[0] 
+        permed_labels = labels[:, :, self.spk_perm]
+        preds_rep = torch.unsqueeze(preds, 2).repeat(1,1, self.spk_perm.shape[0],1)
+        match_score = torch.sum(permed_labels * preds_rep, axis=1).sum(axis=2)
+        batch_best_perm = torch.argmax(match_score, axis=1)
+        # rep_spk_perm = self.spk_perm.unsqueeze(0).repeat(batch_best_perm.shape[0],1,1)
+        rep_spk_perm = self.spk_perm.repeat(batch_best_perm.shape[0],1) # (batch_size * perm_size, max_num_of_spks)
+        global_inds_vec = torch.arange(0, perm_size*batch_best_perm.shape[0], perm_size).to(batch_best_perm.device) + batch_best_perm 
+        batch_perm_inds = rep_spk_perm[global_inds_vec.to(rep_spk_perm.device), :] # (batch_size, max_num_of_spks)
+        max_score_permed_labels = torch.vstack([ labels[k, :, batch_perm_inds[k]].unsqueeze(0) for k in range(batch_perm_inds.shape[0])]) 
+        return max_score_permed_labels
     
     def compute_aux_f1(self, preds, targets):
         preds_bin = (preds > 0.5).to(torch.int64).detach()
@@ -963,7 +987,12 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         if self.loss.sorted_loss:
-            targets = self.sort_probs_and_labels(targets, discrete=True)
+            targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
+            targets = self.sort_targets_with_preds(targets_sort_order, 
+                                                   preds, 
+                                                   discrete=True, 
+                                                   add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                   pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
             torch.cat(preds_list).reshape(-1, *preds.shape)
@@ -1059,7 +1088,12 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         if self.loss.sorted_loss:
-            targets = self.sort_probs_and_labels(targets)
+            targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
+            targets = self.sort_targets_with_preds(targets_sort_order, 
+                                                   preds, 
+                                                   discrete=True, 
+                                                   add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                   pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
         spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
@@ -1142,7 +1176,12 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         if self.loss.sorted_loss:
-            targets = self.sort_probs_and_labels(targets)
+            targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
+            targets = self.sort_targets_with_preds(targets_sort_order, 
+                                                   preds, 
+                                                   discrete=True, 
+                                                   add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                   pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
         spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
@@ -1174,7 +1213,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         return preds_all 
    
     def test_step(self, batch: list, batch_idx: int, dataloader_idx: int = 0):
-        # for batch in tqdm(self._test_dl): 
         if self.cfg_e2e_diarizer_model.use_mock_embs:
             audio_signal, audio_signal_length, targets = batch 
         else: # In this case, audio_signal is emb_seed
@@ -1193,6 +1231,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         mid_layer_count = len(preds_list)
+        if self.loss.sorted_loss:
+            targets = self.sort_probs_and_labels(targets, discrete=True)
+            targets = self.sort_targets_with_preds(targets, 
+                                                   preds, 
+                                                   discrete=True, 
+                                                   add_pil_loss=self.cfg_e2e_diarizer_model.get('add_pil_loss', True),
+                                                   pil_loss_thres=self.cfg_e2e_diarizer_model.get('pil_loss_thres', 0.0))
         if mid_layer_count > 0:
             # Only mid-layer outputs 
             preds_mid_all = torch.cat(preds_list).reshape(-1, *preds.shape)
@@ -1205,7 +1250,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
         else:
             preds_mean = preds
-        # self._reset_test_f1_accs()
         preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
         self._accuracy_test_vad(preds_vad, targets_vad, sequence_lengths, cumulative=True)
         test_f1_vad = self._accuracy_test_vad.compute()
@@ -1217,13 +1261,15 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         f1_acc_toplyr = self._accuracy_test_toplyr.compute()
         self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths, cumulative=True)
         f1_acc_prdmean = self._accuracy_test_prdmean.compute()
-        if f1_acc > self.max_f1_acc:
-            tags = f"bidx{batch_idx}_f1acc{f1_acc:.4f}_spk1"
-            directory = '/home/taejinp/projects/sortformer_script/tensor_image/'
+        if self.cfg_e2e_diarizer_model.get('save_tensor_images', False):
+            tags = f"bidx{batch_idx}_f1acc{f1_acc:.4f}_spk3"
+            print(f"Saving tensor images with tags: {tags}")
+            # directory = '/home/taejinp/projects/sortformer_script/tensor_image/'
+            directory = '/home/taejinp/projects/sortformer_script/tensor_image_v2/'
+            # directory = '/home/taejinp/projects/sortformer_script/tensor_image_vNP/'
             torch.save(preds, f'{directory}preds_{tags}.pt')
             torch.save(targets, f'{directory}targets_{tags}.pt')
         self.max_f1_acc = max(self.max_f1_acc, f1_acc)
-        
         batch_score_dict = {"f1_acc": f1_acc, "f1_toplyr_acc": f1_acc_toplyr, "f1_prdmean_acc": f1_acc_prdmean, "f1_vad_acc": test_f1_vad, "f1_ovl_acc": test_f1_ovl}
         cum_score_dict = self._cumulative_test_set_eval(score_dict=batch_score_dict, batch_idx=batch_idx, sample_count=len(sequence_lengths))
         print(cum_score_dict)
@@ -1235,7 +1281,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 audio_signal, audio_signal_length, targets = batch 
             else: # In this case, audio_signal is emb_seed
                 audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
-         
+                
             batch_size = audio_signal.shape[0]
             ms_seg_counts = self.ms_seg_counts.unsqueeze(0).repeat(batch_size, 1).to(audio_signal.device)
             ms_seg_timestamps = self.ms_seg_timestamps.unsqueeze(0).repeat(batch_size, 1, 1, 1).to(audio_signal.device)
@@ -1250,7 +1296,12 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 scale_mapping=scale_mapping,
             )
             if self.loss.sorted_loss:
-                targets = self.sort_probs_and_labels(targets)
+                targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
+                targets = self.sort_targets_with_preds(targets_sort_order, 
+                                                    preds, 
+                                                    discrete=True, 
+                                                    add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                    pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
             spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
             mid_layer_count = len(preds_list)
             if mid_layer_count > 0:
