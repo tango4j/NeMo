@@ -989,7 +989,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if self.loss.sorted_loss:
             targets = self.sort_probs_and_labels(targets, discrete=True)
             # targets_pil should not be used for training purpose.
-            targets_pil = self.sort_targets_with_preds(targets_sort_order, 
+            targets_pil = self.sort_targets_with_preds(targets, 
                                                         preds, 
                                                         discrete=True, 
                                                         add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
