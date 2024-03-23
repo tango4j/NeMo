@@ -987,12 +987,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         if self.loss.sorted_loss:
-            targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
-            targets = self.sort_targets_with_preds(targets_sort_order, 
-                                                   preds, 
-                                                   discrete=True, 
-                                                   add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
-                                                   pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
+            targets = self.sort_probs_and_labels(targets, discrete=True)
+            # targets_pil should not be used for training purpose.
+            targets_pil = self.sort_targets_with_preds(targets_sort_order, 
+                                                        preds, 
+                                                        discrete=True, 
+                                                        add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                        pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
             torch.cat(preds_list).reshape(-1, *preds.shape)
@@ -1007,13 +1008,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             preds_mean = preds
            
         self._reset_train_f1_accs()
-        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets_pil)
         self._accuracy_train_vad(preds_vad, targets_vad, sequence_lengths)
         self._accuracy_train_ovl(preds_ovl, targets_ovl, sequence_lengths)
         train_f1_vad = self._accuracy_train_vad.compute()
         train_f1_ovl = self._accuracy_train_ovl.compute()
         loss = spk_loss
-        self._accuracy_train(preds, targets, sequence_lengths)
+        self._accuracy_train(preds, targets_pil, sequence_lengths)
         f1_acc = self._accuracy_train.compute()
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
@@ -1261,11 +1262,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         f1_acc_toplyr = self._accuracy_test_toplyr.compute()
         self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths, cumulative=True)
         f1_acc_prdmean = self._accuracy_test_prdmean.compute()
-        if self.cfg_e2e_diarizer_model.get('save_tensor_images', False):
-            tags = f"bidx{batch_idx}_f1acc{f1_acc:.4f}_spk3"
+        # if self.cfg_e2e_diarizer_model.get('save_tensor_images', False):
+        if True:
+            tags = f"bidx{batch_idx}_f1acc{f1_acc:.4f}_spkAll"
             print(f"Saving tensor images with tags: {tags}")
             # directory = '/home/taejinp/projects/sortformer_script/tensor_image/'
-            directory = '/home/taejinp/projects/sortformer_script/tensor_image_v2/'
+            # directory = '/home/taejinp/projects/sortformer_script/tensor_image_v2/'
+            directory = '/home/taejinp/projects/sortformer_script/tensor_image_model_v501/'
             # directory = '/home/taejinp/projects/sortformer_script/tensor_image_vNP/'
             torch.save(preds, f'{directory}preds_{tags}.pt')
             torch.save(targets, f'{directory}targets_{tags}.pt')
@@ -1281,7 +1284,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 audio_signal, audio_signal_length, targets = batch 
             else: # In this case, audio_signal is emb_seed
                 audio_signal, audio_signal_length, ms_seg_timestamps, ms_seg_counts, clus_label_index, scale_mapping, ch_clus_mat, targets, global_spk_labels = batch
-                
             batch_size = audio_signal.shape[0]
             ms_seg_counts = self.ms_seg_counts.unsqueeze(0).repeat(batch_size, 1).to(audio_signal.device)
             ms_seg_timestamps = self.ms_seg_timestamps.unsqueeze(0).repeat(batch_size, 1, 1, 1).to(audio_signal.device)
