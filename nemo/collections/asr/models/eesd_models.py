@@ -894,6 +894,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             # Step 2: Clustering for initialization
             # Compute the cosine similarity between the input and the cluster average embeddings
             emb_seq = ms_emb_seq.mean(dim=2)
+            
         # Step 3: SortFormer Diarization Inference
         preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward_infer(emb_seq)
         return preds, _preds, attn_score_stack, preds_list, encoder_states_list
@@ -942,7 +943,6 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         preds_rep = torch.unsqueeze(preds, 2).repeat(1,1, self.spk_perm.shape[0],1)
         match_score = torch.sum(permed_labels * preds_rep, axis=1).sum(axis=2)
         batch_best_perm = torch.argmax(match_score, axis=1)
-        # rep_spk_perm = self.spk_perm.unsqueeze(0).repeat(batch_best_perm.shape[0],1,1)
         rep_spk_perm = self.spk_perm.repeat(batch_best_perm.shape[0],1) # (batch_size * perm_size, max_num_of_spks)
         global_inds_vec = torch.arange(0, perm_size*batch_best_perm.shape[0], perm_size).to(batch_best_perm.device) + batch_best_perm 
         batch_perm_inds = rep_spk_perm[global_inds_vec.to(rep_spk_perm.device), :] # (batch_size, max_num_of_spks)
@@ -987,34 +987,48 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         if self.loss.sorted_loss:
-            targets = self.sort_probs_and_labels(targets, discrete=True)
-            # targets_pil should not be used for training purpose.
-            targets_pil = self.sort_targets_with_preds(targets, 
-                                                        preds, 
-                                                        discrete=True, 
-                                                        add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
-                                                        pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
+            # Perform arrival-time sorting (ATS)
+            targets_ats = self.sort_probs_and_labels(targets.clone(), discrete=True)
+            # `targets_pil` should not be used for training purpose.
+            targets_pil = self.sort_targets_with_preds(targets.clone(), 
+                                                       preds, 
+                                                       discrete=True, 
+                                                       add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                       pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
+            if self.cfg_e2e_diarizer_model.get('use_pil_f1_score', True):
+                targets_f1_score = targets_pil 
+            else:
+                targets_f1_score = targets_ats
+                
+            if self.cfg_e2e_diarizer_model.get('use_pil_train', False):
+                targets_tr_loss = targets_pil 
+            else:
+                targets_tr_loss = targets_ats
+        else:
+            targets_f1_score = targets
+            targets_tr_loss = targets
+            
+                
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
             torch.cat(preds_list).reshape(-1, *preds.shape)
             # All mid-layer outputs + final layer output
             preds_list.append(_preds)
             preds_all = torch.cat(preds_list)
-            targets_rep = targets.repeat(mid_layer_count+1,1,1)
+            targets_rep = targets_tr_loss.repeat(mid_layer_count+1,1,1)
             sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
             spk_loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
         else:
-            spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+            spk_loss = self.loss(probs=preds, labels=targets_tr_loss, signal_lengths=sequence_lengths)
             preds_mean = preds
-           
         self._reset_train_f1_accs()
-        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets_pil)
+        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets_f1_score)
         self._accuracy_train_vad(preds_vad, targets_vad, sequence_lengths)
         self._accuracy_train_ovl(preds_ovl, targets_ovl, sequence_lengths)
         train_f1_vad = self._accuracy_train_vad.compute()
         train_f1_ovl = self._accuracy_train_ovl.compute()
         loss = spk_loss
-        self._accuracy_train(preds, targets_pil, sequence_lengths)
+        self._accuracy_train(preds, targets_f1_score, sequence_lengths)
         f1_acc = self._accuracy_train.compute()
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
@@ -1089,13 +1103,35 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             scale_mapping=scale_mapping,
         )
         if self.loss.sorted_loss:
-            targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
-            targets = self.sort_targets_with_preds(targets_sort_order, 
+            targets_ats = self.sort_probs_and_labels(targets, discrete=True)
+            targets_pil = self.sort_targets_with_preds(targets.clone(), 
                                                    preds, 
                                                    discrete=True, 
                                                    add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
                                                    pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
-        spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+            if self.loss.sorted_loss:
+                # Perform arrival-time sorting (ATS)
+                targets_ats = self.sort_probs_and_labels(targets.clone(), discrete=True)
+                # `targets_pil` should not be used for training purpose.
+                targets_pil = self.sort_targets_with_preds(targets.clone(), 
+                                                            preds, 
+                                                            discrete=True, 
+                                                            add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                            pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
+                if self.cfg_e2e_diarizer_model.get('use_pil_f1_score', True):
+                    targets_f1_score = targets_pil 
+                else:
+                    targets_f1_score = targets_ats
+                    
+                if self.cfg_e2e_diarizer_model.get('use_pil_train', False):
+                    targets_tr_loss = targets_pil 
+                else:
+                    targets_tr_loss = targets_ats
+        else:
+            targets_f1_score = targets
+            targets_tr_loss = targets 
+        
+        # spk_loss = self.loss(probs=preds, labels=targets_tr_loss, signal_lengths=sequence_lengths)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
             # Only mid-layer outputs 
@@ -1105,23 +1141,24 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             # All mid-layer outputs + final layer output
             preds_list.append(_preds)
             preds_all = torch.cat(preds_list)
-            targets_rep = targets.repeat(mid_layer_count+1,1,1)
+            # `targets_tr_loss` is the target tensor for calculating loss and backprop.
+            targets_rep = targets_tr_loss.repeat(mid_layer_count+1,1,1)
             sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
             loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
         else:
-            loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
+            loss = self.loss(probs=preds, labels=targets_tr_loss, signal_lengths=sequence_lengths)  
             preds_mean = preds
         self._reset_valid_f1_accs()
-        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets_f1_score)
         self._accuracy_valid_vad(preds_vad, targets_vad, sequence_lengths)
         valid_f1_vad = self._accuracy_valid_vad.compute()
         self._accuracy_valid_ovl(preds_ovl, targets_ovl, sequence_lengths)
         valid_f1_ovl = self._accuracy_valid_ovl.compute()
-        self._accuracy_valid(preds, targets, sequence_lengths)
+        self._accuracy_valid(preds, targets_f1_score, sequence_lengths)
         f1_acc = self._accuracy_valid.compute()
-        self._accuracy_valid_toplyr.update(_preds, targets, sequence_lengths)
+        self._accuracy_valid_toplyr.update(_preds, targets_f1_score, sequence_lengths)
         f1_acc_toplyr = self._accuracy_valid_toplyr.compute()
-        self._accuracy_valid_prdmean.update(preds_mean, targets, sequence_lengths)
+        self._accuracy_valid_prdmean.update(preds_mean, targets_f1_score, sequence_lengths)
         f1_acc_prdmean = self._accuracy_valid_prdmean.compute()
 
         self.log('val_loss', loss, sync_dist=True)

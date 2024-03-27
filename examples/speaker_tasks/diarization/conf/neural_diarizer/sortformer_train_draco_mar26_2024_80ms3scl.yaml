@@ -18,12 +18,14 @@ model:
     speaker_embeddings:
       model_path: null
       parameters:
-        window_length_in_sec: [3.0,1.5,0.5] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
-        shift_length_in_sec: [1.5,0.75,0.25] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
+        window_length_in_sec: [1.6,0.8,0.4] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
+        shift_length_in_sec: [0.8,0.4,0.2] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
         multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
         save_embeddings: True # Save embeddings as pickle file for each audio input.
   
   use_mock_embs: False
+  use_pil_train: False
+  use_pil_f1_score: False
   perm_mock_embs: True
   variance_in_mock_embs: 0.05
   alpha: 0.5 # mix ratio between final pred and skip pred connections
@@ -36,7 +38,7 @@ model:
   inner: 768
   max_num_of_spks: 4 # Number of speakers per model. This is currently fixed at 6.
   scale_n: 3 # Number of scales for MSDD model and initializing clustering.
-  interpolated_scale: 0.1 # The length of the interpolated scale
+  interpolated_scale: 0.08 # The length of the interpolated scale
   soft_label_thres: 0.5 # Threshold for creating discretized speaker label from continuous speaker label in RTTM files.
   session_len_sec: 15
   freeze_speaker_model: True # If True, speaker model is frozen and only MSDD module is trained.
@@ -251,7 +253,7 @@ exp_manager:
   checkpoint_callback_params:
     monitor: "val_f1_acc"
     mode: "max"
-    save_top_k: 30
+    save_top_k: 9
     every_n_epochs: 1
   wandb_logger_kwargs:
     resume: True
