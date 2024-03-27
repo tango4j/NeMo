@@ -296,7 +296,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             self.augmentor = None
         super().__init__(cfg=self.cfg_e2e_diarizer_model, trainer=trainer)
         window_length_in_sec = self.cfg_e2e_diarizer_model.diarizer.speaker_embeddings.parameters.window_length_in_sec
-        if isinstance(window_length_in_sec, int) or len(window_length_in_sec) <= 1:
+        if isinstance(window_length_in_sec, int) or len(window_length_in_sec) <= self.cfg_e2e_diarizer_model.interpolated_scale:
             raise ValueError("window_length_in_sec should be a list containing multiple segment (window) lengths")
         else:
             self.cfg_e2e_diarizer_model.diarizer_module.scale_n = self.cfg_e2e_diarizer_model.scale_n
@@ -376,8 +376,8 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.msdd_multiscale_args_dict = self.multiscale_args_dict
         self.model_spk_num = self.cfg_e2e_diarizer_model.max_num_of_spks
         if self.cfg_e2e_diarizer_model.get('interpolated_scale', None) is not None:
-            if self.cfg_e2e_diarizer_model.interpolated_scale > 0.1:
-                raise ValueError("Interpolated scale must be smaller than 0.1")
+            # if self.cfg_e2e_diarizer_model.interpolated_scale > 0.1:
+            #     raise ValueError("Interpolated scale must be smaller than 0.1")
             # Use an interpolated scale so add another scale 
             self.cfg_e2e_diarizer_model.scale_n = len(window_length_in_sec) + 1 # Adding one interpolated scale
             self.emb_scale_n = len(window_length_in_sec) # Scales that are extracted from the audio
@@ -890,10 +890,17 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 ms_seg_timestamps=ms_seg_timestamps,
                 ms_seg_counts=ms_seg_counts,
                 scale_mapping=scale_mapping,
-            )
+            ) # (batch_size, max_seg_count, msdd_scale_n, emb_dim)
             # Step 2: Clustering for initialization
             # Compute the cosine similarity between the input and the cluster average embeddings
-            emb_seq = ms_emb_seq.mean(dim=2)
+            if self.cfg_e2e_diarizer_model.get("multi_scale_method", None) == "mean":
+                emb_seq = ms_emb_seq.mean(dim=2)
+            elif self.cfg_e2e_diarizer_model.get("multi_scale_method", None) == "attention":
+                raise NotImplementedError
+            elif self.cfg_e2e_diarizer_model.get("multi_scale_method", None) == "only_interpolate":
+                emb_seq = ms_emb_seq[:, :, -1, :] # Original shape: (batch_size, max_seg_count, scale_index, emb_dim)
+            else:
+                raise ValueError(f"Unknown multi-scale method: {self.cfg_e2e_diarizer_model.get('multi_scale_method', None)}")
             
         # Step 3: SortFormer Diarization Inference
         preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward_infer(emb_seq)
@@ -1270,12 +1277,25 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         )
         mid_layer_count = len(preds_list)
         if self.loss.sorted_loss:
-            targets = self.sort_probs_and_labels(targets, discrete=True)
-            targets = self.sort_targets_with_preds(targets, 
-                                                   preds, 
-                                                   discrete=True, 
-                                                   add_pil_loss=self.cfg_e2e_diarizer_model.get('add_pil_loss', True),
-                                                   pil_loss_thres=self.cfg_e2e_diarizer_model.get('pil_loss_thres', 0.0))
+                # Perform arrival-time sorting (ATS)
+                targets_ats = self.sort_probs_and_labels(targets.clone(), discrete=True)
+                # `targets_pil` should not be used for training purpose.
+                targets_pil = self.sort_targets_with_preds(targets.clone(), 
+                                                            preds, 
+                                                            discrete=True, 
+                                                            add_pil_loss=self.cfg_e2e_diarizer_model.get('add_pil_loss', True),
+                                                            pil_loss_thres=self.cfg_e2e_diarizer_model.get('pil_loss_thres', 0.0)
+                )
+                if self.cfg_e2e_diarizer_model.get('use_pil_f1_score', True):
+                    targets_f1_score = targets_pil 
+                else:
+                    targets_f1_score = targets_ats
+                    
+                if self.cfg_e2e_diarizer_model.get('use_pil_train', False):
+                    targets_tr_loss = targets_pil 
+                else:
+                    targets_tr_loss = targets_ats
+                    
         if mid_layer_count > 0:
             # Only mid-layer outputs 
             preds_mid_all = torch.cat(preds_list).reshape(-1, *preds.shape)
@@ -1284,31 +1304,40 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             # All mid-layer outputs + final layer output
             preds_list.append(_preds)
             preds_all = torch.cat(preds_list)
-            targets_rep = targets.repeat(mid_layer_count+1,1,1)
+            targets_rep = targets_tr_loss.repeat(mid_layer_count+1,1,1)
             sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
         else:
             preds_mean = preds
-        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+        # import ipdb; ipdb.set_trace()
+        preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets_f1_score)
         self._accuracy_test_vad(preds_vad, targets_vad, sequence_lengths, cumulative=True)
         test_f1_vad = self._accuracy_test_vad.compute()
         self._accuracy_test_ovl(preds_ovl, targets_ovl, sequence_lengths, cumulative=True)
         test_f1_ovl = self._accuracy_test_ovl.compute()
-        self._accuracy_test(preds, targets, sequence_lengths, cumulative=True)
+        self._accuracy_test(preds, targets_f1_score, sequence_lengths, cumulative=True)
         f1_acc = self._accuracy_test.compute()
-        self._accuracy_test_toplyr(_preds, targets, sequence_lengths, cumulative=True)
+        self._accuracy_test_toplyr(_preds, targets_f1_score, sequence_lengths, cumulative=True)
         f1_acc_toplyr = self._accuracy_test_toplyr.compute()
-        self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths, cumulative=True)
+        self._accuracy_test_prdmean(preds_mean, targets_f1_score, sequence_lengths, cumulative=True)
         f1_acc_prdmean = self._accuracy_test_prdmean.compute()
         # if self.cfg_e2e_diarizer_model.get('save_tensor_images', False):
         if True:
-            tags = f"bidx{batch_idx}_f1acc{f1_acc:.4f}_spkAll"
+            tags = f"f1acc{f1_acc:.4f}_bidx{batch_idx}"
+            tags = tags.replace('0.', '0p')
             print(f"Saving tensor images with tags: {tags}")
             # directory = '/home/taejinp/projects/sortformer_script/tensor_image/'
             # directory = '/home/taejinp/projects/sortformer_script/tensor_image_v2/'
-            directory = '/home/taejinp/projects/sortformer_script/tensor_image_model_v501/'
-            # directory = '/home/taejinp/projects/sortformer_script/tensor_image_vNP/'
-            torch.save(preds, f'{directory}preds_{tags}.pt')
-            torch.save(targets, f'{directory}targets_{tags}.pt')
+            # directory = '/home/taejinp/projects/sortformer_script/tensor_image_model_v501/'
+            # directory_ex = '/home/taejinp/projects/sortformer_script/tensor_image_ch109/'
+            # directory_ex = None
+            # directory = self.cfg_e2e_diarizer_model.get('tensor_image_dir', directory_ex) 
+            directory = self._cfg.diarizer.get('out_dir', None)
+            if directory is None:
+                raise ValueError(f"No output directory specified for tensor image saving. Please set the `out_dir` in the config file.")
+            else:
+                print(f"Saving tensor images to directory: {directory}")
+            torch.save(preds, f'{directory}/preds_{tags}.pt')
+            torch.save(targets_f1_score, f'{directory}/targets_{tags}.pt')
         self.max_f1_acc = max(self.max_f1_acc, f1_acc)
         batch_score_dict = {"f1_acc": f1_acc, "f1_toplyr_acc": f1_acc_toplyr, "f1_prdmean_acc": f1_acc_prdmean, "f1_vad_acc": test_f1_vad, "f1_ovl_acc": test_f1_ovl}
         cum_score_dict = self._cumulative_test_set_eval(score_dict=batch_score_dict, batch_idx=batch_idx, sample_count=len(sequence_lengths))
@@ -1335,13 +1364,24 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 scale_mapping=scale_mapping,
             )
             if self.loss.sorted_loss:
-                targets_sort_order = self.sort_probs_and_labels(targets, discrete=True)
-                targets = self.sort_targets_with_preds(targets_sort_order, 
-                                                    preds, 
-                                                    discrete=True, 
-                                                    add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
-                                                    pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
-            spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
+                # Perform arrival-time sorting (ATS)
+                targets_ats = self.sort_probs_and_labels(targets.clone(), discrete=True)
+                # `targets_pil` should not be used for training purpose.
+                targets_pil = self.sort_targets_with_preds(targets.clone(), 
+                                                            preds, 
+                                                            discrete=True, 
+                                                            add_pil_loss=self.cfg_e2e_diarizer_model.add_pil_loss, 
+                                                            pil_loss_thres=self.cfg_e2e_diarizer_model.pil_loss_thres)
+                if self.cfg_e2e_diarizer_model.get('use_pil_f1_score', True):
+                    targets_f1_score = targets_pil 
+                else:
+                    targets_f1_score = targets_ats
+                    
+                if self.cfg_e2e_diarizer_model.get('use_pil_train', False):
+                    targets_tr_loss = targets_pil 
+                else:
+                    targets_tr_loss = targets_ats
+            # spk_loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)
             mid_layer_count = len(preds_list)
             if mid_layer_count > 0:
                 # Only mid-layer outputs 
@@ -1351,23 +1391,23 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
                 # All mid-layer outputs + final layer output
                 preds_list.append(_preds)
                 preds_all = torch.cat(preds_list)
-                targets_rep = targets.repeat(mid_layer_count+1,1,1)
+                targets_rep = targets_tr_loss.repeat(mid_layer_count+1,1,1)
                 sequence_lengths_rep = sequence_lengths.repeat(mid_layer_count+1)
                 loss = self.loss(probs=preds_all, labels=targets_rep, signal_lengths=sequence_lengths_rep)/(mid_layer_count+1)
             else:
-                loss = self.loss(probs=preds, labels=targets, signal_lengths=sequence_lengths)  
+                loss = self.loss(probs=preds, labels=targets_tr_loss, signal_lengths=sequence_lengths)  
                 preds_mean = preds
             # self._reset_test_f1_accs()
-            preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets)
+            preds_vad, preds_ovl, targets_vad, targets_ovl = self.compute_aux_f1(preds, targets_f1_score)
             self._accuracy_test_vad(preds_vad, targets_vad, sequence_lengths)
             test_f1_vad = self._accuracy_test_vad.compute()
             self._accuracy_test_ovl(preds_ovl, targets_ovl, sequence_lengths)
             test_f1_ovl = self._accuracy_test_ovl.compute()
-            self._accuracy_valid(preds, targets, sequence_lengths)
+            self._accuracy_valid(preds, targets_f1_score, sequence_lengths)
             f1_acc = self._accuracy_valid.compute()
-            self._accuracy_test_toplyr(_preds, targets, sequence_lengths)
+            self._accuracy_test_toplyr(_preds, targets_f1_score, sequence_lengths)
             f1_acc_toplyr = self._accuracy_test_toplyr.compute()
-            self._accuracy_test_prdmean(preds_mean, targets, sequence_lengths)
+            self._accuracy_test_prdmean(preds_mean, targets_f1_score, sequence_lengths)
             f1_acc_prdmean = self._accuracy_test_prdmean.compute()
 
         

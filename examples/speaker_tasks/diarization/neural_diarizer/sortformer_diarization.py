@@ -71,6 +71,7 @@ class TranscriptionConfig:
     model_path: Optional[str] = None  # Path to a .nemo file
     pretrained_name: Optional[str] = None  # Name of a pretrained model
     audio_dir: Optional[str] = None  # Path to a directory which contains audio files
+    tensor_image_dir: Optional[str] = None  # Path to a directory which contains tensor images
     dataset_manifest: Optional[str] = None  # Path to dataset's JSON manifest
     channel_selector: Optional[
         Union[int, str]
@@ -191,6 +192,8 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
     # diar_model, model_name = setup_model(cfg, map_location)
     # diar_model = SortformerEncLabelModel.restore_from(restore_path=cfg.model_path)
     diar_model = SortformerEncLabelModel.load_from_checkpoint(checkpoint_path=cfg.model_path, map_location=map_location)
+    # diar_model.cfg_e2e_diarizer_model.tensor_image_dir 
+    diar_model._cfg.diarizer.out_dir = cfg.tensor_image_dir
     trainer = pl.Trainer(devices=device, accelerator=accelerator)
     diar_model.set_trainer(trainer)
     diar_model = diar_model.eval()
@@ -198,7 +201,6 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
     diar_model._cfg.test_ds.batch_size = cfg.batch_size
     diar_model.setup_test_data(test_data_config=diar_model._cfg.test_ds)    
     trainer.test(diar_model)
-    # import ipdb; ipdb.set_trace()
 
 if __name__ == '__main__':
     
