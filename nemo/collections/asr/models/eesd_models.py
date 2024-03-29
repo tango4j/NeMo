@@ -905,7 +905,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             
         # Step 3: SortFormer Diarization Inference
         preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward_infer(emb_seq)
-        return preds, _preds, attn_score_stack, preds_list, encoder_states_list
+        return preds, _preds, attn_weights, preds_list, encoder_states_list
     
     def find_first_nonzero(self, mat, max_cap_val=-1):
         # non zero values mask
