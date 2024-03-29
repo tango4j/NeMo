@@ -277,6 +277,40 @@ class SortformerDiarizer(NeuralModule, Exportable):
         spk_preds = self.hidden_to_spks(lstm_hidden_out)
         preds = nn.Sigmoid()(spk_preds)
         return preds, scale_weights
+    
+    def apply_attention_weight(self, ms_emb_seq):
+        """
+        Use weighted inner product for calculating each scale weight. W_a matrix has (emb_dim * emb_dim) learnable parameters
+        and W_a matrix is initialized with an identity matrix. Compared to "conv_scale_weight" method, this method shows more evenly
+        distributed scale weights.
+
+        Args:
+            ms_avg_embs_perm (Tensor):
+                Tensor containing cluster-average speaker embeddings for each scale.
+                Shape: (batch_size, length, scale_n, emb_dim)
+            ms_emb_seq (Tensor):
+                Tensor containing multi-scale speaker embedding sequences. `ms_emb_seq` is input from the
+                given audio stream input.
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
+
+        Returns:
+            scale_weights (Tensor):
+                Weight vectors that determine the weight of each scale.
+                Shape: (batch_size, length, unit_n_spks, emb_dim)
+        """
+        self.W_a(ms_emb_seq.flatten(0, 1))
+        mat_a = self.W_a(ms_emb_seq.flatten(0, 1))
+        # mat_b = ms_avg_embs_perm.flatten(0, 1).permute(0, 2, 1)
+        # mat_b = mat_a.permute(0, 2, 1)
+        mat_b = mat_a[:, -1, :].unsqueeze(1).repeat(1, ms_emb_seq.shape[2], 1).permute(0, 2, 1)
+
+        weighted_corr = torch.matmul(mat_a, mat_b).reshape(ms_emb_seq.shape[0],-1, self.scale_n, self.scale_n) 
+        weight_sum = weighted_corr.sum(dim=2).unsqueeze(2).repeat(1,1,self.scale_n,1)
+        flatten_scale_weights = torch.div(weighted_corr, weight_sum)[:,:,:,0].unsqueeze(2).flatten(0, 1)
+        flat_ms_emb_seq = ms_emb_seq.flatten(0, 1)
+        merged_ms_emb_seq = torch.matmul(flatten_scale_weights, flat_ms_emb_seq).reshape(ms_emb_seq.shape[0], ms_emb_seq.shape[1], self.emb_dim)
+        scale_weights = flatten_scale_weights.reshape(ms_emb_seq.shape[0], ms_emb_seq.shape[1], self.scale_n)
+        return merged_ms_emb_seq, scale_weights
 
     def get_scale_weighted_ms_seq(self, scale_weights, ms_emb_seq):
         """
