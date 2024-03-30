@@ -223,9 +223,9 @@ model:
     weight_decay: 0.0
     sched:
       name: InverseSquareRootAnnealing
-      warmup_steps: 16000
+      warmup_steps: 10000
       warmup_ratio: null
-      min_lr: 0.00001
+      min_lr: 0.00005
 
 trainer:
   devices: 1 # number of gpus (devices)

@@ -884,6 +884,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         if self.cfg_e2e_diarizer_model.use_mock_embs:
             emb_seq = self.train_non_linear_transform_layer(audio_signal)
         else:
+            attn_weights = None
             ms_emb_seq = self.forward_encoder(
                 audio_signal=audio_signal, 
                 audio_signal_length=audio_signal_length,
@@ -896,7 +897,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             if self.cfg_e2e_diarizer_model.get("multi_scale_method", None) == "mean":
                 emb_seq = ms_emb_seq.mean(dim=2)
             elif self.cfg_e2e_diarizer_model.get("multi_scale_method", None) == "attention":
-                emb_seq, attn_weights = self.sortformer_diarizer.apply_attention_weight(ms_emb_seq=ms_emb_seq)
+                emb_seq, attn_score_stack = self.sortformer_diarizer.apply_attention_weight(ms_emb_seq=ms_emb_seq)
                 # raise NotImplementedError
             elif self.cfg_e2e_diarizer_model.get("multi_scale_method", None) == "only_interpolate":
                 emb_seq = ms_emb_seq[:, :, -1, :] # Original shape: (batch_size, max_seg_count, scale_index, emb_dim)
@@ -905,7 +906,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             
         # Step 3: SortFormer Diarization Inference
         preds, _preds, attn_score_stack, preds_list, encoder_states_list = self.forward_infer(emb_seq)
-        return preds, _preds, attn_weights, preds_list, encoder_states_list
+        return preds, _preds, attn_score_stack, preds_list, encoder_states_list
     
     def find_first_nonzero(self, mat, max_cap_val=-1):
         # non zero values mask
