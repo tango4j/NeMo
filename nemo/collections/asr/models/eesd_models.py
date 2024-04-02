@@ -311,6 +311,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self.global_loss_ratio = self.cfg_e2e_diarizer_model.get('global_loss_ratio', 300)
    
         self.original_audio_offsets = {}
+        self.train_f1_acc_history = []
+        self.train_f1_acc_window_length = self.cfg_e2e_diarizer_model.get('train_f1_acc_window_length', 5)
+        self.train_f1_acc_thres_pil_shift = self.cfg_e2e_diarizer_model.get('train_f1_acc_thres_pil_shift', 0.55)
+
         self.eps = 1e-3
         self.emb_dim = self.cfg_e2e_diarizer_model.diarizer_module.emb_dim
         self.train_non_linear_transform_layer = self.non_linear_transform_layer(layer_n=1, input_size=self.emb_dim, hidden_size=2*self.emb_dim, output_size=self.emb_dim, seed=100)
@@ -974,6 +978,23 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         self._accuracy_train_vad.reset()
         self._accuracy_train_ovl.reset()
 
+    def _is_pil_shift(self):
+        """
+        Check if the mean F1 score is above the threshold for pil shift.
+
+        Returns:
+            (bool): True if the mean F1 score is above the threshold for pil shift, False otherwise.
+        """
+        if len(self.train_f1_acc_history) >= self.train_f1_acc_window_length:
+            mean_f1 = torch.mean(torch.tensor(self.train_f1_acc_history), dim=0)
+            print(f"Mean F1 score: {mean_f1}, thres: {self.train_f1_acc_thres_pil_shift}")
+            if mean_f1 > self.train_f1_acc_thres_pil_shift:
+                return True
+            else:
+                return False
+        else:
+            return False
+        
     def training_step(self, batch: list, batch_idx: int):
         start = time.time()
         if self.cfg_e2e_diarizer_model.use_mock_embs:
@@ -995,6 +1016,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             ms_seg_counts=ms_seg_counts,
             scale_mapping=scale_mapping,
         )
+
         if self.loss.sorted_loss:
             # Perform arrival-time sorting (ATS)
             targets_ats = self.sort_probs_and_labels(targets.clone(), discrete=True)
@@ -1017,7 +1039,11 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             targets_f1_score = targets
             targets_tr_loss = targets
             
-                
+        if self._is_pil_shift():
+            # print(f"PIL shift detectedl, mean f1 acc {torch.mean(torch.tensor(self.train_f1_acc_history), dim=0)}")
+            targets_tr_loss = targets_pil 
+            targets_f1_score = targets_pil  
+                                          
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
             torch.cat(preds_list).reshape(-1, *preds.shape)
@@ -1039,6 +1065,13 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         loss = spk_loss
         self._accuracy_train(preds, targets_f1_score, sequence_lengths)
         f1_acc = self._accuracy_train.compute()
+        
+        # Add F1 score to history
+        if len(self.train_f1_acc_history) > self.train_f1_acc_window_length:
+            del self.train_f1_acc_history[0]
+        self.train_f1_acc_history.append(f1_acc.item())
+        # print(f"self.train_f1_acc_history: {self.train_f1_acc_history}")
+        # print(f'Train F1 score: {f1_acc:.4f}')
         self.log('loss', loss, sync_dist=True)
         self.log('learning_rate', self._optimizer.param_groups[0]['lr'], sync_dist=True)
         self.log('train_f1_acc', f1_acc, sync_dist=True)
@@ -1140,6 +1173,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             targets_f1_score = targets
             targets_tr_loss = targets 
         
+        if self._is_pil_shift():
+            targets_f1_score = targets_pil  
+            targets_tr_loss = targets_pil 
+ 
         # spk_loss = self.loss(probs=preds, labels=targets_tr_loss, signal_lengths=sequence_lengths)
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
