@@ -18,8 +18,8 @@ model:
     speaker_embeddings:
       model_path: null
       parameters:
-        window_length_in_sec: [1.6,0.8,0.4] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
-        shift_length_in_sec: [0.8,0.4,0.2] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
+        window_length_in_sec: [1.44,0.96,0.48] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
+        shift_length_in_sec: [0.72,0.48,0.24] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
         multiscale_weights: [1,1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
         save_embeddings: True # Save embeddings as pickle file for each audio input.
   
@@ -27,9 +27,9 @@ model:
   use_pil_train: False
   use_pil_f1_score: False
   perm_mock_embs: True
+  multi_scale_method: 'only_interpolate' # 'mean', 'attention', 'only_interpolate'
   variance_in_mock_embs: 0.05
   alpha: 0.5 # mix ratio between final pred and skip pred connections
-  # sort_layer_on: True
   sort_layer_on: pre # pre, post, False
   sort_bin_order: False
   mock_emb_noise_std: 0.05
@@ -38,7 +38,7 @@ model:
   inner: 768
   max_num_of_spks: 4 # Number of speakers per model. This is currently fixed at 6.
   scale_n: 3 # Number of scales for MSDD model and initializing clustering.
-  interpolated_scale: 0.08 # The length of the interpolated scale
+  interpolated_scale: 0.16 # The length of the interpolated scale
   soft_label_thres: 0.5 # Threshold for creating discretized speaker label from continuous speaker label in RTTM files.
   session_len_sec: 15
   freeze_speaker_model: True # If True, speaker model is frozen and only MSDD module is trained.
@@ -49,6 +49,9 @@ model:
   layer_arrival_time_sort: True
   add_pil_loss: True # If True, adds permutation invariant loss to the loss function.
   pil_loss_thres: 0.0 # Threshold for permutation invariant loss.
+  train_f1_acc_window_length: 25
+  train_f1_acc_thres_pil_shift: 0.55
+
 
   train_ds:
     manifest_filepath: ???
@@ -66,7 +69,6 @@ model:
     mock_emb_noise_std: ${model.mock_emb_noise_std}
     mock_emb_degree_of_freedom: 8
     validation_mode: False
-
   validation_ds:
     manifest_filepath: ???
     emb_dir: ???
@@ -77,7 +79,7 @@ model:
     random_flip: False
     labels: null
     batch_size: ${batch_size}
-    shuffle: False
+    shuffle: True
     num_workers: ${num_workers}
     perm_mock_embs: ${model.perm_mock_embs}
     mock_emb_noise_std: ${model.mock_emb_noise_std}
@@ -225,7 +227,7 @@ model:
       name: InverseSquareRootAnnealing
       warmup_steps: 10000
       warmup_ratio: null
-      min_lr: 0.00005
+      min_lr: 0.00001
 
 trainer:
   devices: 1 # number of gpus (devices)

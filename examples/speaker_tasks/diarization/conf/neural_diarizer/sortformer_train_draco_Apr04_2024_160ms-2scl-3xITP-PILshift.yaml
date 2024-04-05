@@ -1,0 +1,263 @@
+# Mutiscale diarization decoder (MSDD) is a speaker diarization model based on initializing clustering and multiscale segmentation input.
+# Model name convention for MSDD: msdd_<number of scales>scl_<longest scale in decimal second (ds)>_<shortest scale in decimal second (ds)>_<overlap percentage of window shifting>Povl_<hidden layer size>x<number of LSTM layers>x<number of CNN output channels>x<repetition count of conv layer>
+# (Example) `msdd_5scl_15_05_50Povl_256x3x32x2.yaml` has 5 scales, the longest scale is 1.5 sec, the shortest scale is 0.5 sec, with 50 percent overlap, hidden layer size is 256, 3 LSTM layers, 32 CNN channels, 2 repeated Conv layers
+# MSDD model checkpoint (.ckpt) and NeMo file (.nemo) contain speaker embedding model (TitaNet) and the speaker model is loaded along with standalone MSDD moodule.
+# Note that MSDD models require more than one scale. Thus, the parameters in diarizer.speaker_embeddings.parameters should have more than one scale to function as a MSDD model.
+# Example: a manifest line for training 
+# {"audio_filepath": "/path/to/audio01.wav", "offset": 390.83, "duration": 13.45, "text": "-", "num_speakers": 2, "rttm_filepath": "/path/to/audio01.rttm"}
+name: "SortFormerDiarizer"
+sample_rate: 16000
+num_workers: 18
+batch_size: 8
+
+model: 
+  diarizer:
+    out_dir: null
+    oracle_vad: True # If True, uses RTTM files provided in manifest file to get speech activity (VAD) timestamps
+
+    speaker_embeddings:
+      model_path: null
+      parameters:
+        window_length_in_sec: [0.96,0.48] # Window length(s) in sec (floating-point number). either a number or a list. ex) 1.5 or [1.5,1.0,0.5]
+        shift_length_in_sec: [0.48,0.24] # Shift length(s) in sec (floating-point number). either a number or a list. ex) 0.75 or [0.75,0.5,0.25]
+        multiscale_weights: [1,1] # Weight for each scale. should be null (for single scale) or a list matched with window/shift scale count. ex) [0.33,0.33,0.33]
+        save_embeddings: True # Save embeddings as pickle file for each audio input.
+  
+  use_mock_embs: False
+  use_pil_train: False
+  use_pil_f1_score: False
+  perm_mock_embs: True
+  multi_scale_method: 'only_interpolate' # 'mean', 'attention', 'only_interpolate'
+  variance_in_mock_embs: 0.05
+  alpha: 0.5 # mix ratio between final pred and skip pred connections
+  sort_layer_on: pre # pre, post, False
+  sort_bin_order: False
+  mock_emb_noise_std: 0.05
+  num_workers: ${num_workers}
+  heads: 12
+  inner: 768
+  max_num_of_spks: 4 # Number of speakers per model. This is currently fixed at 6.
+  scale_n: 3 # Number of scales for MSDD model and initializing clustering.
+  interpolated_scale: 0.16 # The length of the interpolated scale
+  soft_label_thres: 0.5 # Threshold for creating discretized speaker label from continuous speaker label in RTTM files.
+  session_len_sec: 15
+  freeze_speaker_model: True # If True, speaker model is frozen and only MSDD module is trained.
+  random_flip: True
+  restore_from: null
+  global_loss_ratio: 0 # Ratio of global loss weight against speaker loss weight
+  num_classes: 5000 
+  layer_arrival_time_sort: True
+  add_pil_loss: True # If True, adds permutation invariant loss to the loss function.
+  pil_loss_thres: 0.0 # Threshold for permutation invariant loss.
+  train_f1_acc_window_length: 25
+  train_f1_acc_thres_pil_shift: 0.55
+
+
+  train_ds:
+    manifest_filepath: ???
+    emb_dir: ???
+    sample_rate: ${sample_rate}
+    num_spks: ${model.max_num_of_spks}
+    soft_label_thres: ${model.soft_label_thres}
+    session_len_sec: ${model.session_len_sec}
+    random_flip: ${model.random_flip}
+    labels: null
+    batch_size: ${batch_size}
+    shuffle: True
+    num_workers: ${num_workers}
+    perm_mock_embs: ${model.perm_mock_embs}
+    mock_emb_noise_std: ${model.mock_emb_noise_std}
+    mock_emb_degree_of_freedom: 8
+    validation_mode: False
+  validation_ds:
+    manifest_filepath: ???
+    emb_dir: ???
+    sample_rate: ${sample_rate}
+    num_spks: ${model.max_num_of_spks}
+    soft_label_thres: ${model.soft_label_thres}
+    session_len_sec: ${model.session_len_sec}
+    random_flip: False
+    labels: null
+    batch_size: ${batch_size}
+    shuffle: True
+    num_workers: ${num_workers}
+    perm_mock_embs: ${model.perm_mock_embs}
+    mock_emb_noise_std: ${model.mock_emb_noise_std}
+    mock_emb_degree_of_freedom: 48
+    validation_mode: True
+  
+  test_ds:
+    manifest_filepath: null
+    emb_dir: null
+    sample_rate: 16000
+    num_spks: ${model.max_num_of_spks}
+    soft_label_thres: ${model.soft_label_thres}
+    session_len_sec: ${model.session_len_sec}
+    random_flip: False
+    labels: null
+    batch_size: ${batch_size}
+    shuffle: False
+    seq_eval_mode: True
+    num_workers: ${num_workers}
+    perm_mock_embs: ${model.perm_mock_embs}
+    mock_emb_noise_std: ${model.mock_emb_noise_std}
+    mock_emb_degree_of_freedom: 48
+    validation_mode: True
+
+  preprocessor:
+    _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+    normalize: "per_feature"
+    window_size: 0.025
+    sample_rate: ${sample_rate}
+    window_stride: 0.01
+    window: "hann"
+    features: 80
+    n_fft: 512
+    frame_splicing: 1
+    dither: 0.00001
+
+  diarizer_module:
+    _target_: nemo.collections.asr.modules.sortformer_diarizer.SortformerDiarizer
+    num_spks: ${model.max_num_of_spks} # Number of speakers per model. This is currently fixed at 2.
+    hidden_size: 192 # Hidden layer size for linear layers in MSDD module
+    num_lstm_layers: 3 # Number of stacked LSTM layers
+    dropout_rate: 0.5 # Dropout rate
+    cnn_output_ch: 32 # Number of filters in a conv-net layer.
+    conv_repeat: 2 # Determins the number of conv-net layers. Should be greater or equal to 1.
+    emb_dim: 192 # Dimension of the speaker embedding vectors
+    scale_n: ${model.scale_n} # Number of scales for multiscale segmentation input
+    weighting_scheme: 'attn_scale_weight' # Type of weighting algorithm. Options: ('conv_scale_weight', 'attn_scale_weight')
+    context_vector_type: 'cos_sim' # Type of context vector: options. Options: ('cos_sim', 'elem_prod')
+    use_amsl_layer: True
+    sort_final_layer_on: False
+  
+  sortformer_encoder:
+    _target_: nemo.collections.asr.modules.transformer.sortformer_encoders.SortformerEncoder
+    num_layers: 6
+    hidden_size: 192 # Needs to be multiple of num_attention_heads
+    inner_size: ${model.inner}
+    num_attention_heads: ${model.heads}
+    attn_score_dropout: 0.5
+    attn_layer_dropout: 0.5
+    ffn_dropout: 0.5
+    hidden_act: relu
+    pre_ln: False
+    pre_ln_final_layer_norm: True
+    unit_dim: 5
+    sort_layer_on: ${model.sort_layer_on}
+    sort_layer_type: "parallel"
+    seq_var_sort: False
+    sort_bin_order: ${model.sort_bin_order}
+    layer_arrival_time_sort: ${model.layer_arrival_time_sort}
+    num_classes: ${model.max_num_of_spks}
+    detach_preds: False
+
+  transformer_encoder_row:
+    _target_: nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder
+    num_layers: 3
+    hidden_size: 299 # Needs to be multiple of num_attention_heads
+    inner_size: 598
+    num_attention_heads: ${model.heads}
+    attn_score_dropout: 0.5
+    attn_layer_dropout: 0.5
+    ffn_dropout: 0.5
+    hidden_act: relu
+    pre_ln: False
+    pre_ln_final_layer_norm: True
+
+  transformer_encoder:
+    _target_: nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder
+    num_layers: 6
+    hidden_size: 192 # Needs to be multiple of num_attention_heads
+    inner_size: ${model.inner}
+    num_attention_heads: ${model.heads}
+    attn_score_dropout: 0.5
+    attn_layer_dropout: 0.5
+    ffn_dropout: 0.5
+    hidden_act: relu
+    pre_ln: False
+    pre_ln_final_layer_norm: True
+  
+  speaker_decoder:
+    _target_: nemo.collections.asr.modules.SpeakerDecoder
+    feat_in: 3072
+    num_classes: 5000
+    pool_mode: 'attention'
+    emb_sizes: 192
+    angular: True
+
+  loss: 
+    _target_: nemo.collections.asr.losses.bce_loss.BCELoss
+    weight: null # Weight for binary cross-entropy loss. Either `null` or list type input. (e.g. [0.5,0.5])
+    reduction: mean
+    alpha: 0.0 # Ratio between BCE loss and affinity loss
+    sorted_loss: False # If True, labels are sorted to make first-come first-serve order.
+    sorted_preds: False # If True, labels are sorted to make first-come first-serve order.
+    class_normalization: False # If True, loss is normalized by the quantity of each class.
+
+  affinity_loss: 
+    _target_: nemo.collections.asr.losses.affinity_loss.AffinityLoss
+    gamma: 0.0
+    negative_margin: 0.5
+    positive_margin: 0.05
+
+  global_loss:
+    _target_: nemo.collections.asr.losses.angularloss.AngularSoftmaxLoss # you could also use cross-entrophy loss
+    scale: 30
+    margin: 0.1
+
+  lr: 0.0001
+  optim_param_groups:
+    sortformer_diarizer._speaker_model.encoder: # NOTE: Only EncDecDiarLabelModel class supports multi-level optim_param_groups
+      lr: ${model.lr}
+      weight_decay: 0.005
+
+      sched:
+        name: InverseSquareRootAnnealing
+        min_lr: 0.00005
+
+  optim:
+    name: adam
+    lr: ${model.lr}
+    betas:
+      - 0.9
+      - 0.98
+    weight_decay: 0.0
+    sched:
+      name: InverseSquareRootAnnealing
+      warmup_steps: 10000
+      warmup_ratio: null
+      min_lr: 0.00001
+
+trainer:
+  devices: 1 # number of gpus (devices)
+  accelerator: gpu 
+  max_epochs: 800
+  max_steps: -1 # computed at runtime if not set
+  num_nodes: 1
+  strategy: ddp_find_unused_parameters_true # Could be "ddp"
+  accumulate_grad_batches: 1
+  deterministic: True
+  enable_checkpointing: False
+  logger: False
+  log_every_n_steps: 1  # Interval of logging.
+  val_check_interval: 1.0  # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
+
+exp_manager:
+  use_datetime_version: False
+  exp_dir: null
+  name: ${name}
+  resume_if_exists: True
+  resume_ignore_no_checkpoint: True
+  create_tensorboard_logger: True
+  create_checkpoint_callback: True
+  create_wandb_logger: False
+  checkpoint_callback_params:
+    monitor: "val_f1_acc"
+    mode: "max"
+    save_top_k: 9
+    every_n_epochs: 1
+  wandb_logger_kwargs:
+    resume: True
+    name: null
+    project: null
