@@ -987,7 +987,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
         """
         if len(self.train_f1_acc_history) >= self.train_f1_acc_window_length:
             mean_f1 = torch.mean(torch.tensor(self.train_f1_acc_history), dim=0)
-            print(f"Mean F1 score: {mean_f1}, thres: {self.train_f1_acc_thres_pil_shift}")
+            # print(f"Mean F1 score: {mean_f1}, thres: {self.train_f1_acc_thres_pil_shift}")
             if mean_f1 > self.train_f1_acc_thres_pil_shift:
                 return True
             else:
