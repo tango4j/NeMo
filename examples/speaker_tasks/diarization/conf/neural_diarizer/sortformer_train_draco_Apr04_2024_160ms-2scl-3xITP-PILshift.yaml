@@ -50,7 +50,7 @@ model:
   add_pil_loss: True # If True, adds permutation invariant loss to the loss function.
   pil_loss_thres: 0.0 # Threshold for permutation invariant loss.
   train_f1_acc_window_length: 25
-  train_f1_acc_thres_pil_shift: 0.55
+  train_f1_acc_thres_pil_shift: 0.0
 
 
   train_ds:
