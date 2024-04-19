@@ -1039,10 +1039,10 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             targets_f1_score = targets
             targets_tr_loss = targets
             
-        if self._is_pil_shift():
+        # if self._is_pil_shift():
             # print(f"PIL shift detectedl, mean f1 acc {torch.mean(torch.tensor(self.train_f1_acc_history), dim=0)}")
-            targets_tr_loss = targets_pil 
-            targets_f1_score = targets_pil  
+            # targets_tr_loss = targets_pil 
+            # targets_f1_score = targets_pil  
                                           
         mid_layer_count = len(preds_list)
         if mid_layer_count > 0:
@@ -1173,9 +1173,9 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel):
             targets_f1_score = targets
             targets_tr_loss = targets 
         
-        if self._is_pil_shift():
-            targets_f1_score = targets_pil  
-            targets_tr_loss = targets_pil 
+        # if self._is_pil_shift():
+            # targets_f1_score = targets_pil  
+            # targets_tr_loss = targets_pil 
  
         # spk_loss = self.loss(probs=preds, labels=targets_tr_loss, signal_lengths=sequence_lengths)
         mid_layer_count = len(preds_list)
