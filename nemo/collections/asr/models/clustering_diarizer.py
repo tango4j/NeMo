@@ -162,7 +162,7 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         """
         model_path = self._cfg.diarizer.vad.model_path
         if model_path.endswith('.nemo'):
-            if 'frame' in model_path:
+            if 'frame_vad' in model_path:
                 self._vad_model = EncDecMultiClassificationModel.restore_from(restore_path=model_path, map_location=self._cfg.device)
             else:
                 self._vad_model = EncDecClassificationModel.restore_from(model_path, map_location=self._cfg.device)
@@ -797,11 +797,8 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
                             self._save_extracted_data(uniq_id, is_multi_channel, save_embs=save_embs)
                     else:
                         # Assign the actual length of the last segment to the truncated segment
-                        if last_window_flag:
-                            self._save_extracted_data(uniq_id, is_multi_channel, save_embs=save_embs) 
                         print(f"Truncated - batch_idx: {batch_idx} sample_id {sample_id} ts_add.shape {ts_add.shape} Truncating last segment of uniq_id: {uniq_id}")
                         self._diarizer_model.uniq_id_segment_counts[uniq_id] = self.uniq_id_segment_counts[uniq_id]
-                        
                 else:
                     self.uniq_id_segment_counts[uniq_id] = 1
                     self.embeddings[uniq_id] = [embs[sample_id][:-(ovl), :, :]]
@@ -814,16 +811,13 @@ class ClusteringDiarizer(torch.nn.Module, Model, DiarizationMixin):
         logging.info(f"End of stitch_and_save: Saving embeddings to {self._speaker_dir}")
         return embeddings_cat, time_stamps_cat, vad_probs_cat
     
-    def get_hash_from_settings(self, use_data_text=True, hash_len=8):
+    def get_hash_from_settings(self):
         manifest_file = self._cfg.diarizer.manifest_filepath
         manifest_name = os.path.basename(manifest_file).split(".json")[0]
-        embedding_hash = hashlib.md5((str(self._diarizer_model.cfg.diarizer.speaker_embeddings)).encode()).hexdigest()[:hash_len]
-        manifest_tag = manifest_name.replace(".", "_")
-        if use_data_text:
-            dataset_hash = hashlib.md5(str(self._diarizer_model.segmented_manifest_list).encode()).hexdigest()[:8] + f"_{manifest_tag}"
-        else:
-            dataset_hash = manifest_tag
-        return embedding_hash, dataset_hash
+        embedding_hash = hashlib.md5((str(self._diarizer_model.cfg.diarizer.speaker_embeddings)).encode()).hexdigest()
+        # dataset_hash = hashlib.md5(str(self._diarizer_model.segmented_manifest_list).encode()).hexdigest()
+        dataset_hash = manifest_name
+        return embedding_hash[:8], dataset_hash
 
      
     def _save_tensors(self, tensor_var, uniq_id, embedding_hash, dataset_hash, data_type_name, is_multi_channel=False):

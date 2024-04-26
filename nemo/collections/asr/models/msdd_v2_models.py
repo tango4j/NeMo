@@ -1574,7 +1574,6 @@ class NeuralDiarizer(LightningModule):
             # 'diar_eval_settings', [(0.25, False), (0.25, True)]
         )
             # 'diar_eval_settings', [(0.25, True), (0.25, False), (0.0, False)]
-        # self.diar_eval_settings = [(0.25,False)]
         if msdd_model is not None:
             self.msdd_model = msdd_model
             self._speaker_model = None

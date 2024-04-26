@@ -2081,12 +2081,9 @@ def change_output_dir_names(params, threshold, verbose=True):
     if not os.path.exists(os.path.join(params['out_rttm_dir'], params['system_name'])):
         os.makedirs(os.path.join(head, params['system_name']), exist_ok=True)
     threshold = "" if not verbose else f"{threshold:.2f}"
-    # params['out_rttm_dir'] = os.path.join(head, params['system_name'], f"pred_rttms_T{threshold}")
-    # params['out_json_dir'] = os.path.join(head, params['system_name'], f"pred_jsons_T{threshold}")
-    # params['out_logit_dir'] = os.path.join(head, params['system_name'], f"pred_logits")
-    params['out_rttm_dir'] = os.path.join(head, f"pred_rttms")
-    params['out_json_dir'] = os.path.join(head, f"pred_jsons")
-    params['out_logit_dir'] = os.path.join(head, f"pred_logits")
+    params['out_rttm_dir'] = os.path.join(head, params['system_name'], f"pred_rttms_T{threshold}")
+    params['out_json_dir'] = os.path.join(head, params['system_name'], f"pred_jsons_T{threshold}")
+    params['out_logit_dir'] = os.path.join(head, params['system_name'], f"pred_logits")
     if not os.path.exists(params['out_rttm_dir']):
         os.makedirs(params['out_rttm_dir'], exist_ok=True)
     if not os.path.exists(params['out_json_dir']):
@@ -2192,8 +2189,8 @@ def make_rttm_with_overlap(
                 (hyp_labels, uniq_id, params['out_rttm_dir'])
             if params['out_json_dir']:
                 generate_json_output(hyp_labels, uniq_id, params['out_json_dir'], manifest_dic)
-            if params['out_logit_dir']:
-                save_pred_logits(uniq_id, hyp_labels, clus_label_dict[uniq_id], preds_dict[uniq_id], params['out_logit_dir'], params)
+            # if params['out_logit_dir']:
+            #     save_pred_logits(uniq_id, clus_label_dict[uniq_id], preds_dict[uniq_id], params['out_logit_dir'], params)
             all_hypothesis.append([uniq_id, hypothesis])
             rttm_file = manifest_dic.get('rttm_filepath', None)
             
@@ -2211,12 +2208,11 @@ def write_logit_pickles(outfile_path, pickle_dump_dict):
     with open(outfile_path, 'wb') as fp:
         pickle.dump(pickle_dump_dict, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
-def save_pred_logits(uniq_id, hyp_labels, clus_label, pred_mat, out_json_dir, params):
+def save_pred_logits(uniq_id, clus_label, pred_mat, out_json_dir, params):
     pickle_dump_dict = {
         'clus_label': clus_label,
         'pred_mat': pred_mat,
         'params': params,
-        'diar_labels': hyp_labels,
     }
     write_logit_pickles(outfile_path=os.path.join(out_json_dir, uniq_id + '.pkl'), pickle_dump_dict=pickle_dump_dict)
     
