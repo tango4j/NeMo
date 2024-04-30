@@ -35,53 +35,12 @@
 
 .. _main-readme:
 
-**NVIDIA NeMo Framework**
+**NVIDIA NeMo Framework: Branch for Diarization and LLM**
 =========================
-
-Latest News
------------
-
-.. raw:: html
-
-  <details open>
-    <summary><b>Large Language Models and Multimodal</b></summary>
-        <details>
-          <summary><a href="https://cloud.google.com/blog/products/compute/gke-and-nvidia-nemo-framework-to-train-generative-ai-models">Accelerate your generative AI journey with NVIDIA NeMo Framework on GKE</a> (2024/03/16) </summary>
-
-          An end-to-end walkthrough to train generative AI models on the Google Kubernetes Engine (GKE) using the NVIDIA NeMo Framework is available at https://github.com/GoogleCloudPlatform/nvidia-nemo-on-gke. The walkthrough includes detailed instructions on how to set up a Google Cloud Project and pre-train a GPT model using the NeMo Framework.
-          <br><br>
-        </details>
-
-      <details>
-        <summary><a href="https://blogs.nvidia.com/blog/bria-builds-responsible-generative-ai-using-nemo-picasso/">Bria Builds Responsible Generative AI for Enterprises Using NVIDIA NeMo, Picasso</a> (2024/03/06) </summary>
-
-        Bria, a Tel Aviv startup at the forefront of visual generative AI for enterprises now leverages the NVIDIA NeMo Framework. The Bria.ai platform uses reference implementations from the NeMo Multimodal collection, trained on NVIDIA Tensor Core GPUs, to enable high-throughput and low-latency image generation. Bria has also adopted NVIDIA Picasso, a foundry for visual generative AI models, to run inference.
-        <br><br>
-    </details>
-
-    <details>
-      <summary><a href="https://developer.nvidia.com/blog/new-nvidia-nemo-framework-features-and-nvidia-h200-supercharge-llm-training-performance-and-versatility/">New NVIDIA NeMo Framework Features and NVIDIA H200</a> (2023/12/06) </summary>
-
-      NVIDIA NeMo Framework now includes several optimizations and enhancements, including: 1) Fully Sharded Data Parallelism (FSDP) to improve the efficiency of training large-scale AI models, 2) Mix of Experts (MoE)-based LLM architectures with expert parallelism for efficient LLM training at scale, 3) Reinforcement Learning from Human Feedback (RLHF) with TensorRT-LLM for inference stage acceleration, and 4) up to 4.2x speedups for Llama 2 pre-training on NVIDIA H200 Tensor Core GPUs.
-      <br><br>
-      <a href="https://developer.nvidia.com/blog/new-nvidia-nemo-framework-features-and-nvidia-h200-supercharge-llm-training-performance-and-versatility"><img src="https://github.com/sbhavani/TransformerEngine/blob/main/docs/examples/H200-NeMo-performance.png" alt="H200-NeMo-performance" style="width: 600px;"></a>
-      <br><br>
-    </details>
-
-    <details>
-      <summary><a href="https://blogs.nvidia.com/blog/nemo-amazon-titan/">NVIDIA now powers training for Amazon Titan Foundation models</a> (2023/11/28) </summary>
-
-      NVIDIA NeMo Framework now empowers the Amazon Titan foundation models (FM) with efficient training of large language models (LLMs). The Titan FMs form the basis of Amazon’s generative AI service, Amazon Bedrock. The NeMo Framework provides a versatile framework for building, customizing, and running LLMs.
-      <br><br>
-    </details>
-
-  </details>
-
-   
-
 
 Introduction
 ------------
+## This branch is containing working configurations and forks for Apex, Megatron-LM, TransformerEngine.
 
 NVIDIA NeMo Framework is a generative AI framework built for researchers and pytorch developers
 working on large language models (LLMs), multimodal models (MM), automatic speech recognition (ASR),
@@ -344,9 +303,9 @@ The most recent working versions of these dependencies are:
 
 .. code-block:: bash
 
-  export apex_commit=810ffae374a2b9cb4b5c5e28eaeca7d7998fca0c
-  export te_commit=bfe21c3d68b0a9951e5716fb520045db53419c5e
-  export mcore_commit=fbb375d4b5e88ce52f5f7125053068caff47f93f
+  export apex_commit=2386a912164b0c5cfcd8be7a2b890fbac5607c82
+  export te_commit=stable
+  export mcore_commit=single_gpu_main
   export nv_pytorch_tag=24.02-py3
 
 When using a released version of NeMo, 
@@ -378,9 +337,10 @@ To install Apex, run
 
 .. code-block:: bash
 
+    export apex_commit=2386a912164b0c5cfcd8be7a2b890fbac5607c82
     git clone https://github.com/NVIDIA/apex.git
     cd apex
-    git checkout $apex_commit
+    git checkout 2386a912164b0c5cfcd8be7a2b890fbac5607c82
     pip install . -v --no-build-isolation --disable-pip-version-check --no-cache-dir --config-settings "--build-option=--cpp_ext --cuda_ext --fast_layer_norm --distributed_adam --deprecated_fused_adam --group_norm"
 
 
@@ -415,11 +375,11 @@ Documentation for installing Transformer Engine can be found `here <https://docs
 
 .. code-block:: bash
 
-  git clone https://github.com/NVIDIA/TransformerEngine.git && \
+  # Hash: 6a9edc3 stable branch (4/29/2024)
+  git clone --branch stable --recursive https://github.com/NVIDIA/TransformerEngine.git
   cd TransformerEngine && \
-  git checkout $te_commit && \
   git submodule init && git submodule update && \
-  NVTE_FRAMEWORK=pytorch NVTE_WITH_USERBUFFERS=1 MPI_HOME=/usr/local/mpi pip install .
+  export NVTE_FRAMEWORK=pytorch; pip install .
 
 Transformer Engine requires PyTorch to be built with at least CUDA 11.8.
 
@@ -433,11 +393,13 @@ transformer architectures, and optimized pytorch datasets.
 
 NeMo LLM and Multimodal may need Megatron Core to be updated to a recent version.
 
+* This Megatron-LM fork is modified to work with single-gpu setup (Modification in paralle_state.py::get_ranks())
+
 .. code-block:: bash
 
-  git clone https://github.com/NVIDIA/Megatron-LM.git && \
+  git clone https://github.com/tango4j/Megatron-LM.git && \
   cd Megatron-LM && \
-  git checkout $mcore_commit && \
+  git checkout single_gpu_main && \
   pip install . && \
   cd megatron/core/datasets && \
   make
