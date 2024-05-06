@@ -19,30 +19,98 @@ import os
 from collections import OrderedDict as od
 from datetime import datetime
 from typing import Dict, List, Tuple
+from scipy.special import softmax
 
 import numpy as np
+import torch
+import re
+from tqdm import tqdm 
+from nemo.collections.asr.parts.utils.pydiardecode import build_diardecoder
+# diar_decoder, diar_language_model
 
-from nemo.collections.asr.metrics.der import concat_perm_word_error_rate
+from nemo.collections.asr.metrics.der import concat_perm_word_error_rate, spk_attr_word_error_rate, word_diar_error_rate
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.models import ClusteringDiarizer
+from nemo.collections.asr.models.msdd_v2_models import NeuralDiarizer
 from nemo.collections.asr.parts.utils.speaker_utils import (
-    audio_rttm_map,
     get_uniqname_from_filepath,
     labels_to_rttmfile,
     rttm_to_labels,
     write_rttm2manifest,
 )
 from nemo.utils import logging
+from pprint import pprint
+import multiprocessing 
+import pickle
 
 try:
     import arpa
+    import kenlm
 
     ARPA = True
+    ARPA_STT = '<s>'
+    ARPA_END = '</s>'
 except ImportError:
     ARPA = False
 
 __all__ = ['OfflineDiarWithASR']
+   
+def moving_average(a, n=5):
+    ret = np.cumsum(a, dtype=float)
+    ret[n:] = ret[n:] - ret[:-n]
+    result = ret[n - 1:] / n
+    beginning = [ret[i] / (i + 1) for i in range(n - 1)]
+    return np.concatenate((beginning, result))
 
+def audio_rttm_map(manifest, attach_dur=False):
+    """
+    This function is designed to override the default behavior of audio_rttm_map function in nemo.collections.asr.speaker_utils.
+    
+    Returns:
+        AUDIO_RTTM_MAP (dict) : A dictionary with keys of uniq id, which is being used to map audio files and corresponding rttm files
+    """
+
+    AUDIO_RTTM_MAP = {}
+
+    json_filepath_list = open(manifest).readlines()
+    for json_path in json_filepath_list:
+        json_path = json_path.strip()
+        uniqname = os.path.split(json_path)[-1].split(".")[0]
+    # with open(manifest, 'r') as inp_file:
+        # lines = inp_file.readlines()
+        # logging.info("Number of files to diarize: {}".format(len(lines)))
+        # for line in lines:
+        #     line = line.strip()
+            # dic = json.loads(line)
+        dic = {}
+        meta = {
+            'audio_filepath': uniqname,
+            'rttm_filepath': dic.get('rttm_filepath', None),
+            'offset': dic.get('offset', None),
+            'duration': dic.get('duration', None),
+            'text': dic.get('text', None),
+            'num_speakers': dic.get('num_speakers', None),
+            'uem_filepath': dic.get('uem_filepath', None),
+            'ctm_filepath': dic.get('ctm_filepath', None),
+        }
+        # if attach_dur:
+        #     uniqname = get_uniq_id_with_dur(meta)
+        # else:
+        #     if "uniq_id" in dic.keys():
+        #         uniqname = dic['uniq_id']
+        #     else:
+        #         uniqname = get_uniqname_from_filepath(filepath=meta['audio_filepath'])
+
+        if uniqname not in AUDIO_RTTM_MAP:
+            AUDIO_RTTM_MAP[uniqname] = meta
+        else:
+            raise KeyError(
+                "file {} is already part of AUDIO_RTTM_MAP, it might be duplicated, Note: file basename must be unique".format(
+                    meta['audio_filepath']
+                )
+            )
+
+    return AUDIO_RTTM_MAP
 
 def dump_json_to_file(file_path: str, session_trans_dict: dict):
     """
@@ -104,7 +172,7 @@ def convert_ctm_to_text(ctm_file_path: str) -> Tuple[List[str], str]:
         mix_reference.append(ctm_split[4])
     spk_reference = [" ".join(word_list) for word_list in per_spk_ref_trans_dict.values()]
     mix_reference = " ".join(mix_reference)
-    return spk_reference, mix_reference
+    return spk_reference, mix_reference, per_spk_ref_trans_dict
 
 
 def convert_word_dict_seq_to_text(word_dict_seq_list: List[Dict[str, float]]) -> Tuple[List[str], str]:
@@ -146,7 +214,7 @@ def convert_word_dict_seq_to_text(word_dict_seq_list: List[Dict[str, float]]) ->
     # Create a list containing string formatted transcript
     spk_hypothesis = [" ".join(word_list) for word_list in per_spk_hyp_trans_dict.values()]
     mix_hypothesis = " ".join(mix_hypothesis)
-    return spk_hypothesis, mix_hypothesis
+    return spk_hypothesis, mix_hypothesis, per_spk_hyp_trans_dict
 
 
 def convert_word_dict_seq_to_ctm(
@@ -268,7 +336,7 @@ class OfflineDiarWithASR:
             Hydra config for diarizer key
         params (OmegaConf):
             Parameters config in diarizer.asr
-        ctc_decoder_params (OmegaConf)
+        ctc_decoder_params (OmegaConf):
             Hydra config for beam search decoder
         realigning_lm_params (OmegaConf):
             Hydra config for realigning language model
@@ -302,6 +370,7 @@ class OfflineDiarWithASR:
 
     def __init__(self, cfg_diarizer):
         self.cfg_diarizer = cfg_diarizer
+        self.diar_model_config = None
         self.params = cfg_diarizer.asr.parameters
         self.ctc_decoder_params = cfg_diarizer.asr.ctc_decoder_parameters
         self.realigning_lm_params = cfg_diarizer.asr.realigning_lm_parameters
@@ -349,8 +418,10 @@ class OfflineDiarWithASR:
             'MISS',
             'est_n_spk',
             'ref_n_spk',
-            'cpWER',
             'WER',
+            'cpWER',
+            'SAWER',
+            'deltaSAWER',
             'mapping',
         ]
 
@@ -359,8 +430,9 @@ class OfflineDiarWithASR:
         Create lists containing the filepaths of audio clips and CTM files.
         """
         self.AUDIO_RTTM_MAP = audio_rttm_map(self.manifest_filepath)
+        if self.cfg_diarizer.uniq_id is not None and self.cfg_diarizer.uniq_id in self.AUDIO_RTTM_MAP:
+            self.AUDIO_RTTM_MAP = {self.cfg_diarizer.uniq_id: self.AUDIO_RTTM_MAP[self.cfg_diarizer.uniq_id]}
         self.audio_file_list = [value['audio_filepath'] for _, value in self.AUDIO_RTTM_MAP.items()]
-
         self.ctm_file_list = []
         for k, audio_file_path in enumerate(self.audio_file_list):
             uniq_id = get_uniqname_from_filepath(audio_file_path)
@@ -384,8 +456,14 @@ class OfflineDiarWithASR:
             self.realigning_lm_params['max_number_of_words'],
         )
         self.stt_end_tokens = ['</s>', '<s>']
-        logging.info(f"Loading LM for realigning: {self.realigning_lm_params['arpa_language_model']}")
-        return arpa.loadf(self.realigning_lm_params['arpa_language_model'])[0]
+        diar_decoder = build_diardecoder(
+            kenlm_model_path=self.realigning_lm_params['arpa_language_model'], 
+            alpha=self.realigning_lm_params['alpha'], 
+            beta=self.realigning_lm_params['beta'],
+            word_window=self.realigning_lm_params['word_window'],
+            use_ngram=self.realigning_lm_params['use_ngram'],
+        )
+        return diar_decoder
 
     def _init_session_trans_dict(self, uniq_id: str, n_spk: int):
         """
@@ -483,7 +561,7 @@ class OfflineDiarWithASR:
                 A tuple containing pyannote metric instance and mapping dictionary between
                 speakers in hypotheses and speakers in reference RTTM files.
         """
-
+        self.diar_model_config = diar_model_config
         if diar_model_config.diarizer.asr.parameters.asr_based_vad:
             self._save_VAD_labels_list(word_timestamps)
             oracle_manifest = os.path.join(self.root_path, 'asr_vad_manifest.json')
@@ -491,20 +569,29 @@ class OfflineDiarWithASR:
             diar_model_config.diarizer.vad.model_path = None
             diar_model_config.diarizer.vad.external_vad_manifest = oracle_manifest
 
-        diar_model = ClusteringDiarizer(cfg=diar_model_config)
-        score = diar_model.diarize()
+        # diar_model = ClusteringDiarizer(cfg=diar_model_config)
+        # score = diar_model.diarize()
+        diar_model = NeuralDiarizer(cfg=copy.deepcopy(diar_model_config)).to(diar_model_config.device)
+        outputs = diar_model.diarize()
+        embedding_hash, dataset_hash = diar_model.clustering_embedding.clus_diar_model.get_hash_from_settings()
+        extracted_data_path = os.path.join(diar_model.clustering_embedding.clus_diar_model._speaker_dir, f"{embedding_hash}_{dataset_hash}")
         if diar_model_config.diarizer.vad.model_path is not None and not diar_model_config.diarizer.oracle_vad:
+            # vad_processing_dir=f"{diar_model.clustering_embedding.clus_diar_model.extracted_data_path}/vad_probs",
+            
             self._get_frame_level_VAD(
-                vad_processing_dir=diar_model.vad_pred_dir,
+                # vad_processing_dir=diar_model.vad_pred_dir,
+                vad_processing_dir=f"{extracted_data_path}/vad_probs",
                 smoothing_type=diar_model_config.diarizer.vad.parameters.smoothing,
             )
+
+        score, diar_logits = outputs 
 
         diar_hyp = {}
         for k, audio_file_path in enumerate(self.audio_file_list):
             uniq_id = get_uniqname_from_filepath(audio_file_path)
             pred_rttm = os.path.join(self.root_path, 'pred_rttms', uniq_id + '.rttm')
             diar_hyp[uniq_id] = rttm_to_labels(pred_rttm)
-        return diar_hyp, score
+        return diar_hyp, diar_logits, score
 
     def _get_frame_level_VAD(self, vad_processing_dir, smoothing_type=False):
         """
@@ -522,13 +609,12 @@ class OfflineDiarWithASR:
             ext_type = smoothing_type
 
         for uniq_id in self.AUDIO_RTTM_MAP:
-            frame_vad = os.path.join(vad_processing_dir, uniq_id + '.' + ext_type)
-            frame_vad_float_list = []
-            with open(frame_vad, 'r') as fp:
-                for line in fp.readlines():
-                    frame_vad_float_list.append(float(line.strip()))
-            self.frame_VAD[uniq_id] = frame_vad_float_list
-
+            # frame_vad = os.path.join(vad_processing_dir, uniq_id + '.' + ext_type)
+            frame_vad_pkl_path = os.path.join(vad_processing_dir, f"ext_vad_probs_{uniq_id}.pkl")
+            # frame_vad_float_list = []
+            with open(frame_vad_pkl_path, 'rb') as file:
+                frame_vad_float_list = pickle.load(file)
+            self.frame_VAD[uniq_id] = torch.cat(frame_vad_float_list, axis=0).numpy()
     @staticmethod
     def gather_eval_results(
         diar_score,
@@ -555,6 +641,7 @@ class OfflineDiarWithASR:
             der_results (dict):
                 Dictionary containing scores for each audio file along with aggregated results
         """
+        # metric, mapping_dict, _ = diar_score[1]
         metric, mapping_dict, _ = diar_score
         results = metric.results_
         der_results = {}
@@ -607,7 +694,7 @@ class OfflineDiarWithASR:
         return der_results
 
     def _get_the_closest_silence_start(
-        self, vad_index_word_end: float, vad_frames: np.ndarray, offset: int = 10
+        self, vad_index_word_end: float, vad_frames: np.ndarray, offset: int = 10, frame_len_sec: float = 0.05,
     ) -> float:
         """
         Find the closest silence frame from the given starting position.
@@ -628,6 +715,8 @@ class OfflineDiarWithASR:
 
         cursor = vad_index_word_end + offset
         limit = int(100 * self.max_word_ts_length_in_sec + vad_index_word_end)
+        vad_frames_sp = np.repeat(vad_frames, int(frame_len_sec / 0.01))
+        vad_frames = moving_average(vad_frames_sp, n=5)
         while cursor < len(vad_frames):
             if vad_frames[cursor] < self.vad_threshold_for_word_ts:
                 break
@@ -667,7 +756,7 @@ class OfflineDiarWithASR:
                     if uniq_id in self.frame_VAD:
                         vad_index_word_end = int(100 * word_ts[1])
                         closest_sil_stt = self._get_the_closest_silence_start(
-                            vad_index_word_end, self.frame_VAD[uniq_id]
+                            vad_index_word_end, self.frame_VAD[uniq_id], frame_len_sec=0.05
                         )
                         vad_est_len = round(closest_sil_stt - word_ts[0], 2)
                     else:
@@ -682,7 +771,11 @@ class OfflineDiarWithASR:
         return enhanced_word_ts_dict
 
     def get_transcript_with_speaker_labels(
-        self, diar_hyp: Dict[str, List[str]], word_hyp: Dict[str, List[str]], word_ts_hyp: Dict[str, List[float]]
+        self, 
+        diar_hyp: Dict[str, List[str]], 
+        word_hyp: Dict[str, List[str]], 
+        word_ts_hyp: Dict[str, List[float]],
+        diar_logits: Dict[str, Dict[str, list]]=None,
     ) -> Dict[str, Dict[str, float]]:
         """
         Match the diarization result with the ASR output.
@@ -730,30 +823,70 @@ class OfflineDiarWithASR:
                 )
             else:
                 self.realigning_lm = self._load_realigning_LM()
+            # self.spktowordlm = SpeakerToWordAlignerLM(realigning_lm=self.realigning_lm)
 
         word_dict_seq_list = []
         for k, audio_file_path in enumerate(self.audio_file_list):
             uniq_id = get_uniqname_from_filepath(audio_file_path)
-            words, diar_labels = word_hyp[uniq_id], diar_hyp[uniq_id]
+            words, diar_labels, diar_hyp_dict = word_hyp[uniq_id], diar_hyp[uniq_id], diar_logits[uniq_id]
             word_ts, word_rfnd_ts = word_ts_hyp[uniq_id], word_ts_refined[uniq_id]
-
             # Assign speaker labels to words
             word_dict_seq_list = self.get_word_level_json_list(
-                words=words, word_ts=word_ts, word_rfnd_ts=word_rfnd_ts, diar_labels=diar_labels
+                words=words, 
+                word_ts=word_ts, 
+                word_rfnd_ts=word_rfnd_ts, 
+                diar_labels=diar_labels, 
+                diar_logit_mat=diar_hyp_dict['pred_mat']
             )
-            if self.realigning_lm:
-                word_dict_seq_list = self.realign_words_with_lm(word_dict_seq_list)
+            if self.realigning_lm is not None:
+                # output_beams = self.realign_words_with_lm(diar_hyp_dict['pred_mat'], word_dict_seq_list)
+                output_beams = self.realign_words_with_lm(word_dict_seq_list=word_dict_seq_list)
+                word_dict_seq_list = output_beams[0][2]
 
+            
             # Create a transscript information json dictionary from the output variables
-            trans_info_dict[uniq_id] = self._make_json_output(uniq_id, diar_labels, word_dict_seq_list)
+            trans_info_dict[uniq_id] = self._make_json_output(uniq_id, diar_labels, word_dict_seq_list, write_files=True)
         logging.info(f"Diarization with ASR output files are saved in: {self.root_path}/pred_rttms")
         return trans_info_dict
 
+    def beam_search_diarization(
+        self, 
+        trans_info_dict,
+        diar_logits: Dict[str, Dict[str, list]]=None,
+        port_num=None,
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Match the diarization result with the ASR output.
+        The words and the timestamps for the corresponding words are matched in a for loop.
+
+        Args:
+
+        Returns:
+            trans_info_dict (dict):
+                Dictionary containing word timestamps, speaker labels and words from all sessions.
+                Each session is indexed by a unique ID.
+        """
+        if self.realigning_lm_params['arpa_language_model']:
+            if not ARPA:
+                raise ImportError(
+                    'LM for realigning is provided but arpa is not installed. Install arpa using PyPI: pip install arpa'
+                )
+            else:
+                self.realigning_lm = self._load_realigning_LM()
+        for uniq_id, session_dict in tqdm(trans_info_dict.items(), total=len(trans_info_dict), disable=False):
+            if self.realigning_lm is not None:
+                word_dict_seq_list = session_dict['words']
+                output_beams = self.realign_words_with_lm(word_dict_seq_list=word_dict_seq_list, speaker_count=session_dict['speaker_count'], port_num=port_num)
+                word_dict_seq_list = output_beams[0][2]
+                trans_info_dict[uniq_id]['words'] = word_dict_seq_list
+        return trans_info_dict
+    
     def get_word_level_json_list(
         self,
         words: List[str],
         diar_labels: List[str],
         word_ts: List[List[float]],
+        diar_logit_mat = None,
         word_rfnd_ts: List[List[float]] = None,
         decimals: int = 2,
     ) -> Dict[str, Dict[str, str]]:
@@ -813,11 +946,25 @@ class OfflineDiarWithASR:
                 start_point, end_point, speaker = diar_labels[turn_idx].split()
             stt_sec = round(refined_word_ts_stt_end[0], decimals)
             end_sec = round(refined_word_ts_stt_end[1], decimals)
-            word_dict_seq_list.append({'word': word, 'start_time': stt_sec, 'end_time': end_sec, 'speaker': speaker})
+            speaker_softmax = self._get_speaker_softmax(diar_logit_mat=diar_logit_mat, stt=stt_sec, end=end_sec)
+            # speaker_softmax = None
+            word_dict_seq_list.append({'word': word, 'start_time': stt_sec, 'end_time': end_sec, 'speaker': speaker, 'speaker_softmax': speaker_softmax})
         return word_dict_seq_list
 
+    def _get_speaker_softmax(self, diar_logit_mat, stt, end):
+        frame_len = float(self.diar_model_config.diarizer.speaker_embeddings.parameters.interpolate_scale/2)
+        stt_frame = max(int(stt/frame_len), 0)
+        end_frame = min(max(int(np.ceil(end/frame_len)), stt_frame+1), diar_logit_mat.shape[0])
+        sigmoid_vec = diar_logit_mat[stt_frame:end_frame, :].mean(dim=0)
+        softmax_list = (sigmoid_vec/torch.sum(sigmoid_vec)).tolist()
+        return softmax_list
+    
     def _make_json_output(
-        self, uniq_id: str, diar_labels: List[str], word_dict_seq_list: List[Dict[str, float]],
+        self, 
+        uniq_id: str, 
+        diar_labels: List[str], 
+        word_dict_seq_list: List[Dict[str, float]],
+        write_files: bool = True,
     ) -> Dict[str, Dict[str, str]]:
         """
         Generate json output files and transcripts from the ASR and diarization results.
@@ -920,7 +1067,7 @@ class OfflineDiarWithASR:
         session_trans_dict['transcription'] = ' '.join(word_seq_list)
         # add sentences to transcription information dict
         session_trans_dict['sentences'] = sentences
-        self._write_and_log(uniq_id, session_trans_dict, audacity_label_words, gecko_dict, sentences)
+        self._write_and_log(uniq_id, session_trans_dict, audacity_label_words, gecko_dict, write_files=write_files)
         return session_trans_dict
 
     def _get_realignment_ranges(self, k: int, word_seq_len: int) -> Tuple[int, int]:
@@ -983,8 +1130,9 @@ class OfflineDiarWithASR:
 
         word_pos = word_pos + self.word_ts_anchor_offset
         return word_pos
+    
 
-    def realign_words_with_lm(self, word_dict_seq_list: List[Dict[str, float]]) -> List[Dict[str, float]]:
+    def realign_words_with_lm(self, word_dict_seq_list: List[Dict[str, float]], speaker_count: int = None, port_num=None) -> List[Dict[str, float]]:
         """
         Realign the mapping between speaker labels and words using a language model.
         The realigning process calculates the probability of the certain range around the words,
@@ -1009,33 +1157,31 @@ class OfflineDiarWithASR:
             realigned_list (list):
                 List of dictionaries containing words, word timestamps and speaker labels.
         """
-        word_seq_len = len(word_dict_seq_list)
-        hyp_w_dict_list, spk_list = [], []
-        for k, line_dict in enumerate(word_dict_seq_list):
-            word, spk_label = line_dict['word'], line_dict['speaker']
-            hyp_w_dict_list.append(word)
-            spk_list.append(spk_label)
+        if speaker_count is None:
+        # hyp_w_dict_list, 
+            spk_list = []
+            for k, line_dict in enumerate(word_dict_seq_list):
+                word, spk_label = line_dict['word'], line_dict['speaker']
+                # hyp_w_dict_list.append(word)
+                spk_list.append(spk_label)
+        else:
+            spk_list = [ f"speaker_{k}" for k in range(speaker_count)]
 
-        realigned_list = []
-        org_spk_list = copy.deepcopy(spk_list)
-        for k, line_dict in enumerate(word_dict_seq_list):
-            if self.N_range[0] < k < (word_seq_len - self.N_range[0]) and (
-                spk_list[k] != org_spk_list[k + 1] or spk_list[k] != org_spk_list[k - 1]
-            ):
-                N1, N2 = self._get_realignment_ranges(k, word_seq_len)
-                hyp_former = self.realigning_lm.log_s(
-                    ' '.join(hyp_w_dict_list[k - N1 : k] + self.stt_end_tokens + hyp_w_dict_list[k : k + N2])
-                )
-                hyp_latter = self.realigning_lm.log_s(
-                    ' '.join(hyp_w_dict_list[k - N1 : k + 1] + self.stt_end_tokens + hyp_w_dict_list[k + 1 : k + N2])
-                )
-                log_p = [hyp_former, hyp_latter]
-                p_order = np.argsort(log_p)[::-1]
-                if log_p[p_order[0]] > log_p[p_order[1]] + self.realigning_lm_params['logprob_diff_threshold']:
-                    if p_order[0] == 0:
-                        spk_list[k] = org_spk_list[k + 1]
-                line_dict['speaker'] = spk_list[k]
-            realigned_list.append(line_dict)
+        # realigned_list = []
+        # speaker_lm_probs, spk_trans_dict = self.spktowordlm.build_arpa_diar_lm(speaker_list=list(set(spk_list)), 
+        #                                                                        word_dict_seq_list=word_dict_seq_list)
+        # For loop that simulates online decoding
+        # for word_idx, (word, spk_label) in enumerate(zip(hyp_w_dict_list, spk_list)):
+        
+        
+        # realigned_list = self.spktowordlm.simulate_decode_run(speaker_list=sorted(list(set(spk_list))), 
+        #                                                        word_dict_seq_list=word_dict_seq_list)
+        realigned_list = self.realigning_lm.decode_beams(
+                                            # logits=diar_logits, 
+                                            beam_width=self.realigning_lm_params['beam_width'],
+                                            speaker_list=sorted(list(set(spk_list))), 
+                                            word_dict_seq_list=word_dict_seq_list,
+                                            port_num=port_num)
         return realigned_list
 
     @staticmethod
@@ -1044,6 +1190,7 @@ class OfflineDiarWithASR:
         hyp_trans_info_dict: Dict[str, Dict[str, float]],
         hyp_ctm_file_list: List[str] = None,
         ref_ctm_file_list: List[str] = None,
+        mapping_dict: Dict[str, str] = None,
     ) -> Dict[str, Dict[str, float]]:
         """
         Evaluate the result transcripts based on the provided CTM file. WER and cpWER are calculated to assess
@@ -1068,7 +1215,7 @@ class OfflineDiarWithASR:
         wer_results = {}
 
         if ref_ctm_file_list is not None:
-            spk_hypotheses, spk_references = [], []
+            spk_hypotheses, spk_references, per_spk_references, per_spk_hypotheses = [], [], [], []
             mix_hypotheses, mix_references = [], []
             WER_values, uniq_id_list = [], []
 
@@ -1081,38 +1228,47 @@ class OfflineDiarWithASR:
                 # Either hypothesis CTM file or hyp_trans_info_dict should be provided
                 if hyp_ctm_file_list is not None:
                     if uniq_id == get_uniqname_from_filepath(hyp_ctm_file_list[k]):
-                        spk_hypothesis, mix_hypothesis = convert_ctm_to_text(hyp_ctm_file_list[k])
+                        spk_hypothesis, mix_hypothesis, per_spk_hypothesis = convert_ctm_to_text(hyp_ctm_file_list[k])
                     else:
                         raise ValueError("Hypothesis CTM files are provided but uniq_id is mismatched")
                 elif hyp_trans_info_dict is not None and uniq_id in hyp_trans_info_dict:
-                    spk_hypothesis, mix_hypothesis = convert_word_dict_seq_to_text(
+                    spk_hypothesis, mix_hypothesis, per_spk_hypothesis = convert_word_dict_seq_to_text(
                         hyp_trans_info_dict[uniq_id]['words']
                     )
                 else:
                     raise ValueError("Hypothesis information is not provided in the correct format.")
 
-                spk_reference, mix_reference = convert_ctm_to_text(ctm_file_path)
-
+                spk_reference, mix_reference, per_spk_reference = convert_ctm_to_text(ctm_file_path)
+                # For cpWER
                 spk_hypotheses.append(spk_hypothesis)
                 spk_references.append(spk_reference)
                 mix_hypotheses.append(mix_hypothesis)
                 mix_references.append(mix_reference)
+                # For SA-WER (DA-WER)
+                per_spk_hypotheses.append(per_spk_hypothesis)
+                per_spk_references.append(per_spk_reference)
 
                 # Calculate session by session WER value
                 WER_values.append(word_error_rate([mix_hypothesis], [mix_reference]))
 
-            cpWER_values, hyps_spk, refs_spk = concat_perm_word_error_rate(spk_hypotheses, spk_references)
+            cpWER_values, cpWER_hyps_spk, cpWER_refs_spk = concat_perm_word_error_rate(spk_hypotheses, spk_references)
+            SAWER_values, SAWER_hyps_spk, SAWER_refs_spk = spk_attr_word_error_rate(per_spk_hypotheses, per_spk_references, uniq_id_list, mapping_dict=mapping_dict)
+            # WDER_values, hyps_spk, refs_spk = word_diar_error_rate(spk_hypotheses, spk_references)
 
             # Take an average of cpWER and regular WER value on all sessions
             wer_results['total'] = {}
-            wer_results['total']['average_cpWER'] = word_error_rate(hypotheses=hyps_spk, references=refs_spk)
+            wer_results['total']['average_cpWER'] = word_error_rate(hypotheses=cpWER_hyps_spk, references=cpWER_refs_spk)
+            wer_results['total']['average_SAWER'] = word_error_rate(hypotheses=SAWER_hyps_spk, references=SAWER_refs_spk)
             wer_results['total']['average_WER'] = word_error_rate(hypotheses=mix_hypotheses, references=mix_references)
+            wer_results['total']['average_deltaSAWER'] =  wer_results['total']['average_SAWER'] -  wer_results['total']['average_WER']
 
-            for (uniq_id, cpWER, WER) in zip(uniq_id_list, cpWER_values, WER_values):
+            for (uniq_id, cpWER, SAWER, WER) in zip(uniq_id_list, cpWER_values, SAWER_values, WER_values):
                 # Save session-level cpWER and WER values
                 wer_results[uniq_id] = {}
                 wer_results[uniq_id]['cpWER'] = cpWER
+                wer_results[uniq_id]['SAWER'] = SAWER
                 wer_results[uniq_id]['WER'] = WER
+                wer_results[uniq_id]['deltaSAWER'] = SAWER - WER
 
         return wer_results
 
@@ -1159,6 +1315,7 @@ class OfflineDiarWithASR:
                 writer.writeheader()
                 for data in total_result_jsons:
                     writer.writerow(data)
+                        
         except IOError:
             logging.info("I/O error has occurred while writing a csv file.")
 
@@ -1200,7 +1357,7 @@ class OfflineDiarWithASR:
         session_trans_dict: Dict[str, Dict[str, float]],
         audacity_label_words: List[str],
         gecko_dict: Dict[str, Dict[str, float]],
-        sentences: List[Dict[str, float]],
+        write_files: bool = True,
     ):
         """
         Write output files and display logging messages.
@@ -1218,18 +1375,32 @@ class OfflineDiarWithASR:
                 List containing sentence dictionary
         """
         # print the sentences in the .txt output
-        string_out = self.print_sentences(sentences)
+        string_out = self.print_sentences(session_trans_dict['sentences'])
         if self.params['break_lines']:
             string_out = self._break_lines(string_out)
 
         session_trans_dict["status"] = "success"
         ctm_lines_list = convert_word_dict_seq_to_ctm(session_trans_dict['words'])
-
-        dump_json_to_file(f'{self.root_path}/pred_rttms/{uniq_id}.json', session_trans_dict)
-        dump_json_to_file(f'{self.root_path}/pred_rttms/{uniq_id}_gecko.json', gecko_dict)
-        write_txt(f'{self.root_path}/pred_rttms/{uniq_id}.ctm', '\n'.join(ctm_lines_list))
-        write_txt(f'{self.root_path}/pred_rttms/{uniq_id}.txt', string_out.strip())
-        write_txt(f'{self.root_path}/pred_rttms/{uniq_id}.w.label', '\n'.join(audacity_label_words))
+        
+        # if self.realigning_lm is None:
+        if self.cfg_diarizer.asr.realigning_lm_parameters.arpa_language_model is None:
+            output_folder = "pred_rttms"
+        else:
+            if self.cfg_diarizer.asr.realigning_lm_parameters.use_ngram:
+                output_folder = "pred_rttms_ngram_align"
+            else:
+                output_folder = "pred_rttms_llm_align"
+        
+        if not os.path.exists(f'{self.root_path}/{output_folder}'):
+            os.makedirs(f'{self.root_path}/{output_folder}')
+        if write_files:
+            dump_json_to_file(f'{self.root_path}/{output_folder}/{uniq_id}.json', session_trans_dict)
+            write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.ctm', '\n'.join(ctm_lines_list))
+            write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.txt', string_out.strip())
+            if gecko_dict is not None:
+                dump_json_to_file(f'{self.root_path}/{output_folder}/{uniq_id}_gecko.json', gecko_dict)
+            if audacity_label_words is not None:
+                write_txt(f'{self.root_path}/{output_folder}/{uniq_id}.w.label', '\n'.join(audacity_label_words))
 
     @staticmethod
     def print_errors(der_results: Dict[str, Dict[str, float]], wer_results: Dict[str, Dict[str, float]]):
@@ -1253,7 +1424,9 @@ class OfflineDiarWithASR:
             logging.info(
                 DER_info
                 + f"\ncpWER              : {wer_results['total']['average_cpWER']:.4f} \
-                     \nWER                : {wer_results['total']['average_WER']:.4f}"
+                    \nSAWER              : {wer_results['total']['average_SAWER']:.4f} \
+                    \nWER                : {wer_results['total']['average_WER']:.4f} \
+                    \nΔSAWER             : {wer_results['total']['average_deltaSAWER']:.4f}"
             )
         else:
             logging.info(DER_info)

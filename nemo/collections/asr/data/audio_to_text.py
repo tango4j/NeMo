@@ -16,18 +16,16 @@ import json
 import math
 import multiprocessing
 import os
-from collections.abc import Iterable as IterableABC
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import braceexpand
 import numpy as np
 import torch
-import webdataset as wds
+import webdataset as wd
 from torch.utils.data import ChainDataset
 from tqdm import tqdm
 
 from nemo.collections.asr.parts.preprocessing.features import WaveformFeaturizer
-from nemo.collections.asr.parts.preprocessing.segment import available_formats as valid_sf_formats
 from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
 from nemo.collections.common import tokenizers
 from nemo.collections.common.parts.preprocessing import collections, parsers
@@ -42,7 +40,6 @@ from nemo.utils.data_utils import (
     is_datastore_path,
     is_tarred_path,
 )
-from nemo.utils.distributed import webdataset_split_by_workers
 from nemo.utils.get_rank import is_global_rank_zero
 
 __all__ = [
@@ -51,8 +48,6 @@ __all__ = [
     'TarredAudioToCharDataset',
     'TarredAudioToBPEDataset',
 ]
-
-VALID_FILE_FORMATS = ';'.join(['wav', 'mp3', 'flac', 'opus'] + [fmt.lower() for fmt in valid_sf_formats.keys()])
 
 
 def _speech_collate_fn(batch, pad_id):
@@ -176,6 +171,57 @@ class ASRManifestProcessor:
 
         return t, tl
 
+def expand_audio_filepaths(audio_tar_filepaths, shard_strategy: str, world_size: int, global_rank: int):
+    valid_shard_strategies = ['scatter', 'replicate']
+    if shard_strategy not in valid_shard_strategies:
+        raise ValueError(f"`shard_strategy` must be one of {valid_shard_strategies}")
+
+    if isinstance(audio_tar_filepaths, str):
+        # Replace '(' and '[' with '{'
+        brace_keys_open = ['(', '[', '<', '_OP_']
+        for bkey in brace_keys_open:
+            if bkey in audio_tar_filepaths:
+                audio_tar_filepaths = audio_tar_filepaths.replace(bkey, "{")
+
+        # Replace ')' and ']' with '}'
+        brace_keys_close = [')', ']', '>', '_CL_']
+        for bkey in brace_keys_close:
+            if bkey in audio_tar_filepaths:
+                audio_tar_filepaths = audio_tar_filepaths.replace(bkey, "}")
+
+    if isinstance(audio_tar_filepaths, str):
+        # Brace expand
+        audio_tar_filepaths = list(braceexpand.braceexpand(audio_tar_filepaths))
+
+    # Expand store paths into WebDataset URLs
+    audio_tar_filepaths = [
+        datastore_path_to_webdataset_url(p) if is_datastore_path(p) else p for p in audio_tar_filepaths
+    ]
+
+    # Check for distributed and partition shards accordingly
+    if world_size > 1:
+        if shard_strategy == 'scatter':
+            logging.info("All tarred dataset shards will be scattered evenly across all nodes.")
+
+            if len(audio_tar_filepaths) % world_size != 0:
+                logging.warning(
+                    f"Number of shards in tarred dataset ({len(audio_tar_filepaths)}) is not divisible "
+                    f"by number of distributed workers ({world_size})."
+                )
+
+            begin_idx = (len(audio_tar_filepaths) // world_size) * global_rank
+            end_idx = begin_idx + len(audio_tar_filepaths) // world_size
+            audio_tar_filepaths = audio_tar_filepaths[begin_idx:end_idx]
+            logging.info(
+                "Partitioning tarred dataset: process (%d) taking shards [%d, %d)", global_rank, begin_idx, end_idx
+            )
+
+        elif shard_strategy == 'replicate':
+            logging.info("All tarred dataset shards will be replicated across all nodes.")
+        else:
+            raise ValueError(f"Invalid shard strategy ! Allowed values are : {valid_shard_strategies}")
+
+    return audio_tar_filepaths
 
 def expand_sharded_filepaths(sharded_filepaths, shard_strategy: str, world_size: int, global_rank: int):
     valid_shard_strategies = ['scatter', 'replicate']
@@ -447,6 +493,8 @@ class _AudioTextDataset(Dataset):
         pad_id: int = 0,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
+        normalize_db: Optional[bool] = False,
+        normalize_db_target: Optional[float] = -25.0,
     ):
         if type(manifest_filepath) == str:
             manifest_filepath = manifest_filepath.split(",")
@@ -468,17 +516,13 @@ class _AudioTextDataset(Dataset):
         self.trim = trim
         self.return_sample_id = return_sample_id
         self.channel_selector = channel_selector
+        self.normalize_db = normalize_db
+        self.normalize_db_target = normalize_db_target
 
     def get_manifest_sample(self, sample_id):
         return self.manifest_processor.collection[sample_id]
 
     def __getitem__(self, index):
-        if isinstance(index, IterableABC):
-            return [self._process_sample(_index) for _index in index]
-        else:
-            return self._process_sample(index)
-
-    def _process_sample(self, index):
         sample = self.manifest_processor.collection[index]
         offset = sample.offset
 
@@ -492,6 +536,7 @@ class _AudioTextDataset(Dataset):
             trim=self.trim,
             orig_sr=sample.orig_sr,
             channel_selector=self.channel_selector,
+            normalize_db=self.normalize_db_target,
         )
         f, fl = features, torch.tensor(features.shape[0]).long()
 
@@ -664,7 +709,10 @@ class AudioToBPEDataset(_AudioTextDataset):
         use_start_end_token: bool = True,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
+        normalize_db: Optional[bool] = False,
+        normalize_db_target: Optional[float] = -25.0,
     ):
+        
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
             bos_id = tokenizer.bos_id
         else:
@@ -713,6 +761,8 @@ class AudioToBPEDataset(_AudioTextDataset):
             trim=trim,
             return_sample_id=return_sample_id,
             channel_selector=channel_selector,
+            normalize_db=normalize_db,
+            normalize_db_target=normalize_db_target,
         )
 
 
@@ -871,17 +921,20 @@ class _TarredAudioToTextDataset(IterableDataset):
             global_rank=global_rank,
         )
 
-        # Put together WebDataset pipeline
-        self._dataset = wds.DataPipeline(
-            wds.SimpleShardList(urls=audio_tar_filepaths),
-            webdataset_split_by_workers,
-            wds.shuffle(shuffle_n),
-            wds.tarfile_to_samples(),
-            wds.rename(audio=VALID_FILE_FORMATS, key='__key__'),
-            wds.to_tuple('audio', 'key'),
-            self._filter,
-            self._loop_offsets,
-            wds.map(self._build_sample),
+        # Put together WebDataset
+        self._dataset = wd.WebDataset(urls=audio_tar_filepaths, nodesplitter=None)
+
+        if shuffle_n > 0:
+            self._dataset = self._dataset.shuffle(shuffle_n)
+        else:
+            logging.info("WebDataset will not shuffle files within the tar files.")
+
+        self._dataset = (
+            self._dataset.rename(audio='wav;ogg;flac', key='__key__')
+            .to_tuple('audio', 'key')
+            .pipe(self._filter)
+            .pipe(self._loop_offsets)
+            .map(f=self._build_sample)
         )
 
     def _filter(self, iterator):
@@ -950,7 +1003,6 @@ class _TarredAudioToTextDataset(IterableDataset):
 
         # Grab manifest entry from self.manifest_preprocessor.collection
         file_id, _ = os.path.splitext(os.path.basename(audio_filename))
-
         manifest_idx = self.manifest_processor.collection.mapping[file_id][offset_id]
         manifest_entry = self.manifest_processor.collection[manifest_idx]
 

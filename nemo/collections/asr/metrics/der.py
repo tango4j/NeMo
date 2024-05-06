@@ -31,6 +31,8 @@ __all__ = [
     'calculate_session_cpWER',
     'calculate_session_cpWER_bruteforce',
     'concat_perm_word_error_rate',
+    'spk_attr_word_error_rate',
+    'word_diar_error_rate',
 ]
 
 
@@ -157,26 +159,36 @@ def score_labels(
     if len(all_reference) == len(all_hypothesis):
         metric = DiarizationErrorRate(collar=2 * collar, skip_overlap=ignore_overlap)
 
-        mapping_dict = {}
+        mapping_dict, correct_spk_count = {}, 0
         for (reference, hypothesis) in zip(all_reference, all_hypothesis):
             ref_key, ref_labels = reference
             _, hyp_labels = hypothesis
+            if len(ref_labels.labels()) == len(hyp_labels.labels()):
+                correct_spk_count += 1
+            if verbose and len(ref_labels.labels()) != len(hyp_labels.labels()):
+                logging.info(f"Wrong Spk. Count with uniq_id:...{ref_key[-10:]}, Ref: {len(ref_labels.labels())}, Hyp: {len(hyp_labels.labels())}")
             uem = AUDIO_RTTM_MAP[ref_key].get('uem_filepath', None)
             if uem is not None:
                 uem = uem_timeline_from_file(uem_file=uem, uniq_name=ref_key)
             metric(ref_labels, hyp_labels, uem=uem, detailed=True)
             mapping_dict[ref_key] = metric.optimal_mapping(ref_labels, hyp_labels)
 
+        spk_count_acc = correct_spk_count / len(all_reference)
         DER = abs(metric)
+        if metric['total'] == 0:
+            raise ValueError(f"Total evaluation time is 0. Abort.")
         CER = metric['confusion'] / metric['total']
         FA = metric['false alarm'] / metric['total']
         MISS = metric['missed detection'] / metric['total']
+        
         itemized_errors = (DER, CER, FA, MISS)
 
+        if verbose:
+            # logging.info(f"\n{metric.report()}")
+            pass
         logging.info(
-            "Cumulative Results for collar {} sec and ignore_overlap {}: \n FA: {:.4f}\t MISS {:.4f}\t \
-                Diarization ER: {:.4f}\t, Confusion ER:{:.4f}".format(
-                collar, ignore_overlap, FA, MISS, DER, CER
+            "Cumulative Results for collar {} sec and ignore_overlap {}: \n| FA: {:.4f} | MISS: {:.4f} | CER: {:.4f} | DER: {:.4f} | Spk. Count Acc. {:.4f}\n".format(
+                collar, ignore_overlap, FA, MISS, CER, DER, spk_count_acc
             )
         )
 
@@ -386,7 +398,62 @@ def calculate_session_cpWER(
 
     return cpWER, min_perm_hyp_trans, ref_trans
 
+def spk_attr_word_error_rate(
+    per_spk_hypotheses: List[List[str]], 
+    per_spk_references: List[List[str]], 
+    uniq_id_list: List[str], 
+    mapping_dict: Dict[str, str]
+    ) -> Tuple[List[float], List[str], List[str]]:
+    if len(per_spk_hypotheses) != len(per_spk_references):
+        raise ValueError(
+            "In concatenated-minimum permutation word error rate calculation, "
+            "hypotheses and reference lists must have the same number of elements. But got arguments:"
+            f"{len(spk_hypotheses)} and {len(spk_references)} correspondingly"
+        )
+    SAWER_values, total_hyp_trans_list, total_ref_trans_list = [], [], []
+    for uniq_id, hyp_spk_dict, ref_spk_dict in zip(uniq_id_list, per_spk_hypotheses, per_spk_references):
+        hyp_speaker_map = mapping_dict[uniq_id]
+        ref_speaker_map = {value: key for key, value in hyp_speaker_map.items()}
+        hyp_trans_list, ref_trans_list = [], [] 
+        if len(ref_spk_dict.keys()) >= len(hyp_spk_dict.keys()):
+            for ref_spk in ref_spk_dict.keys():
+                if ref_spk not in ref_speaker_map.keys():
+                    hyp_trans_list.append('')
+                    ref_trans_list.append(" ".join(ref_spk_dict[ref_spk]))
+                else:
+                    hyp_trans_list.append(" ".join(hyp_spk_dict[ref_speaker_map[ref_spk]]))
+                    ref_trans_list.append(" ".join(ref_spk_dict[ref_spk]))
+        else:
+            for hyp_spk in ref_spk_dict.keys():
+                if hyp_spk not in hyp_speaker_map.keys():
+                    hyp_trans_list.append(" ".join(hyp_spk_dict[hyp_spk]))
+                    ref_trans_list.append('')
+                else:
+                    hyp_trans_list.append(" ".join(hyp_spk_dict[hyp_spk]))
+                    ref_trans_list.append(" ".join(ref_spk_dict[hyp_speaker_map[hyp_spk]]))
+        SAWER = word_error_rate(hypotheses=hyp_trans_list, references=ref_trans_list)
+        SAWER_values.append(SAWER)
+        total_hyp_trans_list.extend(hyp_trans_list)
+        total_ref_trans_list.extend(ref_trans_list)
+    return SAWER_values, total_hyp_trans_list, total_ref_trans_list
 
+def word_diar_error_rate(
+    spk_hypotheses: List[List[str]], spk_references: List[List[str]]
+) -> Tuple[List[float], List[str], List[str]]:
+    if len(spk_hypotheses) != len(spk_references):
+        raise ValueError(
+            "In word diarization error rate calculation, "
+            "hypotheses and reference lists must have the same number of elements. But got arguments:"
+            f"{len(spk_hypotheses)} and {len(spk_references)} correspondingly"
+        )
+    WDER_values, hyps_spk, refs_spk = [], [], []
+    for (spk_hypothesis, spk_reference) in zip(spk_hypotheses, spk_references):
+        WDER, min_hypothesis, concat_reference = calculate_session_WDER(spk_hypothesis, spk_reference)
+        cpWER_values.append(cpWER)
+        hyps_spk.append(min_hypothesis)
+        refs_spk.append(concat_reference)
+    return cpWER_values, hyps_spk, refs_spk
+     
 def concat_perm_word_error_rate(
     spk_hypotheses: List[List[str]], spk_references: List[List[str]]
 ) -> Tuple[List[float], List[str], List[str]]:
