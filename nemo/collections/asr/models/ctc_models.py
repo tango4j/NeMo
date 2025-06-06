@@ -22,7 +22,6 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from nemo.collections.asr.data import audio_to_text_dataset
@@ -34,9 +33,9 @@ from nemo.collections.asr.metrics.wer import WER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.parts.mixins import ASRModuleMixin, ASRTranscriptionMixin, InterCTCMixin, TranscribeConfig
 from nemo.collections.asr.parts.mixins.transcription import GenericTranscriptionType, TranscriptionReturnType
-from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecoding, CTCDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
+from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.collections.common.parts.preprocessing.parsers import make_parser
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
@@ -120,7 +119,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     def transcribe(
         self,
-        audio: Union[str, List[str], torch.Tensor, np.ndarray, DataLoader],
+        audio: Union[str, List[str], torch.Tensor, np.ndarray],
         batch_size: int = 4,
         return_hypotheses: bool = False,
         num_workers: int = 0,
@@ -136,8 +135,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         Uses greedy decoding to transcribe audio files. Use this method for debugging and prototyping.
 
         Args:
-            audio: (a single or list) of paths to audio files or a np.ndarray audio array.
-                Can also be a dataloader object that provides values that can be consumed by the model.
+            audio: (a single or list) of paths to audio files or a np.ndarray audio array. \
                 Recommended length per file is between 5 and 25 seconds. \
                 But it is possible to pass a few hours long file if enough GPU memory is available.
             batch_size: (int) batch size to use during inference.
@@ -495,8 +493,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
         if not has_processed_signal:
             processed_signal, processed_signal_length = self.preprocessor(
-                input_signal=input_signal,
-                length=input_signal_length,
+                input_signal=input_signal, length=input_signal_length,
             )
 
         if self.spec_augmentation is not None and self.training:
@@ -582,9 +579,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             log_probs, encoded_len, predictions = self.forward(input_signal=signal, input_signal_length=signal_len)
 
         transcribed_texts, _ = self.wer.decoding.ctc_decoder_predictions_tensor(
-            decoder_outputs=log_probs,
-            decoder_lengths=encoded_len,
-            return_hypotheses=False,
+            decoder_outputs=log_probs, decoder_lengths=encoded_len, return_hypotheses=False,
         )
 
         sample_id = sample_id.cpu().detach().numpy()
@@ -606,19 +601,11 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
         loss_value, metrics = self.add_interctc_losses(
-            loss_value,
-            transcript,
-            transcript_len,
-            compute_wer=True,
-            log_wer_num_denom=True,
-            log_prefix="val_",
+            loss_value, transcript, transcript_len, compute_wer=True, log_wer_num_denom=True, log_prefix="val_",
         )
 
         self.wer.update(
-            predictions=log_probs,
-            targets=transcript,
-            targets_lengths=transcript_len,
-            predictions_lengths=encoded_len,
+            predictions=log_probs, targets=transcript, targets_lengths=transcript_len, predictions_lengths=encoded_len,
         )
         wer, wer_num, wer_denom = self.wer.compute()
         self.wer.reset()
@@ -665,6 +652,20 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     """ Transcription related methods """
 
+    def _transcribe_on_begin(self, audio, trcfg: TranscribeConfig):
+        super()._transcribe_on_begin(audio, trcfg)
+
+        # Freeze the encoder and decoure_exder modules
+        self.encoder.freeze()
+        self.decoder.freeze()
+
+    def _transcribe_on_end(self, trcfg: TranscribeConfig):
+        super()._transcribe_on_end(trcfg)
+
+        # Unfreeze the encoder and decoder modules
+        self.encoder.unfreeze()
+        self.decoder.unfreeze()
+
     def _transcribe_forward(self, batch: Any, trcfg: TranscribeConfig):
         logits, logits_len, greedy_predictions = self.forward(input_signal=batch[0], input_signal_length=batch[1])
         output = dict(logits=logits, logits_len=logits_len)
@@ -676,9 +677,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         logits_len = outputs.pop('logits_len')
 
         current_hypotheses, all_hyp = self.decoding.ctc_decoder_predictions_tensor(
-            logits,
-            decoder_lengths=logits_len,
-            return_hypotheses=trcfg.return_hypotheses,
+            logits, decoder_lengths=logits_len, return_hypotheses=trcfg.return_hypotheses,
         )
         if trcfg.return_hypotheses:
             if logits.is_cuda:
@@ -692,11 +691,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             logits_len = logits_len.cpu()
             # dump log probs per file
             for idx in range(logits_cpu.shape[0]):
-                # We clone because we don't want references to the
-                # cudaMallocHost()-allocated tensor to be floating
-                # around. Were that to be the case, then the pinned
-                # memory cache would always miss.
-                current_hypotheses[idx].y_sequence = logits_cpu[idx, : logits_len[idx]].clone()
+                current_hypotheses[idx].y_sequence = logits_cpu[idx][: logits_len[idx]]
                 if current_hypotheses[idx].alignments is None:
                     current_hypotheses[idx].alignments = current_hypotheses[idx].y_sequence
             del logits_cpu
@@ -864,10 +859,6 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         results.append(model)
 
         return results
-
-    @property
-    def adapter_module_names(self) -> List[str]:
-        return ['', 'encoder', 'decoder']
 
     @property
     def wer(self):

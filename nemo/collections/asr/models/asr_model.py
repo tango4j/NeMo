@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from abc import ABC
-from typing import List, Optional
+from abc import ABC, abstractmethod
+from typing import List
 
 import torch
 
-from nemo.collections.common.parts.optional_cuda_graphs import WithOptionalCudaGraphs
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.classes.exportable import Exportable
@@ -172,52 +171,6 @@ class ASRModel(ModelPT, ABC):
                 logging.warning(f'detected inf or nan values in gradients! Setting gradients to zero.')
                 self.zero_grad()
 
-    def on_train_epoch_start(self) -> None:
-        """
-        Decoder with CUDA graphs does not release memory, thus we disable it for training epoch.
-        EncDecRNNTModel.decoding.decoding is the inference class with CUDA graphs
-        """
-        WithOptionalCudaGraphs.disable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
-
-    def on_train_epoch_end(self) -> None:
-        """
-        After training, we can enable the decoder with CUDA graphs.
-        EncDecRNNTModel.decoding.decoding is the inference class with CUDA graphs
-        """
-        WithOptionalCudaGraphs.enable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
-
-    def on_validation_epoch_start(self) -> None:
-        """
-        For validation, we enable CUDA graphs to speedup validation.
-        EncDecRNNTModel.decoding.decoding is the inference class with CUDA graphs.
-        """
-        WithOptionalCudaGraphs.enable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
-
-    def on_validation_epoch_end(self) -> Optional[dict[str, dict[str, torch.Tensor]]]:
-        """
-        After validation, we disable CUDA graphs, since `validation` can be called in training loop, and
-        training will continue after validation
-        EncDecRNNTModel.decoding.decoding is the inference class with CUDA graphs.
-        """
-        WithOptionalCudaGraphs.disable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
-        return super().on_validation_epoch_end()
-
-    def on_test_epoch_start(self) -> None:
-        """
-        For testing, we enable CUDA graphs to speedup validation.
-        We do not need to disable CUDA graphs after testing, since `test` cannot be called in training loop.
-        EncDecRNNTModel.decoding.decoding is the inference class with CUDA graphs.
-        """
-        WithOptionalCudaGraphs.enable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
-
-    def on_predict_epoch_start(self) -> None:
-        """
-        For predicting, we enable CUDA graphs to speedup validation.
-        We do not need to disable CUDA graphs after predicting, since `predict` cannot be called in training loop.
-        EncDecRNNTModel.decoding.decoding is the inference class with CUDA graphs
-        """
-        WithOptionalCudaGraphs.enable_cuda_graphs_recursive(self, attribute_path="decoding.decoding")
-
 
 class ExportableEncDecModel(Exportable):
     """
@@ -240,12 +193,12 @@ class ExportableEncDecModel(Exportable):
         if getattr(self.input_module, 'export_cache_support', False):
             in_types = self.input_module.output_types
             otypes = {n: t for (n, t) in list(otypes.items())[:1]}
-            for n, t in list(in_types.items())[1:]:
+            for (n, t) in list(in_types.items())[1:]:
                 otypes[n] = t
         return get_io_names(otypes, self.disabled_deployment_output_names)
 
     def forward_for_export(
-        self, audio_signal, length=None, cache_last_channel=None, cache_last_time=None, cache_last_channel_len=None
+        self, input, length=None, cache_last_channel=None, cache_last_time=None, cache_last_channel_len=None
     ):
         """
         This forward is used when we need to export the model to ONNX format.
@@ -264,12 +217,12 @@ class ExportableEncDecModel(Exportable):
         """
         enc_fun = getattr(self.input_module, 'forward_for_export', self.input_module.forward)
         if cache_last_channel is None:
-            encoder_output = enc_fun(audio_signal=audio_signal, length=length)
+            encoder_output = enc_fun(audio_signal=input, length=length)
             if isinstance(encoder_output, tuple):
                 encoder_output = encoder_output[0]
         else:
             encoder_output, length, cache_last_channel, cache_last_time, cache_last_channel_len = enc_fun(
-                audio_signal=audio_signal,
+                audio_signal=input,
                 length=length,
                 cache_last_channel=cache_last_channel,
                 cache_last_time=cache_last_time,
