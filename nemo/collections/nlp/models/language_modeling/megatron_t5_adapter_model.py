@@ -15,15 +15,17 @@
 
 # This code has been adapted from the following private repo: https://gitlab-master.nvidia.com/ADLR/megatron-lm/-/tree/prompt-learning/prefix_tuning_v2
 # Adapted by: @adithyare
-
+#
+# flake8: noqa
+# pylint: skip-file
 
 import itertools
 from typing import Any
 
 import torch
+from lightning.pytorch.trainer.trainer import Trainer
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import open_dict
-from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.common.parts.adapter_modules import LinearAdapterConfig
 from nemo.collections.nlp.models.language_modeling.megatron_t5_model import MegatronT5Model
@@ -60,7 +62,15 @@ class MegatronT5BaseAdapterModel(MegatronT5PromptLearningModel):
         self.adapter_name_keys = []
 
     def forward(
-        self, input_ids, dec_input, enc_mask, dec_mask, position_ids, taskname_ids, labels=None, inference=False,
+        self,
+        input_ids,
+        dec_input,
+        enc_mask,
+        dec_mask,
+        position_ids,
+        taskname_ids,
+        labels=None,
+        inference=False,
     ):
         # Call forward on T5 model with preprocessed embeddings
         if self.autocast_dtype == torch.float32:
@@ -195,13 +205,13 @@ class MegatronT5BaseAdapterModel(MegatronT5PromptLearningModel):
 
     def setup_optimizer_param_groups(self):
         """
-        ModelPT override. Optimizer will get self._optimizer_param_groups. 
+        ModelPT override. Optimizer will get self._optimizer_param_groups.
         Makes two optimizer param groups, one for the frozen model params
-        and one for the prompt-table/prompt-encoder params. The learning 
+        and one for the prompt-table/prompt-encoder params. The learning
         rate for the frozen model's params will always be zero effectively
         freezing the model's params but still allowing for the needed gradients
-        to be passed around in pipeline parallel models. The prompt-encoder 
-        and/or prompt table will use the learning rate set by the user. 
+        to be passed around in pipeline parallel models. The prompt-encoder
+        and/or prompt table will use the learning rate set by the user.
         """
         self.frozen_model.freeze()  # Freeze the entire model
         opt_params = []
@@ -266,7 +276,7 @@ class MegatronT5BaseAdapterModel(MegatronT5PromptLearningModel):
 
     def load_state_dict(self, state_dict, strict: bool = True):
         """
-        Loads a state_dict expecting the state_dict to contain key,values 
+        Loads a state_dict expecting the state_dict to contain key,values
         only for the adapter parameters.
         """
         for name, module in self.frozen_model.named_modules():
@@ -280,7 +290,7 @@ class MegatronT5BaseAdapterModel(MegatronT5PromptLearningModel):
 
     def on_validation_epoch_end(self):
         if self.cfg.get('pipeline_model_parallel_size', 1) > 1:
-            if parallel_state.is_pipeline_last_stage():
+            if parallel_state.is_pipeline_last_stage(ignore_virtual=False):
                 # only the last pipeline parallel stages return loss
                 averaged_loss = torch.stack([i['loss'] for i in self.validation_step_outputs]).mean()
             else:
@@ -319,7 +329,7 @@ class MegatronT5BaseAdapterModel(MegatronT5PromptLearningModel):
                 gather_results_dedup = list(set(itertools.chain(*gather_results)))
 
                 correct = 0
-                for (input, pred, label) in gather_results_dedup:
+                for input, pred, label in gather_results_dedup:
                     if pred == label:
                         correct += 1
 
@@ -458,8 +468,12 @@ class MegatronT5LoraModel(MegatronT5BaseAdapterModel):
 
         self.frozen_model.freeze()
         logging.info(f'Before adding adapters:\n{self.frozen_model.summarize()}')
-        encoder = self.frozen_model.enc_dec_model.enc_dec_model.encoder
-        decoder = self.frozen_model.enc_dec_model.enc_dec_model.decoder
+        if self.megatron_amp_O2:
+            encoder = self.frozen_model.enc_dec_model.module.enc_dec_model.encoder
+            decoder = self.frozen_model.enc_dec_model.module.enc_dec_model.decoder
+        else:
+            encoder = self.frozen_model.enc_dec_model.enc_dec_model.encoder
+            decoder = self.frozen_model.enc_dec_model.enc_dec_model.decoder
 
         if encoder:
             encoder_cfg = self._get_component_cfg('encoder', frozen_model_cfg, cfg)
@@ -559,8 +573,8 @@ class MegatronT5InfusedAdapterModel(MegatronT5BaseAdapterModel):
     Three adapter's are inserted into each Transformer layer in the base GPT Model. Each adapter is basically a vector that simply scales the key, value or ffn hidden representations.
 
     It is assumed that these set of adapters will then be trained for a specific task.
-    Once trained, the adapter weights will be saved and can be re-loaded 
-    and infused into the same GPT Model for inference. 
+    Once trained, the adapter weights will be saved and can be re-loaded
+    and infused into the same GPT Model for inference.
     """
 
     def __init__(self, cfg: DictConfig, trainer: Trainer):
@@ -670,7 +684,7 @@ class MegatronT5InfusedAdapterModel(MegatronT5BaseAdapterModel):
 
     def load_state_dict(self, state_dict, strict: bool = True):
         """
-        Loads a state_dict expecting the state_dict to contain key,values 
+        Loads a state_dict expecting the state_dict to contain key,values
         only for the adapter parameters.
         """
         encoder = self.frozen_model.enc_dec_model.enc_dec_model.encoder

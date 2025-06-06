@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Union
 import editdistance
 import torch
 import torch.distributed as dist
+from lightning.pytorch import Trainer
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
 from torchmetrics.text import SacreBLEUScore
@@ -223,9 +224,16 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
             config = self._update_default_values(config)
             return get_lhotse_dataloader_from_config(
                 config,
-                global_rank=self.global_rank,
-                world_size=self.world_size,
-                dataset=LhotseSpeechToTextBpeDataset(tokenizer=self.tokenizer,),
+                # During transcription, the model is initially loaded on the CPU.
+                # To ensure the correct global_rank and world_size are set,
+                # these values must be passed from the configuration.
+                global_rank=self.global_rank if not config.get("do_transcribe", False) else config.get("global_rank"),
+                world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
+                dataset=LhotseSpeechToTextBpeDataset(
+                    tokenizer=self.tokenizer,
+                    return_cuts=config.get("do_transcribe", False),
+                ),
+                tokenizer=self.tokenizer,
             )
 
         dataset = audio_to_text_dataset.get_audio_to_text_bpe_dataset_from_config(

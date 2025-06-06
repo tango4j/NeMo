@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from contextlib import contextmanager, nullcontext
+from typing import Any
 
 import torch
 
@@ -24,7 +25,7 @@ def avoid_bfloat16_autocast_context():
     """
 
     if torch.is_autocast_enabled() and torch.get_autocast_gpu_dtype() == torch.bfloat16:
-        return torch.cuda.amp.autocast(dtype=torch.float32)
+        return torch.amp.autocast('cuda', dtype=torch.float32)
     else:
         return nullcontext()
 
@@ -37,12 +38,12 @@ def avoid_float16_autocast_context():
 
     if torch.is_autocast_enabled() and torch.get_autocast_gpu_dtype() == torch.float16:
         if torch.jit.is_scripting() or torch.jit.is_tracing():
-            return torch.cuda.amp.autocast(dtype=torch.float32)
+            return torch.amp.autocast('cuda', dtype=torch.float32)
 
         if torch.cuda.is_bf16_supported():
-            return torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            return torch.amp.autocast('cuda', dtype=torch.bfloat16)
         else:
-            return torch.cuda.amp.autocast(dtype=torch.float32)
+            return torch.amp.autocast('cuda', dtype=torch.float32)
     else:
         return nullcontext()
 
@@ -71,7 +72,7 @@ class CastToFloat(torch.nn.Module):
 
     def forward(self, x):
         if torch.is_autocast_enabled() and x.dtype != torch.float32:
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast(x.device.type, enabled=False):
                 ret = self.mod.forward(x.to(torch.float32)).to(x.dtype)
         else:
             ret = self.mod.forward(x)
@@ -86,7 +87,7 @@ class CastToFloatAll(torch.nn.Module):
     def forward(self, *args):
         if torch.is_autocast_enabled():
             from_dtype = args[0].dtype
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast(self.device.type, enabled=False):
                 ret = self.mod.forward(*cast_all(args, from_dtype=from_dtype, to_dtype=torch.float32))
                 return cast_all(ret, from_dtype=torch.float32, to_dtype=from_dtype)
         else:
@@ -100,3 +101,19 @@ def monkeypatched(object, name, patch):
     setattr(object, name, patch)
     yield object
     setattr(object, name, pre_patched_value)
+
+
+def maybe_cast_to_type(x: Any, type_: type) -> Any:
+    """Try to cast a value to int, if it fails, return the original value.
+
+    Args:
+        x (Any): The value to be casted.
+        type_ (type): The type to cast to, must be a callable.
+
+    Returns:
+        Any: The casted value or the original value if casting fails.
+    """
+    try:
+        return type_(x)
+    except Exception:
+        return x

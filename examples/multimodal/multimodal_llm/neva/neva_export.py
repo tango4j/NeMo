@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the 'License');
 # you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ def main(cfg):
         max_batch_size=cfg.infer.max_batch_size,
         max_multimodal_len=cfg.infer.max_multimodal_len,
         dtype=cfg.model.precision,
+        lora_checkpoint_path=cfg.model.lora_path,
+        use_lora_plugin="auto" if cfg.model.lora_path is not None else None,
         load_model=False,
     )
 

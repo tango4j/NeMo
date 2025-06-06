@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ def create_sample_jsonl(output_file: str, overwrite: bool = False):
         "Korzystając z okazji chciałbym pozdrowić całą moją rodzinę i przyjaciół",
     ]
     print(f"Writing {len(texts)} line(s) to {output_file}...")
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
     with open(output_file, mode="w", encoding="utf-8") as f:
         for text in texts:
             json.dump({"text": text}, f)
@@ -52,7 +52,7 @@ def create_sample_jsonl(output_file: str, overwrite: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Create sample JSONL file.")
-    parser.add_argument("--output_file", help="Output file name")
+    parser.add_argument("--output_file", required=True, help="Output file name")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite file if it exists")
     args = parser.parse_args()
-    create_sample_jsonl(args.output_file)
+    create_sample_jsonl(args.output_file, args.overwrite)

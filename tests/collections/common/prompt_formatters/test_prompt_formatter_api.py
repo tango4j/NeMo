@@ -1,4 +1,19 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import pytest
+import torch.testing
 
 from nemo.collections.common.prompts.canary import PromptFormatter
 from nemo.collections.common.prompts.formatter import Modality
@@ -26,6 +41,15 @@ def test_prompt_formatter_inference(bpe_tokenizer):
     assert recovered == "<s>hi</s>"
 
 
+def test_prompt_formatter_inference_using_content(bpe_tokenizer):
+    formatter = _DummyPromptFormatter(bpe_tokenizer)
+    ans = formatter.encode_dialog([{"role": "user", "slots": {"text": "hi"}}])
+    ans2 = formatter.encode_dialog([{"role": "user", "content": "hi"}])
+    assert ans.keys() == ans2.keys()
+    for k in ans:
+        torch.testing.assert_close(ans[k], ans2[k])
+
+
 def test_prompt_formatter_training(bpe_tokenizer):
     formatter = _DummyPromptFormatter(bpe_tokenizer)
     ans = formatter.encode_dialog(
@@ -36,6 +60,25 @@ def test_prompt_formatter_training(bpe_tokenizer):
     )
     recovered = bpe_tokenizer.ids_to_text(ans["input_ids"])
     assert recovered == "<s>hi</s> hello</s>", recovered
+
+
+def test_prompt_formatter_training_using_content(bpe_tokenizer):
+    formatter = _DummyPromptFormatter(bpe_tokenizer)
+    ans = formatter.encode_dialog(
+        [
+            {"role": "user", "slots": {"text": "hi"}},
+            {"role": "assistant", "slots": {"text": "hello"}},
+        ]
+    )
+    ans2 = formatter.encode_dialog(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+    )
+    assert ans.keys() == ans2.keys()
+    for k in ans:
+        torch.testing.assert_close(ans[k], ans2[k])
 
 
 def test_prompt_formatter_missing_role(bpe_tokenizer):

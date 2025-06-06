@@ -3,7 +3,7 @@
 Parallelisms
 ============
 
-NeMo Megatron supports various data- and model-parallel deep learning workload deployment methods (which can be mixed together arbitrarily).
+NeMo Megatron supports various data-parallel and model-parallel deep learning workload deployment methods, which can be mixed together arbitrarily.
 
 Data Parallelism
 ----------------
@@ -31,79 +31,114 @@ It shards the optimizer states and the high-precision master parameters across d
 At the parameter optimizer step, each data-parallel GPU updates its shard of parameters.
 Since each GPU needs its own gradient shard, the distributed optimizer conducts reduce-scatter of the parameter gradients instead of all-reduce of them.
 Then, the updated parameter shards are all-gathered across data-parallel GPUs.
-This approach significantly reduces the memory need of large scale LLM training.
+This approach significantly reduces the memory need of large-scale LLM training.
 Also, when the precision of the gradient is higher than the parameter precision, the split execution of gradient reduce-scatter and parameter all-gather can reduce the total communication volume.
 This split collective execution increases the total computation to overlap with the communication, which improves the overlap opportunity.
 
 Enable Data Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-In NeMo, DDP is the default parallel deployment method.
-This means that the total number of GPUs corresponds to the size of the DP group and training a LLM with model parallelism decreases the size of the DP group.
+In NeMo Framework, DDP is the default parallel deployment method.
+This means that the total number of GPUs corresponds to the size of the DP group, and training an LLM with model parallelism decreases the size of the DP group.
 
-Currently, NeMo supports optimizer distribution only for Adam optimizer.
-To enable the distributed adam optimizer, set
-``model.optim.name=distributed_fused_adam`` in the model
-configuration. It can be configured with the following options:
+Currently, the NeMo Framework supports optimizer distribution only for the Megatron Core Adam distributed optimizer.
+To enable the distributed adam optimizer, set up ``distributed_fused_adam_with_cosine_annealing`` optimizer recipe from ``nemo.collections.llm.recipes.optim.adam`` or you can create your own optimizer recipe.
 
-===========================  =========  ==================================================================================================================================
-Option                       Default    Description
-===========================  =========  ==================================================================================================================================
-``dtype``                    fp32       Optimizer state datatype
-``grad_sync_dtype``          ``dtype``  Gradient reduce-scatter datatype
-``overlap_grad_sync``        True       Overlap gradient reduce-scatter with compute
-``overlap_param_sync``       False      Overlap parameter all-gather with compute
-``bucket_cap_mb``            100        Buffer size (in MiB) for internal state and workspaces. Larger buckets have lower runtime overheads but may increase memory usage.
-``contiguous_param_buffer``  False      Allocate parameters as views into a large buffer. Helps avoid some data copies.
-``contiguous_grad_buffer``   True       Allocate parameter gradients as views into a large buffer. Helps avoid some data copies.
-===========================  =========  ==================================================================================================================================
+.. code-block:: python
+    
+    # Use optimizer recipe created by NeMo team
+    from nemo.collections.llm.recipes.optim.adam import distributed_fused_adam_with_cosine_annealing
 
-See the keyword arguments in `Apex DistributedFusedAdam <https://github.com/NVIDIA/apex/blob/master/apex/contrib/optimizers/distributed_fused_adam.py>`_ and `NeMo MegatronDistributedFusedAdam <https://github.com/NVIDIA/NeMo/blob/main/nemo/core/optim/distributed_adam.py>`_ for a full list of distributed optimizer options.
+    optim = distributed_fused_adam_with_cosine_annealing(max_lr=3e-4)
+    optim.config.bf16 = True
 
-Implement Data Parallelism
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # Create your own optimizer recipe with cosine annealing scheduler
+    import nemo_run as run
+    from megatron.core.optimizer import OptimizerConfig
 
-DDP in NeMo either uses PyTorch
-`DistributedDataParallel <https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html>`_
-(default) or a custom implementation (if custom multi-precision
-training is enabled with ``megatron_amp_O2``).
+    from nemo.lightning.pytorch.optim import CosineAnnealingScheduler, MegatronOptimizerModule, PytorchOptimizerModule
 
-The distributed optimizer in NeMo is built on top of
-`DistributedFusedAdam <https://github.com/NVIDIA/apex/blob/master/apex/contrib/optimizers/distributed_fused_adam.py>`_
-from Apex.
+    @run.cli.factory
+    def distributed_optimizer_recipe(
+        precision: str = "bf16-mixed",  # or "16-mixed"
+        warmup_steps: int = 1000,
+        constant_steps: int = 1000,
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.95,
+        max_lr: float = 1e-4,
+        min_lr: float = 1e-5,
+        clip_grad: float = 1.0,
+    ) -> run.Config[PytorchOptimizerModule]:
 
-Fully-Shared Data Parallelism (FSDP)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        opt_cfg = run.Config(
+            OptimizerConfig,
+            optimizer="adam",
+            lr=max_lr,
+            weight_decay=0.1,
+            bf16=precision == "bf16-mixed",
+            fp16=precision == "16-mixed",
+            adam_beta1=adam_beta1,
+            adam_beta2=adam_beta2,
+            adam_eps=1e-5,
+            use_distributed_optimizer=True,
+            clip_grad=clip_grad,
+        )
 
-NeMo supports Fully-Sharded Data Parallelism (FSDP) that shards parameter gradients and low-precision parameters for computation on top of the model states that Distributed optimizer shards (optimizer states and high-precision parameters).
-Since FSDP shards the entire model states, it ensures linear model state memory saving with increasing DP size.
-FSDP can be preferred for the LLM training with unbalanced workload between pipeline stages (or Transformer layers) or with a large vocabulary size, where pipelining would cause huge computation bubbles due to the workload imbalance.
-Also, FSDP unloads the effort to search the performance-optimal mappings with 3D parallelism (TP/PP/DP) because it has a single parallelization domain.
+        sched = run.Config(
+            CosineAnnealingScheduler,
+            warmup_steps=warmup_steps,
+            constant_steps=constant_steps,
+            min_lr=min_lr,
+        )
 
-NeMo uses `pytorch's FSDP interface <https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html>`_ to shard LLM model states, which flattens the parameters of each Transformer layer and partitions across datap-parallel GPUs.
-FSDP introduces collectives across data-parallel GPUs; all-gather of the parameters for computation and reduce-scatter of parameter gradients.
-The parameter all-gather occurs in both network forward- and back-propagation phases. The gradient reduce-scatter happens only in the back-propagation.
-These FSDP communications are overlapped with Transformer layer computations.
+        return run.Config(
+            MegatronOptimizerModule,
+            config=opt_cfg,
+            lr_scheduler=sched,
+        )
 
-Setting ``fsdp=true`` enables FSDP.
-The mixed precision recipe can be set by ``precision`` knob, which determines both the computation and communication precisions.
-Also, one can use ``grad_reduce_dtype`` to override the gradient reduction precision specifically.
+For more optimzier options, please visit `this page <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/optimizer/optimizer_config.py>`_.
+
+..
+    FSDP is not supported in NeMo 2.0 yet.
+    Fully-Shared Data Parallelism
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    NeMo Framework supports Fully-Sharded Data Parallelism (FSDP), which shards parameter gradients and low-precision parameters for computation. This is in addition to the model states that the distributed optimizer shards, including optimizer states and high-precision parameters.
+    Since FSDP shards the entire model states, it ensures linear model state memory savings with increasing DP size.
+    FSDP is preferred for LLM training with unbalanced workloads between pipeline stages (or Transformer layers) or with a large vocabulary size, where pipelining would cause significant computation bubbles due to workload imbalance.
+    Additionally, FSDP eliminates the need to search for performance-optimal mappings with 3D parallelism (TP/PP/DP) because it operates within a single parallelization domain.
+
+
+    NeMo Framework uses `PyTorch's FSDP interface <https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html>`_ to shard LLM model states, flattening the parameters of each transformer layer and partitioning them across data-parallel GPUs.
+    FSDP introduces collective operations across data-parallel GPUs, including all-gather for parameter computation and reduce-scatter for parameter gradients.
+    The all-gather operation occurs during both the network forward and back-propagation phases, while the gradient reduce-scatter operation happens only during back-propagation.
+    These FSDP communications are overlapped with transformer layer computations.
+
+    Setting ``fsdp=true`` enables FSDP.
+    The mixed precision recipe can be set by ``precision`` knob, which determines both the computation and communication precisions.
+    Also, one can use ``grad_reduce_dtype`` to override the gradient reduction precision specifically.
 
 
 Model Parallelism
 -----------------
 
-Model parallelism (MP) is a distributed model deployment method that partitions the model parameters across GPUs to reduce the need of per-GPU memory.
-NeMo supports various model-parallel methods, which can be mixed to maximize LLM training performance.
+Model Parallelism (MP) is a distributed model deployment method that partitions the model parameters across GPUs to reduce the need of per-GPU memory.
+NeMo Framework supports various model-parallel methods, which can be mixed to maximize LLM training performance.
 
 Tensor Parallelism
 ^^^^^^^^^^^^^^^^^^
 
 Tensor Parallelism (TP) is a model-parallel partitioning method that distributes the parameter tensor of an individual layer across GPUs.
-On top of reducing the model state memory usage, it also saves the activation memory as per-GPU tensor sizes shrinks.
-However, the reduced per-GPU tensor lowers per-GPU-kernel workload sizes that increases CPU overhead.
+In addition to reducing model state memory usage, it also saves activation memory as the per-GPU tensor sizes shrink.
+However, the reduced per-GPU tensor size increases CPU overhead due to smaller per-GPU kernel workloads.
 
-.. image:: ../nlp/nemo_megatron/images/tp.gif
+.. image:: ../nlp/nemo_megatron/images/tp1.png
+    :align: center
+    :width: 800px
+    :alt: Tensor Parallel
+
+.. image:: ../nlp/nemo_megatron/images/tp2.png
     :align: center
     :width: 800px
     :alt: Tensor Parallel
@@ -111,34 +146,46 @@ However, the reduced per-GPU tensor lowers per-GPU-kernel workload sizes that in
 Enable Tensor Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To enable TP in the NeMo framework, configure the ``tensor_model_parallel_size`` parameter in the model configuration. This parameter determines the number of GPUs among which the model's tensors are partitioned.
-
-**For Tensor Parallelism**:
+To enable TP in the NeMo Framework, configure the ``tensor_model_parallel_size`` parameter in the model configuration. This parameter determines the number of GPUs among which the model's tensors are partitioned.
 
 Set ``tensor_model_parallel_size`` to greater than ``1`` to enable intra-layer model parallelism.
 
-   .. code-block:: yaml
+   .. code-block:: python
 
-       tensor_model_parallel_size: 1  # Example to enable Tensor Parallelism
+       from nemo.collections import llm
+       from functools import partial
 
-The configuration file can be adjusted here: `NeMo Megatron GPT Config <https://github.com/NVIDIA/NeMo/blob/main/examples/nlp/language_modeling/conf/megatron_gpt_config.yaml#L65>`_.
+       # Load train recipe
+       recipe = partial(llm.llama3_8b.pretrain_recipe)()
+
+       # Set tensor model parallel size
+       recipe.trainer.strategy.tensor_model_parallel_size = 2
+
+Set tensor parallelism directly from CLI:
+
+    .. code-block:: bash
+      
+      nemo llm pretrain --factory llama3_8b trainer.strategy.tensor_model_parallel_size=2
 
 Implement Tensor Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-NeMo integrates Tensor Parallelism through the implementation from Megatron Core. To understand how TP is activated within transformer blocks, refer to the code in the following repository: `Megatron-LM Transformer Block <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_block.py>`_.
+NeMo Framework integrates TP through the implementation from Megatron Core. To understand how TP is activated within transformer blocks, refer to the code in the following repository: `Megatron-LM Transformer Block <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_block.py>`__.
 
 For detailed API usage and additional configurations, consult the `Megatron Core Developer Guide <https://docs.nvidia.com/Megatron-Core/developer-guide/latest/api-guide/tensor_parallel.html>`_.
 
-FSDP with Tensor Parallelism
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+..
+    FSDP is not supported in NeMo 2.0 yet.
 
-NeMo supports FSDP along with tensor parallelism. This is done by restricting the model state sharding to the data-parallel domain.
-Using FSDP with tensor parallelism can be helpful when the model doesn't have sufficient parallelism to deploy on a large scale training system with the data-parallel mapping. For example, running a model with the global batch size of 1024 on 2048 GPUs.
-Also, tensor parallelism enables FSDP feasibility by reducing the model state size and the activation size per GPU, thus lower the FSDP communication overhead and the activation memory overhead.
+    FSDP with Tensor Parallelism
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Using both FSDP and TP works by enabling FSDP (``fsdp=true``) and setting ``tensor_model_parllel_size > 1``.
-The user should unset ``CUDA_DEVICE_MAX_CONNECTIONS`` environment variable to enable that sets the number of GPU kernel queue to overlap of the FSDP communication with computation kernels.
+    NeMo Framework supports FSDP along with TP. This is done by restricting the model state sharding to the data-parallel domain.
+    Using FSDP with TP can be helpful when the model doesn't have sufficient parallelism to deploy on a large-scale training system with the data-parallel mapping. For example, running a model with the global batch size of 1024 on 2048 GPUs.
+    Also, TP enables FSDP feasibility by reducing the model state size and the activation size per GPU, thus lower the FSDP communication overhead and the activation memory overhead.
+
+    Using both FSDP and TP works by enabling FSDP (``fsdp=true``) and setting ``tensor_model_parllel_size > 1``.
+    Unset the ``CUDA_DEVICE_MAX_CONNECTIONS`` environment variable to set the number of GPU kernel queues, allowing the overlap of FSDP communication with computation kernels.
 
 Pipeline Parallelism
 ^^^^^^^^^^^^^^^^^^^^
@@ -154,33 +201,56 @@ Pipeline Parallelism (PP) is a technique that assigns consecutive layers or segm
 Enable Pipeline Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To utilize PP in the NeMo framework, you need to set the ``pipeline_model_parallel_size`` parameter in the model's configuration. This parameter specifies the number of GPUs among which the model's layers are distributed.
-
-**For Pipeline Parallelism**:
+To utilize Pipeline Parallelism (PP) in NeMo Framework, set the ``pipeline_model_parallel_size`` parameter in the model's configuration. This parameter specifies the number of GPUs among which the model's layers are distributed.
 
 Set ``pipeline_model_parallel_size`` to a value greater than ``1`` to enable inter-layer model parallelism.
 
-   .. code-block:: yaml
+.. code-block:: python
 
-       pipeline_model_parallel_size: 1  # Example to enable Pipeline Parallelism
+       from nemo.collections import llm
+       from functools import partial
+       
+       # Load train recipe
+       recipe = partial(llm.llama3_8b.pretrain_recipe)()
 
-Adjust the configuration accordingly here: `NeMo Megatron GPT Config <https://github.com/NVIDIA/NeMo/blob/main/examples/nlp/language_modeling/conf/megatron_gpt_config.yaml#L66>`_.
+       # Set pipeline model parallel size
+       recipe.trainer.strategy.pipeline_model_parallel_size = 2
+
+Set pipeline parallelism directly from CLI:
+
+    .. code-block:: bash
+      
+      nemo llm pretrain --factory llama3_8b trainer.strategy.pipeline_model_parallel_size=2
 
 Interleaved Pipeline Parallel Schedule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To minimize the pipeline bubble, the computation on each GPU can be divided into multiple subsets of layers (referred to as model chunks), rather than a single contiguous block. For instance, instead of each GPU processing a continuous set of four layers, it might handle two model chunks with two layers each.
+    
+    .. code-block:: python
 
-   .. code-block:: yaml
+       from nemo.collections import llm
+       from functools import partial
+    
+       # Load train recipe
+       recipe = partial(llm.llama3_8b.pretrain_recipe)()
 
-       virtual_pipeline_model_parallel_size: 2 # Set for interleaved pipeline
+       # Set pipeline model parallel size > 1 and enable interleaved pipeline
+       recipe.trainer.strategy.pipeline_model_parallel_size = 2
+       recipe.trainer.strategy.virtual_pipeline_model_parallel_size = 2
+
+Enable interleaved pipeline directly from CLI:
+
+    .. code-block:: bash
+      
+      nemo llm pretrain --factory llama3_8b trainer.strategy.pipeline_model_parallel_size=2 trainer.strategy.virtual_pipeline_model_parallel_size=2
 
 For more insights into this approach, see our detailed blog: `Scaling Language Model Training <https://developer.nvidia.com/blog/scaling-language-model-training-to-a-trillion-parameters-using-megatron/#pipeline_parallelism>`_.
 
 Implement Pipeline Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The NeMo implementation of PP leverages functionalities from Megatron Core. For a practical example of how PP is implemented within transformer blocks in NeMo, you can inspect the following codebase: `Megatron-LM Transformer Block <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_block.py>`_.
+The NeMo Framework implementation of PP leverages functionalities from Megatron Core. For a practical example of how PP is implemented within transformer blocks in NeMo, you can inspect the following codebase: `Megatron-LM Transformer Block <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_block.py>`_.
 
 For more detailed API usage and configurations related to PP, visit the `Megatron Core Developer Guide <https://docs.nvidia.com/Megatron-Core/developer-guide/latest/api-guide/tensor_parallel.html>`_.
 
@@ -197,33 +267,69 @@ Unlike other model-parallel techniques, EP is applied to only the expert layers 
 Enable Expert Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To enable EP, set ``model.expert_model_parallel_size`` to the desired expert parallel size. For example, if the model has six experts (``model.num_moe_experts=6``), then setting ``model.expert_model_parallel_size=3`` results in each GPU processing two experts. The number of experts should be divisible by the expert parallel size.
+To enable EP, set ``expert_model_parallel_size`` to the expert parallel size you want in the ``MegatronStrategy``'s arguments.
+For example, if the model has eight experts (``num_moe_experts=8``), then setting ``expert_model_parallel_size=4`` results in each GPU processing two experts.
+The number of experts should be divisible by the expert parallel size.
 
-   .. code-block:: yaml
+   .. code-block:: python
 
-       expert_model_parallel_size: 3  # Set EP to 3
+       from nemo.collections import llm
+       from functools import partial
+       
+       # Load train recipe
+       recipe = partial(llm.mixtral_8x7b.pretrain_recipe)()
 
-For further information on configuration, refer to the following documentation: `NeMo Megatron GPT Config <https://github.com/NVIDIA/NeMo/blob/main/examples/nlp/language_modeling/conf/megatron_gpt_config.yaml#L68>`_.
+       # Set expert model parallel size
+       recipe.trainer.strategy.expert_model_parallel_size = 4
+
+Set expert parallelism directly from CLI:
+
+    .. code-block:: bash
+      
+      nemo llm pretrain --factory mixtral_8x7b trainer.strategy.expert_model_parallel_size=4
 
 
-Implement Expert Parallelism
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Enable Expert Tensor Parallelism
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+To enable ETP, set ``expert_tensor_parallel_size`` to the size you want in the ``MegatronStrategy``'s arguments. For example:
 
-The NeMo implementation of Expert Parallelism uses functionality from Megatron Core. Please consult the `Megatron Core MoE layer <https://github.com/NVIDIA/Megatron-LM/blob/e2ec14ab5690fead7e33760b0f8fb20c83b4fd1f/megatron/core/transformer/moe/moe_layer.py#L29>`_ for more MoE implementation details.
+   .. code-block:: python
+
+       from nemo.collections import llm
+       from functools import partial
+
+       # Load train recipe
+       recipe = partial(llm.mixtral_8x7b.pretrain_recipe)()
+
+       # Set expert tensor parallel size
+       recipe.trainer.strategy.expert_tensor_parallel_size = 4
+
+Set expert tensor parallelism directly from CLI:
+
+    .. code-block:: bash
+
+      nemo llm pretrain --factory mixtral_8x7b trainer.strategy.expert_tensor_parallel_size=4
+
+
+Expert Parallelism Implementation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The NeMo Framework implementation of EP uses functionality from Megatron Core. Please consult the `Megatron Core MoE layer <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/moe/moe_layer.py#L42>`_ for more MoE implementation details.
+
 
 
 Activation Partitioning
 -----------------------
 
 In LLM training, a large memory space is needed to store the input activations of the network layers.
-NeMo provides effective activation distribution methods, which is critical in training LLM with a large sequence length or large per-GPU micro-batch size.
+NeMo Framework provides effective activation distribution methods, which is critical in training LLM with a large sequence length or large per-GPU micro-batch size.
 
 Sequence Parallelism
 ^^^^^^^^^^^^^^^^^^^^
 
-Sequence Parallelism extends tensor-level model parallelism by distributing computing load and activation memory across multiple GPUs along the sequence dimension of transformer layers. This method is particularly useful for portions of the layer that have previously not been parallelized, enhancing overall model performance and efficiency.
+Sequence Parallelism (SP) extends tensor-level model parallelism by distributing computing load and activation memory across multiple GPUs along the sequence dimension of transformer layers. This method is particularly useful for portions of the layer that have previously not been parallelized, enhancing overall model performance and efficiency.
 
-.. image:: ../nlp/nemo_megatron/images/sp.gif
+.. image:: ../nlp/nemo_megatron/images/sp.png
     :align: center
     :width: 800px
     :alt: Sequence Parallel
@@ -231,48 +337,71 @@ Sequence Parallelism extends tensor-level model parallelism by distributing comp
 Enable Sequence Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To utilize Sequence Parallelism in NeMo, set the ``sequence_parallel`` parameter to ``True`` in the model's configuration. Note that this feature is effective only when the tensor parallel size (``tensor_model_parallel_size``) is greater than ``1``.
+To utilize SP in NeMo Framework, set the ``sequence_parallel`` parameter to ``True`` in the model's configuration. Note that this feature is effective only when the tensor parallel size (``tensor_model_parallel_size``) is greater than ``1``.
 
-   .. code-block:: yaml
+   .. code-block:: python
 
-       sequence_parallel: True  # Enable Sequence Parallelism
+       from nemo.collections import llm
+       from functools import partial
+       
+       # Load train recipe
+       recipe = partial(llm.llama3_8b.pretrain_recipe)()
+       
+       # Set tensor model parallel size and enable sequence parallelism
+       recipe.trainer.strategy.tensor_model_parallel_size = 2
+       recipe.trainer.strategy.sequence_parallelism = True
 
-For further information on configuration, refer to the following documentation: `NeMo Megatron GPT Config <https://github.com/NVIDIA/NeMo/blob/main/examples/nlp/language_modeling/conf/megatron_gpt_config.yaml#L66>`_.
+Enable sequence parallelism directly from CLI:
+
+    .. code-block:: bash
+      
+      nemo llm pretrain --factory llama3_8b trainer.strategy.tensor_model_parallel_size=2 trainer.strategy.sequence_parallelism=True
 
 Implement Sequence Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The NeMo implementation of Sequence Parallelism utilizes functionality from Megatron Core. For an in-depth look at how Sequence Parallelism is integrated into the Megatron Core architecture, you can examine the source code here: `Megatron-LM Sequence Parallel Source Code <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/layers.py>`_.
+The NeMo Framework implementation of SP utilizes functionality from Megatron Core. For an in-depth look at how Sequence Parallelism is integrated into the Megatron Core architecture, you can examine the source code here: `Megatron-LM Sequence Parallel Source Code <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/layers.py>`_.
 
 Context Parallelism
 ^^^^^^^^^^^^^^^^^^^
 
 Context Parallelism (CP) is a method for parallelizing the processing of neural network activations across multiple GPUs, partitioning the input tensors in the sequence dimension.
-Unlike Sequence Parallelism (SP) that partitions the activations of specific layers, CP divides the activations of all layers.
+Unlike SP, which partitions the activations of specific layers, CP divides the activations of all layers.
 
 Enable Context Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-To activate CP in the NeMo framework, set the ``context_parallel_size`` parameter in the model configuration. This parameter specifies the number of GPUs among which the model's sequence activations are distributed.
-
-**For Context Parallelism**:
+To activate CP in the NeMo Framework, set the ``context_parallel_size`` parameter in the model configuration. This parameter specifies the number of GPUs among which the model's sequence activations are distributed.
 
 Set ``context_parallel_size`` to a value greater than ``1`` to enable sequence-wide model parallelism.
 
-   .. code-block:: yaml
+   .. code-block:: python
 
-       context_parallel_size: 1  # Example to enable Context Parallelism
+       from nemo.collections import llm
+       from functools import partial
+
+       # Load train recipe
+       recipe = partial(llm.llama3_8b.pretrain_recipe)()
+
+       # Set context parallel size
+       recipe.trainer.strategy.context_parallel_size = 2
+
+Set ``context_parallel_size`` directly from CLI:
+
+    .. code-block:: bash
+      
+      nemo llm pretrain --factory llama3_8b model.config.context_parallel_size=2
 
 The configuration can be found and modified here: `NeMo Megatron Core Context Config <https://docs.nvidia.com/Megatron-Core/developer-guide/latest/api-guide/context_parallel.html>`_.
 
 Implement Context Parallelism
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-NeMo leverages functionalities from both Megatron Core and Transformer Engine to implement CP efficiently. During forward propagation, each GPU handles a segment of the sequence, storing only the necessary Key and Value (KV) pairs. In the backward pass, these KV pairs are reassembled across GPUs using advanced communication schemes like all-gather and reduce-scatter transformed into point-to-point communications in a ring topology. This method reduces the memory footprint significantly while maintaining computational efficiency.
+NeMo Framework leverages functionalities from both Megatron Core and Transformer Engine to implement CP efficiently. During forward propagation, each GPU handles a segment of the sequence, storing only the necessary Key and Value (KV) pairs. In the backward pass, these KV pairs are reassembled across GPUs using advanced communication schemes like all-gather and reduce-scatter transformed into point-to-point communications in a ring topology. This method reduces the memory footprint significantly while maintaining computational efficiency.
 
 Visit our source code for more insights into the implementation:
-- `Megatron Core wrappers for Transformer Engine <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/custom_layers/transformer_engine.py>`_
-- `Transformer Engine attention modules <https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/pytorch/attention.py>`_
+- `Megatron Core wrappers for Transformer Engine <https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/extensions/transformer_engine.py>`_
+- `Transformer Engine attention modules <https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/pytorch/attention>`_
 
 
 Parallelism Nomenclature

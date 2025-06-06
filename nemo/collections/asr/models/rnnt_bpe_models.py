@@ -17,8 +17,8 @@ import os
 from typing import Dict, List, Optional, Union
 
 import torch
+from lightning.pytorch import Trainer
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
-from pytorch_lightning import Trainer
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.data.audio_to_text import _AudioTextDataset
@@ -317,7 +317,10 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
         self.cfg.decoding = self.set_decoding_type_according_to_loss(self.cfg.decoding)
         # Setup decoding object
         self.decoding = RNNTBPEDecoding(
-            decoding_cfg=self.cfg.decoding, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer,
+            decoding_cfg=self.cfg.decoding,
+            decoder=self.decoder,
+            joint=self.joint,
+            tokenizer=self.tokenizer,
         )
 
         # Setup wer object
@@ -341,13 +344,15 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
         decoding_cfg: Optional[DictConfig] = None,
     ):
         """
-        Changes vocabulary used during RNNT decoding process. Use this method when fine-tuning on from pre-trained model.
-        This method changes only decoder and leaves encoder and pre-processing modules unchanged. For example, you would
-        use it if you want to use pretrained encoder when fine-tuning on data in another language, or when you'd need
-        model to learn capitalization, punctuation and/or special characters.
+        Changes vocabulary used during RNNT decoding process. Use this method when fine-tuning
+        on from pre-trained model. This method changes only decoder and leaves encoder and pre-processing
+        modules unchanged. For example, you would use it if you want to use pretrained encoder when fine-tuning
+        on data in another language, or when you'd need model to learn capitalization, punctuation
+        and/or special characters.
 
         Args:
-            new_tokenizer_dir: Directory path to tokenizer or a config for a new tokenizer (if the tokenizer type is `agg`)
+            new_tokenizer_dir: Directory path to tokenizer or a config for a new tokenizer
+                (if the tokenizer type is `agg`)
             new_tokenizer_type: Type of tokenizer. Can be either `agg`, `bpe` or `wpe`.
             decoding_cfg: A config for the decoder, which is optional. If the decoding type
                 needs to be changed (from say Greedy to Beam decoding etc), the config can be passed here.
@@ -360,7 +365,8 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
                 new_tokenizer_cfg = new_tokenizer_dir
             else:
                 raise ValueError(
-                    f'New tokenizer dir should be a string unless the tokenizer is `agg`, but this tokenizer type is: {new_tokenizer_type}'
+                    f'New tokenizer dir should be a string unless the tokenizer is `agg`, but this tokenizer \
+                        type is: {new_tokenizer_type}'
                 )
         else:
             new_tokenizer_cfg = None
@@ -415,7 +421,10 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
         decoding_cfg = self.set_decoding_type_according_to_loss(decoding_cfg)
 
         self.decoding = RNNTBPEDecoding(
-            decoding_cfg=decoding_cfg, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer,
+            decoding_cfg=decoding_cfg,
+            decoder=self.decoder,
+            joint=self.joint,
+            tokenizer=self.tokenizer,
         )
 
         self.wer = WER(
@@ -445,13 +454,14 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
 
         logging.info(f"Changed decoder to output to {self.joint.vocabulary} vocabulary.")
 
-    def change_decoding_strategy(self, decoding_cfg: DictConfig):
+    def change_decoding_strategy(self, decoding_cfg: DictConfig, verbose: bool = True):
         """
         Changes decoding strategy used during RNNT decoding process.
 
         Args:
             decoding_cfg: A config for the decoder, which is optional. If the decoding type
                 needs to be changed (from say Greedy to Beam decoding etc), the config can be passed here.
+            verbose: A flag to enable/disable logging.
         """
         if decoding_cfg is None:
             # Assume same decoding config as before
@@ -465,7 +475,10 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
         decoding_cfg = self.set_decoding_type_according_to_loss(decoding_cfg)
 
         self.decoding = RNNTBPEDecoding(
-            decoding_cfg=decoding_cfg, decoder=self.decoder, joint=self.joint, tokenizer=self.tokenizer,
+            decoding_cfg=decoding_cfg,
+            decoder=self.decoder,
+            joint=self.joint,
+            tokenizer=self.tokenizer,
         )
 
         self.wer = WER(
@@ -489,15 +502,23 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
         with open_dict(self.cfg.decoding):
             self.cfg.decoding = decoding_cfg
 
-        logging.info(f"Changed decoding strategy to \n{OmegaConf.to_yaml(self.cfg.decoding)}")
+        if verbose:
+            logging.info(f"Changed decoding strategy to \n{OmegaConf.to_yaml(self.cfg.decoding)}")
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
         if config.get("use_lhotse"):
             return get_lhotse_dataloader_from_config(
                 config,
-                global_rank=self.global_rank,
-                world_size=self.world_size,
-                dataset=LhotseSpeechToTextBpeDataset(tokenizer=self.tokenizer,),
+                # During transcription, the model is initially loaded on the CPU.
+                # To ensure the correct global_rank and world_size are set,
+                # these values must be passed from the configuration.
+                global_rank=self.global_rank if not config.get("do_transcribe", False) else config.get("global_rank"),
+                world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
+                dataset=LhotseSpeechToTextBpeDataset(
+                    tokenizer=self.tokenizer,
+                    return_cuts=config.get("do_transcribe", False),
+                ),
+                tokenizer=self.tokenizer,
             )
 
         dataset = audio_to_text_dataset.get_audio_to_text_bpe_dataset_from_config(

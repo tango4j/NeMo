@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -160,7 +160,9 @@ class GriffinModel(LanguageModule):
         rotary_pos_emb = None
         self.decoder.input_tensor = None
         if self.position_embedding_type == 'rope':
-            rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(None, self.decoder, hidden_states, self.config)
+            rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
+                None, self.decoder, hidden_states, self.config, None
+            )
             rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len)
 
         hidden_states = self.decoder(hidden_states, attention_mask=attention_mask, rotary_pos_emb=rotary_pos_emb)

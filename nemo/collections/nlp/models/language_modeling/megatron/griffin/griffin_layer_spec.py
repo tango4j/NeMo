@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
-from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
-from megatron.core.transformer.custom_layers.transformer_engine import (
+from megatron.core.extensions.transformer_engine import (
     TEDotProductAttention,
     TELayerNormColumnParallelLinear,
     TERowParallelLinear,
 )
+from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
+from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
@@ -53,7 +53,10 @@ griffin_mqa_layer_with_transformer_engine_spec = ModuleSpec(
         self_attn_bda=get_bias_dropout_add,
         mlp=ModuleSpec(
             module=MLP,
-            submodules=MLPSubmodules(linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear,),
+            submodules=MLPSubmodules(
+                linear_fc1=TELayerNormColumnParallelLinear,
+                linear_fc2=TERowParallelLinear,
+            ),
         ),
         mlp_bda=get_bias_dropout_add,
     ),
@@ -74,7 +77,10 @@ griffin_recurrent_layer_with_transformer_engine_spec = ModuleSpec(
         recurrent_bda=get_bias_dropout_add,
         mlp=ModuleSpec(
             module=MLP,
-            submodules=MLPSubmodules(linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear,),
+            submodules=MLPSubmodules(
+                linear_fc1=TELayerNormColumnParallelLinear,
+                linear_fc2=TERowParallelLinear,
+            ),
         ),
         mlp_bda=get_bias_dropout_add,
     ),

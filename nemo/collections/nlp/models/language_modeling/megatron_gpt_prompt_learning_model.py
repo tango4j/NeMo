@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# flake8: noqa
+# pylint: skip-file
 
 import itertools
 import os
@@ -18,9 +21,9 @@ from functools import partial
 from typing import Any, List, Optional, Union
 
 import torch
+from lightning.pytorch.trainer.trainer import Trainer
 from omegaconf.dictconfig import DictConfig
 from omegaconf.omegaconf import open_dict
-from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.common.tokenizers.sentencepiece_tokenizer import SentencePieceTokenizer
 from nemo.collections.nlp.data.language_modeling.megatron.gpt_prompt_learning_dataset import GPTPromptLearningDataset
@@ -460,6 +463,9 @@ class MegatronGPTPromptLearningModel(MegatronBasePromptLearningModel):
         if not self.validation_step_outputs:
             return
 
+        assert (
+            self.cfg.get("virtual_pipeline_model_parallel_size", None) is None
+        ), "Virtual pipeline model parallel size is no longer supported for nemo 1.0"
         if parallel_state.is_pipeline_last_stage():
             # only the last pipeline parallel stages return loss
             averaged_loss = torch.stack([i['loss'] for i in self.validation_step_outputs]).mean()

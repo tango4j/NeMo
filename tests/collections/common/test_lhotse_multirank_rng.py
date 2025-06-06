@@ -1,3 +1,17 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from io import BytesIO
 from pathlib import Path
 
@@ -38,7 +52,11 @@ def nemo_manifest_path(cutset_path: Path):
     nemo = []
     for idx, c in enumerate(CutSet.from_file(cutset_path)):
         nemo.append(
-            {"audio_filepath": c.recording.sources[0].source, "text": f"irrelevant-{idx}", "duration": c.duration,}
+            {
+                "audio_filepath": c.recording.sources[0].source,
+                "text": f"irrelevant-{idx}",
+                "duration": c.duration,
+            }
         )
     p = cutset_path.parent / "nemo_manifest.json"
     save_to_jsonl(nemo, p)
@@ -50,9 +68,10 @@ def nemo_tarred_manifest_path(nemo_manifest_path: Path) -> tuple[str, str]:
     """5 shards, each with 2 utterances."""
     root = nemo_manifest_path.parent / "nemo_tar"
     root.mkdir(exist_ok=True)
-    with TarWriter(f"{root}/audios_%01d.tar", shard_size=2) as tar_writer, JsonlShardWriter(
-        f"{root}/manifest_%01d.jsonl", shard_size=2
-    ) as mft_writer:
+    with (
+        TarWriter(f"{root}/audios_%01d.tar", shard_size=2) as tar_writer,
+        JsonlShardWriter(f"{root}/manifest_%01d.jsonl", shard_size=2) as mft_writer,
+    ):
         for idx, d in enumerate(load_jsonl(nemo_manifest_path)):
             p = d["audio_filepath"]
             name = Path(p).name
@@ -74,6 +93,7 @@ def test_dataloader_multiple_ranks_deterministic_rng(nemo_tarred_manifest_path: 
             "num_workers": 1,
             # lhotse specific
             "use_bucketing": True,
+            "concurrent_bucketing": False,
             "num_buckets": 2,
             "drop_last": False,
             "batch_duration": 4.0,  # seconds
@@ -89,12 +109,22 @@ def test_dataloader_multiple_ranks_deterministic_rng(nemo_tarred_manifest_path: 
     dp0 = get_lhotse_dataloader_from_config(config=config, global_rank=0, world_size=2, dataset=_Identity())
 
     # Data parallel, rank 0 copy (is the iteration deterministic? -> yes)
-    dp0_cpy = get_lhotse_dataloader_from_config(config=config, global_rank=0, world_size=2, dataset=_Identity(),)
+    dp0_cpy = get_lhotse_dataloader_from_config(
+        config=config,
+        global_rank=0,
+        world_size=2,
+        dataset=_Identity(),
+    )
 
     # Data parallel, rank 0, incremented seed (paranoia mode: does the iteration order change with the seed? -> yes)
     config2 = config.copy()
     config2["seed"] = config2["seed"] + 1
-    dp0_incrseed = get_lhotse_dataloader_from_config(config=config2, global_rank=0, world_size=2, dataset=_Identity(),)
+    dp0_incrseed = get_lhotse_dataloader_from_config(
+        config=config2,
+        global_rank=0,
+        world_size=2,
+        dataset=_Identity(),
+    )
 
     # Data parallel, rank 1 (is data different on each DP rank? -> yes)
     dp1 = get_lhotse_dataloader_from_config(config=config, global_rank=1, world_size=2, dataset=_Identity())
@@ -127,6 +157,7 @@ def test_dataloader_multiple_ranks_trng(nemo_tarred_manifest_path: tuple[str, st
             "num_workers": 1,
             # lhotse specific
             "use_bucketing": True,
+            "concurrent_bucketing": False,
             "num_buckets": 2,
             "drop_last": False,
             "batch_duration": 4.0,  # seconds
@@ -142,12 +173,22 @@ def test_dataloader_multiple_ranks_trng(nemo_tarred_manifest_path: tuple[str, st
     dp0 = get_lhotse_dataloader_from_config(config=config, global_rank=0, world_size=2, dataset=_Identity())
 
     # Data parallel, rank 0 copy (is the iteration deterministic? -> no, trng)
-    dp0_cpy = get_lhotse_dataloader_from_config(config=config, global_rank=0, world_size=2, dataset=_Identity(),)
+    dp0_cpy = get_lhotse_dataloader_from_config(
+        config=config,
+        global_rank=0,
+        world_size=2,
+        dataset=_Identity(),
+    )
 
     # Data parallel, rank 0, incremented seed (paranoia mode: does the iteration order change with the seed? -> yes)
     config2 = config.copy()
     config2["seed"] = config2["seed"] + 1
-    dp0_incrseed = get_lhotse_dataloader_from_config(config=config2, global_rank=0, world_size=2, dataset=_Identity(),)
+    dp0_incrseed = get_lhotse_dataloader_from_config(
+        config=config2,
+        global_rank=0,
+        world_size=2,
+        dataset=_Identity(),
+    )
 
     # Data parallel, rank 1 (is data different on each DP rank? -> yes)
     dp1 = get_lhotse_dataloader_from_config(config=config, global_rank=1, world_size=2, dataset=_Identity())

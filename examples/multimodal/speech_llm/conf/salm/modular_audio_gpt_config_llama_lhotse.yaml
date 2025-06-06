@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -154,6 +154,7 @@ model:
 
     modality_adapter: 
       _target_: nemo.collections.asr.modules.ConformerEncoder
+      sync_max_audio_length: false
       feat_in: 1024
       feat_out: -1 # you may set it if you need different output size other than the default d_model
       n_layers: 2

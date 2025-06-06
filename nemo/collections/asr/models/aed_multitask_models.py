@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,12 +19,13 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from omegaconf import DictConfig, OmegaConf, open_dict
-from pytorch_lightning import Trainer
+from lightning.pytorch import Trainer
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from torch.utils.data import DataLoader
 
 from nemo.collections.asr.data.audio_to_text_lhotse_prompted import (
     PromptedAudioToTextLhotseDataset,
-    get_prompt_format_fn,
+    PromptedAudioToTextMiniBatch,
 )
 from nemo.collections.asr.metrics import BLEU, WER
 from nemo.collections.asr.metrics.der import concat_perm_word_error_rate as cpWER
@@ -40,9 +41,8 @@ from nemo.collections.asr.parts.mixins.transcription import (
 )
 from nemo.collections.asr.parts.submodules.multitask_decoding import MultiTaskDecoding, MultiTaskDecodingConfig
 from nemo.collections.asr.parts.submodules.token_classifier import TokenClassifier
-from nemo.collections.asr.parts.utils import manifest_utils
-from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
+from nemo.collections.asr.parts.utils.timestamp_utils import process_aed_timestamp_outputs
 from nemo.collections.common import tokenizers
 # from nemo.collections.common.data.lhotse.dataloader import get_lhotse_dataloader_from_config
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
@@ -67,8 +67,12 @@ __all__ = ['EncDecMultiTaskModel', 'MSEncDecMultiTaskModel']
 
 
 def lens_to_mask(lens, max_length):
+    """
+    Create a mask from a tensor of lengths.
+    """
     batch_size = lens.shape[0]
-    mask = torch.arange(max_length).repeat(batch_size, 1).to(lens.device) < lens[:, None]
+    arange = torch.arange(max_length, device=lens.device)
+    mask = arange.expand(batch_size, max_length) < lens.unsqueeze(1)
     return mask
 
 
@@ -136,6 +140,11 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         self.prompt_format = cfg.prompt_format
         self.sample_rate = cfg.sample_rate
         self._setup_tokenizer(cfg.tokenizer)
+        prompt_cls = PromptFormatter.resolve(self.prompt_format)
+        self.prompt = prompt_cls(
+            tokenizer=self.tokenizer,
+            defaults=OmegaConf.to_container(pd) if (pd := cfg.get("prompt_defaults")) is not None else None,
+        )
 
         super().__init__(cfg=cfg, trainer=trainer)
 
@@ -221,7 +230,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
 
         self.val_loss = GlobalAverageLossMetric(dist_sync_on_step=False, take_avg_loss=True)
 
-        # TODO: PytorchMetrics lets you join two metrics together to save compute. But need to make wer and bleu have same outputs first
+        # TODO: PytorchMetrics lets you join two metrics together to save compute.
+        # But need to make wer and bleu have same outputs first
         self.wer = WER(self.decoding, log_prediction=self.cfg.get("log_prediction"))
         self.bleu = BLEU(
             self.decoding, tokenize=self.cfg.get('bleu_tokenizer', "13a"), log_prediction=False
@@ -266,13 +276,15 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         prompt_format: Optional[str] = None,
     ):
         """
-        Changes vocabulary used during AED decoding process. Use this method when fine-tuning on from pre-trained model.
-        This method changes only decoder and leaves encoder and pre-processing modules unchanged. For example, you would
-        use it if you want to use pretrained encoder when fine-tuning on data in another language, or when you'd need
-        model to learn capitalization, punctuation and/or special characters.
+        Changes vocabulary used during AED decoding process. Use this method when fine-tuning on
+        from pre-trained model. This method changes only decoder and leaves encoder and pre-processing
+        modules unchanged. For example, you would use it if you want to use pretrained encoder when
+        fine-tuning on data in another language, or when you'd need model to learn capitalization,
+        punctuation and/or special characters.
 
         Args:
-            new_tokenizer_dir: Directory path to tokenizer or a config for a new tokenizer (if the tokenizer type is `agg`)
+            new_tokenizer_dir: Directory path to tokenizer or a config for a new tokenizer
+                (if the tokenizer type is `agg`)
             new_tokenizer_type: Type of tokenizer. Can be either `agg`, `bpe` or `wpe`.
             decoding_cfg: A config for the decoding, which is optional. If the decoding type
                 needs to be changed (from say Greedy to Beam decoding etc), the config can be passed here.
@@ -287,7 +299,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
                 new_tokenizer_cfg = new_tokenizer_dir
             else:
                 raise ValueError(
-                    f'New tokenizer dir should be a string unless the tokenizer is `agg`, but this tokenizer type is: {new_tokenizer_type}'
+                    f'New tokenizer dir should be a string unless the tokenizer is `agg`, but this\
+                          tokenizer type is: {new_tokenizer_type}'
                 )
         else:
             new_tokenizer_cfg = None
@@ -301,7 +314,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
                 )
 
             if new_tokenizer_type.lower() not in ('bpe', 'wpe'):
-                raise ValueError(f'New tokenizer type must be either `bpe` or `wpe`')
+                raise ValueError('New tokenizer type must be either `bpe` or `wpe`')
 
             tokenizer_cfg = OmegaConf.create({'dir': new_tokenizer_dir, 'type': new_tokenizer_type})
 
@@ -404,12 +417,15 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         channel_selector: Optional[ChannelSelectorType] = None,
         augmentor: DictConfig = None,
         verbose: bool = True,
+        timestamps: Optional[bool] = None,
         override_config: Optional[MultiTaskTranscriptionConfig] = None,
     ) -> Union[List[str], List[Hypothesis]]:
         """
         Uses greedy decoding to transcribe audio files. Use this method for debugging and prototyping.
         Args:
-            audio: (a list) of paths to audio files. \
+            audio: (a single or list) of paths to audio files or a np.ndarray/tensor audio array or path 
+                to a manifest file.
+                Can also be a dataloader object that provides values that can be consumed by the model.
                 Recommended length per file is between 5 and 25 seconds. \
                 But it is possible to pass a few hours long file if enough GPU memory is available.
             batch_size: (int) batch size to use during inference.
@@ -421,14 +437,39 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
             source_lang: (str) source language. Defaults to `en`.
             target_lang: (str) target language. Defaults to `en`.
             num_workers: (int) number of workers for DataLoader
-            channel_selector (int | Iterable[int] | str): select a single channel or a subset of channels from multi-channel audio. If set to `'average'`, it performs averaging across channels. Disabled if set to `None`. Defaults to `None`.
+            channel_selector (int | Iterable[int] | str): select a single channel or a subset of channels 
+                from multi-channel audio. If set to `'average'`, it performs averaging across channels. 
+                Disabled if set to `None`. Defaults to `None`.
             augmentor: (DictConfig): Augment audio samples during transcription if augmentor is applied.
+            timestamps: Optional(Bool): timestamps will be returned if set to True as part of hypothesis 
+                object (output.timestep['segment']/output.timestep['word']). Refer to `Hypothesis` class 
+                for more details. Default is None and would retain the previous state set by using 
+                self.change_decoding_strategy(). 
+            Note: Currently its not supported for AED models.
             verbose: (bool) whether to display tqdm progress bar
-            override_config: (Optional[MultiTaskTranscriptionConfig]) A config to override the default config.
+            override_config: (Optional[MultiTaskTranscriptionConfig]) A config to override the 
+                default config.
+            **prompt: Optional input to construct the prompts for the model. Accepted formats are: 
+                1) legacy Canary-1B API source_lang=<lang>, target_lang=<lang>, etc. 
+                2) explicit single-turn role=<role>, slots={<slot>: <value>, ...} 
+                3) explicit multi-turn: turns=[{"role": <role>, "slots": {<slot>: <value>, ...}}]
 
         Returns:
-            A list of transcriptions (or raw log probabilities if logprobs is True) in the same order as paths2audio_files
+            A list of transcriptions (or raw log probabilities if logprobs is True) in the same order 
+            as paths2audio_files
         """
+        if timestamps is not None:
+            # TODO: Handle this key gracefully later
+
+            if timestamps is True:
+                timestamps = 'yes'
+            elif timestamps is False:
+                timestamps = 'no'
+            else:
+                timestamps = str(timestamps)
+                assert timestamps in ('yes', 'no', 'timestamp', 'notimestamp', '1', '0')
+            prompt['timestamp'] = timestamps
+
         if override_config is None:
             trcfg = MultiTaskTranscriptionConfig(
                 batch_size=batch_size,
@@ -457,15 +498,17 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
             "Multi-task model only supports dataloading with Lhotse. "
             "Please set config.{train,validation,test}_ds.use_lhotse=True"
         )
+        global_rank = config.get("global_rank", self.global_rank)
+        world_size = config.get("world_size", self.world_size)
         return get_lhotse_dataloader_from_config(
             config,
-            global_rank=self.global_rank,
-            world_size=self.world_size,
+            global_rank=global_rank,
+            world_size=world_size,
             dataset=PromptedAudioToTextLhotseDataset(
                 tokenizer=self.tokenizer,
-                prompt_format_fn=get_prompt_format_fn(self.prompt_format),
-                inference=inference,
+                prompt=self.prompt,
             ),
+            tokenizer=self.tokenizer,
         )
 
     def setup_training_data(self, train_data_config: Optional[DictConfig]):
@@ -623,30 +666,46 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         if batch is None:
             return torch.tensor([0.0])
 
-        # During training prompt and prompt_len are null, ignore.
-        signal, signal_len, transcript, transcript_len, prompt, prompt_len = batch
-        input_ids, labels = transcript[:, :-1], transcript[:, 1:]
+        input_ids, labels = batch.get_decoder_inputs_outputs()
+        input_ids_lens = batch.prompted_transcript_lens - 1
+
+        num_frames = batch.audio_lens.sum().float()
+        num_tokens = batch.prompted_transcript_lens.sum().float()
+        tot_frames = torch.as_tensor(batch.audio.numel(), device=num_frames.device, dtype=torch.float)
+        tot_tokens = torch.as_tensor(batch.prompted_transcript.numel(), device=num_frames.device, dtype=torch.float)
 
         transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
             input_signal=signal,
             input_signal_length=signal_len,
             transcript=input_ids,
-            transcript_length=transcript_len,
+            transcript_length=input_ids_lens,
         )
 
-        audio_loss = self.loss(log_probs=transf_log_probs, labels=labels)
+        # Mask components: 1) discard padding  &  2) discard prompt (notice the negation)
+        # For a full decoder sequence O with len M, the loss mask skips the first element,
+        # covering the remaining M-1 elements - hence we subtract 1 from prompt lens to account BOS.
+        if self.cfg.get("use_loss_mask_for_prompt", False):
+            maxlen = batch.prompted_transcript.shape[1] - 1
+            loss_mask = lens_to_mask(input_ids_lens, maxlen) & ~lens_to_mask(batch.prompt_lens - 1, maxlen)
+        else:
+            loss_mask = None
+        audio_loss = self.loss(log_probs=transf_log_probs, labels=labels, output_mask=loss_mask)
 
         tensorboard_logs = {
             'train_loss': audio_loss,
-            'learning_rate': self._optimizer.param_groups[0]['lr'],
+            'learning_rate': torch.as_tensor(self._optimizer.param_groups[0]['lr']),
+            'batch_size': torch.as_tensor(batch.audio.shape[0]),
+            'num_frames': num_frames,
+            'num_tokens': num_tokens,
+            'input_to_padding_ratio': num_frames / tot_frames,
+            'output_to_padding_ratio': num_tokens / tot_tokens,
         }
 
         return {'loss': audio_loss, 'log': tensorboard_logs}
 
-    def validation_pass(self, batch, batch_idx, dataloader_idx=0, eval_mode="val"):
-        # During inference, dataloader passes pure prompt without transcript text.
-        signal, signal_len, transcript, transcript_len, prompt, prompt_len = batch
-        input_ids, labels = transcript[:, :-1], transcript[:, 1:]
+    def validation_pass(self, batch: PromptedAudioToTextMiniBatch, batch_idx, dataloader_idx=0, eval_mode="val"):
+        input_ids, labels = batch.get_decoder_inputs_outputs()
+        input_ids_lens = batch.prompted_transcript_lens - 1
 
         transf_log_probs, encoded_len, enc_states, enc_mask = self.forward(
             input_signal=signal,
@@ -655,11 +714,19 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
             transcript_length=transcript_len,
         )
 
-        transf_loss = self.loss(log_probs=transf_log_probs, labels=labels)
-        self.val_loss(loss=transf_loss, num_measurements=transf_log_probs.shape[0] * transf_log_probs.shape[1])
-        output_dict = {
-            f'{eval_mode}_loss': transf_loss,
-        }
+        # Mask components: 1) discard padding  &  2) discard prompt (notice the negation)
+        # For a full decoder sequence O with len M, the loss mask skips the first element,
+        # covering the remaining M-1 elements - hence we subtract 1 from prompt lens to account BOS.
+        if self.cfg.get("use_loss_mask_for_prompt", False):
+            maxlen = batch.prompted_transcript.shape[1] - 1
+            loss_mask = lens_to_mask(input_ids_lens, maxlen) & ~lens_to_mask(batch.prompt_lens - 1, maxlen)
+            num_measurements = loss_mask.long().sum()
+        else:
+            loss_mask = None
+            num_measurements = transf_log_probs.shape[0] * transf_log_probs.shape[1]
+        transf_loss = self.loss(log_probs=transf_log_probs, labels=labels, output_mask=loss_mask)
+        self.val_loss(loss=transf_loss, num_measurements=num_measurements)
+        output_dict = {f'{eval_mode}_loss': transf_loss}
 
         self.wer.update(
             predictions=enc_states,
@@ -724,26 +791,12 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
 
         if isinstance(audio, list):
             logging.debug(f"Found 'audio' to be a list of {len(audio)} items.")
-            logging.debug(f"Assuming each item in 'audio' is a path to audio file.")
+            logging.debug("Assuming each item in 'audio' is a path to audio file.")
 
             if isinstance(self.tokenizer, tokenizers.AggregateTokenizer):
                 if hasattr(trcfg, '_internal') and hasattr(trcfg._internal, 'primary_language'):
                     trcfg._internal.primary_language = self.tokenizer.langs[0]
                     logging.debug(f"Transcribing with default setting of {trcfg._internal.primary_language}.")
-
-        elif isinstance(audio, str):
-            logging.debug(f"Found 'audio' to be a string. Assuming it is a path to manifest file.")
-            assert os.path.exists(audio), f"File {audio} doesn't exist"
-            # assert audio.endswith('.json') or audio.endswith('.jsonl'), f"File {audio} must be a json or jsonl file"
-
-            # load json lines
-            manifest_path = audio  # need to save this as we are overwriting paths2audio_files in nextline
-            if audio.endswith('.json') or audio.endswith('.jsonl'):
-                if hasattr(trcfg, '_internal') and hasattr(trcfg._internal, 'manifest_path'):
-                    trcfg._internal.manifest_filepath = manifest_path
-
-        elif isinstance(audio, (np.ndarray, torch.Tensor)):
-            raise NotImplementedError("Transcribing from numpy or torch tensors is not supported yet.")
 
     def _transcribe_input_manifest_processing(
         self, audio_files: List[str], temp_dir: str, trcfg: MultiTaskTranscriptionConfig
@@ -760,21 +813,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
         Returns:
             A config dict that is used to setup the dataloader for transcription.
         """
-        manifest_filepath = None
-        if len(audio_files) == 1 and isinstance(audio_files[0], str):
-            # Check if manifest file is provided
-            if (
-                hasattr(trcfg._internal, 'manifest_filepath')
-                and getattr(trcfg._internal, 'manifest_filepath') is not None
-            ):
-                manifest_filepath = trcfg._internal.manifest_filepath
-
-            elif audio_files[0].endswith('.json') or audio_files[0].endswith('.jsonl'):
-                # Assume it is a path to a manifest file
-                manifest_filepath = audio_files[0]
-
-            if manifest_filepath is not None:
-                audio_files = manifest_utils.read_manifest(audio_files[0])
+        manifest_filepath = trcfg._internal.manifest_filepath
 
         audio_files = self._may_be_make_dict_and_fix_paths(audio_files, manifest_filepath, trcfg)
 
@@ -817,7 +856,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
 
         Returns:
             The output can be a list of
-            objects, list of list of objects, tuple of objects, tuple of list of objects, or a dict of list of objects.
+            objects, list of list of objects.
             Its type is defined in `TranscriptionReturnType`.
         """
         log_probs = outputs.pop('log_probs')
@@ -828,7 +867,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
 
         del log_probs, encoded_len
 
-        best_hypotheses, all_hypotheses = self.decoding.decode_predictions_tensor(
+        hypotheses = self.decoding.decode_predictions_tensor(
             encoder_hidden_states=enc_states,
             encoder_input_mask=enc_mask,
             decoder_input_ids=decoder_input_ids,
@@ -849,38 +888,50 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
                     all_hypotheses[i] = [self.decoding.strip_special_tokens(text) for text in all_hypotheses[i]]
 
         del enc_states, enc_mask, decoder_input_ids
-        if all_hypotheses is None:
-            return best_hypotheses
-        return best_hypotheses, all_hypotheses
+
+        hypotheses = process_aed_timestamp_outputs(
+            hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
+        )
+
+        return hypotheses
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':
         """
         Setup function for a temporary data loader which wraps the provided audio file.
         Args:
-            config: A python dictionary which contains the following keys:
-            paths2audio_files: (a list) of paths to audio files. The files should be relatively short fragments. \
-                Recommended length per file is between 5 and 25 seconds.
-            batch_size: (int) batch size to use during inference. \
-                Bigger will result in better throughput performance but would use more memory.
-            temp_dir: (str) A temporary directory where the audio manifest is temporarily
-                stored.
+            config: A python dictionary which contains keys such as:
+                paths2audio_files: (a list) of paths to audio files. The files should be relatively short fragments. \
+                    Recommended length per file is between 5 and 25 seconds.
+                batch_size: (int) batch size to use during inference. \
+                    Bigger will result in better throughput performance but would use more memory.
+                temp_dir: (str) A temporary directory where the audio manifest is temporarily
+                    stored.
         Returns:
             A pytorch DataLoader for the given audio file(s).
         """
-        batch_size = min(config['batch_size'], len(config['paths2audio_files']))
+        if 'manifest_filepath' in config:
+            manifest_filepath = config['manifest_filepath']
+            batch_size = config['batch_size']
+        else:
+            # when using a list of audio files instead of a manifest (added from TranscrptionMixin)
+            manifest_filepath = os.path.join(config['temp_dir'], 'manifest.json')
+            batch_size = min(config['batch_size'], len(config['paths2audio_files']))
         dl_config = {
-            'manifest_filepath': os.path.join(config['temp_dir'], 'manifest.json'),
+            'manifest_filepath': manifest_filepath,
             'sample_rate': self.preprocessor._sample_rate,
             'batch_size': batch_size,
             'trim_silence': False,
             'shuffle': False,
-            'num_workers': min(batch_size, os.cpu_count() - 1),
+            'num_workers': config.get('num_workers', min(batch_size, os.cpu_count() - 1)),
             'pin_memory': True,
             'use_lhotse': True,
             'use_bucketing': False,
             'drop_last': False,
             'text_field': config.get('text_field', 'answer'),
             'lang_field': config.get('lang_field', 'target_lang'),
+            'channel_selector': config.get('channel_selector', None),
+            'pad_min_duration': config.get('pad_min_duration', 1.0),
+            'pad_direction': config.get('pad_direction', 'both'),
         }
 
         temporary_datalayer = self._setup_dataloader_from_config(config=DictConfig(dl_config), inference=True)
@@ -938,6 +989,31 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRTran
                     entry[trcfg.text_field] = 'nothing'
             else:
                 raise ValueError(f"Expected str or dict, got {type(item)}")
+            default_turn = [t for t in trcfg.prompt if t["role"] == "user"]
+            default_turn = default_turn[0]["slots"] if default_turn else {}
+
+            # check for prompt format
+            if self.prompt_format == 'canary':
+                if 'timestamp' in default_turn and default_turn['timestamp']:
+                    raise ValueError(
+                        "Timestamp feature is not supported in Canary prompt format. Please use latest canary-1b-flash or canary-180m-flash"
+                    )
+                if 'context' in default_turn and default_turn['context']:
+                    raise ValueError(
+                        "Context feature is not supported in Canary prompt format. Please use latest canary-1b-flash or canary-180m-flash"
+                    )
+
+            for k, dv in (
+                ("source_lang", "en"),
+                ("target_lang", "en"),
+                ("taskname", "asr"),
+                ("pnc", "yes"),
+                ("context", ""),
+                ("timestamp", 'notimestamp'),
+            ):
+                if k not in entry:
+                    # last-chance fallback injecting legacy Canary defaults if none were provided.
+                    entry[k] = default_turn.get(k, dv)
             out_json_items.append(entry)
         return out_json_items
 
@@ -1191,31 +1267,96 @@ class MSEncDecMultiTaskModel(EncDecMultiTaskModel):
             diar_preds_ext=diar_preds_ext,
         )
 
-        text = self.decoding.decode_predictions_tensor(
+        hypotheses = self.decoding.decode_predictions_tensor(
             encoder_hidden_states=enc_states,
             encoder_input_mask=enc_mask,
             decoder_input_ids=prompt,
             return_hypotheses=False,
-        )[0]
+        )
 
-        text = [self.decoding.strip_special_tokens(t) for t in text]
-        return text
+        hypotheses = process_aed_timestamp_outputs(
+            hypotheses, self.encoder.subsampling_factor, self.cfg['preprocessor']['window_stride']
+        )
 
-    def forward_asr(
-        self,
-        input_signal=None,
-        input_signal_length=None,
-        processed_signal=None,
-        processed_signal_length=None
-    ):
-        """"""
-        has_input_signal = input_signal is not None and input_signal_length is not None
-        has_processed_signal = processed_signal is not None and processed_signal_length is not None
-        if (has_input_signal ^ has_processed_signal) == False:
-            raise ValueError(
-                f"{self} Arguments ``input_signal`` and ``input_signal_length`` are mutually exclusive "
-                " with ``processed_signal`` and ``processed_signal_len`` arguments."
-            )
+        if batch.cuts:
+            return list(zip(batch.cuts, hypotheses))
+        else:
+            return hypotheses
+
+    @property
+    def adapter_module_names(self) -> List[str]:
+        return ['', 'encoder', 'transf_encoder', 'transf_decoder']
+
+    @property
+    def oomptimizer_schema(self) -> dict:
+        """
+        Return a typing schema for optimal batch size calibration for various
+        sequence lengths using OOMptimizer.
+        """
+        return {
+            "cls": PromptedAudioToTextMiniBatch,
+            "inputs": [
+                {"name": "audio", "type": NeuralType(("B", "T"), AudioSignal()), "seq_length": "input"},
+                {"name": "audio_lens", "type": NeuralType(("B",), LengthsType()), "seq_length": "input"},
+                {
+                    "name": "prompted_transcript",
+                    "type": NeuralType(("B", "T"), LabelsType()),
+                    "seq_length": "output",
+                    "vocab_size": self.tokenizer.vocab_size,
+                },
+                {
+                    "name": "prompted_transcript_lens",
+                    "type": NeuralType(("B",), LengthsType()),
+                    "seq_length": "output",
+                },
+                {"name": "transcript", "type": "dummy"},
+                {"name": "transcript_lens", "type": "dummy"},
+                {"name": "prompt", "type": "dummy"},
+                {"name": "prompt_lens", "type": "dummy"},
+            ],
+        }
+
+
+def parse_multitask_prompt(prompt: dict | None) -> list[dict]:
+    if prompt is None or not prompt:
+        return []
+
+    # Case 1.
+    # Multi-turn prompting format. This format conforms to PromptFormatter API and needs no further modification.
+    # This format allows to condition the model on chat history, system+user prompts, etc.
+    # Example:
+    # model.transcribe(
+    #     audio,
+    #     turns=[
+    #         dict(
+    #             role="user",
+    #             slots=dict(
+    #                 source_lang='en', target_lang='de', task='asr', pnc=True, context='translate this text'
+    #             ),
+    #         ),
+    #         dict(
+    #             role="assistant",
+    #             slots=dict(message="Calculating the translation of given text. Do you want to proceed?"),
+    #         ),
+    #         dict(
+    #             role="user",
+    #             slots=dict(
+    #                 source_lang='en', target_lang='de', task='asr', pnc=True, context='Yes, please proceed.'
+    #             ),
+    #         ),
+    #     ],
+    # )
+    if 'turns' in prompt:
+        assert (
+            len(prompt) == 1
+            and isinstance(prompt["turns"], list)
+            and all(isinstance(t, dict) and "role" in t and "slots" in t for t in prompt["turns"])
+        ), (
+            f"When providing a multi-turn prompt through 'turns', no other keys are allowed "
+            f"and the value under prompt['turns'] must be a list of dicts with roles and slot values "
+            f"(we received {prompt=})"
+        )
+        return prompt["turns"]
 
         if not has_processed_signal:
             processed_signal, processed_signal_length = self.preprocessor(

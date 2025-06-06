@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the 'License');
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,12 @@ from nemo.export.tensorrt_mm_exporter import TensorRTMMExporter
 @hydra_runner(config_path='conf', config_name='neva_trt_infer')
 def main(cfg):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    if cfg.infer.lora_uids is not None:
+        lora_uids = []
+        for uid in cfg.infer.lora_uids:
+            lora_uids.append(str(uid))
+    else:
+        lora_uids = None
 
     exporter = TensorRTMMExporter(cfg.engine_dir)
     output = exporter.forward(
@@ -33,6 +39,7 @@ def main(cfg):
         temperature=cfg.infer.temperature,
         repetition_penalty=cfg.infer.repetition_penalty,
         num_beams=cfg.infer.num_beams,
+        lora_uids=lora_uids,
     )
 
     print(output)

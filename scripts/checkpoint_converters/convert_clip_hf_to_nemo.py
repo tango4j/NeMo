@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,9 +38,9 @@ import os
 from argparse import ArgumentParser
 
 import torch
+from lightning.pytorch.plugins.environments import TorchElasticEnvironment
+from lightning.pytorch.trainer.trainer import Trainer
 from omegaconf import OmegaConf
-from pytorch_lightning.plugins.environments import TorchElasticEnvironment
-from pytorch_lightning.trainer.trainer import Trainer
 from transformers import CLIPModel
 
 from nemo.collections.multimodal.models.vision_language_foundation.clip.megatron_clip_models import MegatronCLIPModel

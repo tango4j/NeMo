@@ -1,3 +1,17 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import gc
 import os
 from pathlib import Path
@@ -5,7 +19,7 @@ from typing import Optional
 
 import torch
 import torch.distributed
-from pytorch_lightning import Trainer
+from lightning.pytorch import Trainer
 from torch import nn
 
 
@@ -16,12 +30,16 @@ NEMO_DATASETS_CACHE = Path(os.getenv("NEMO_DATASETS_CACHE", DEFAULT_NEMO_DATASET
 DEFAULT_NEMO_MODELS_CACHE = NEMO_CACHE_HOME / "models"
 NEMO_MODELS_CACHE = Path(os.getenv("NEMO_MODELS_CACHE", DEFAULT_NEMO_MODELS_CACHE))
 
+if os.getenv('TOKENIZERS_PARALLELISM') is None:
+    os.putenv('TOKENIZERS_PARALLELISM', 'True')
+
 
 def get_vocab_size(
     config,
     vocab_size: int,
     make_vocab_size_divisible_by: int = 128,
 ) -> int:
+    """returns `vocab size + padding` to make sure sum is dividable by `make_vocab_size_divisible_by`"""
     from nemo.utils import logging
 
     after = vocab_size
@@ -35,6 +53,7 @@ def get_vocab_size(
 
 
 def teardown(trainer: Trainer, model: Optional[nn.Module] = None) -> None:
+    """Destroys distributed environment and cleans up cache / collects garbage"""
     # Destroy torch distributed
     if torch.distributed.is_initialized():
         from megatron.core import parallel_state

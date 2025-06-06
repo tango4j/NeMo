@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,10 @@ __CUDA_PYTHON_MINIMUM_VERSION_CUDA_GRAPH_CONDITIONAL_NODES_SUPPORTED__ = (12, 3)
 
 
 def check_cuda_python_cuda_graphs_conditional_nodes_supported():
+    # for CPU-only environment we need to raise an exception, otherwise cuda-python library will fail
+    if not torch.cuda.is_available():
+        raise EnvironmentError("CUDA is not available")
+
     try:
         from cuda import cuda
     except ImportError:
@@ -55,11 +59,12 @@ def skip_cuda_python_test_if_cuda_graphs_conditional_nodes_not_supported():
     """
     try:
         check_cuda_python_cuda_graphs_conditional_nodes_supported()
-    except (ImportError, ModuleNotFoundError) as e:
+    except (ImportError, ModuleNotFoundError, EnvironmentError) as e:
         import pytest
 
         pytest.skip(
-            f"Test using cuda graphs with conditional nodes is being skipped because cuda graphs with conditional nodes aren't supported. Error message: {e}"
+            "Test using cuda graphs with conditional nodes is being skipped because "
+            f"cuda graphs with conditional nodes aren't supported. Error message: {e}"
         )
 
 

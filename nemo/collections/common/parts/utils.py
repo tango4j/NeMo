@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# pylint: disable=missing-function-docstring,missing-class-docstring
 
 import logging
 import math
@@ -112,14 +113,9 @@ def extend_instance(obj, mixin):
     )  # mixin needs to go first for our forward() logic to work
 
 
-def apply_rope_scaling(freqs):
+def apply_rope_scaling(freqs, scale_factor=8, low_freq_factor=1, high_freq_factor=4, old_context_len=8192):
     # Apply scaling for RoPE frequencies
     logger.info("apply rope scaling ...")
-    # Values obtained from grid search
-    scale_factor = 8
-    low_freq_factor = 1
-    high_freq_factor = 4
-    old_context_len = 8192  # original llama3 length
 
     low_freq_wavelen = old_context_len / low_freq_factor
     high_freq_wavelen = old_context_len / high_freq_factor
@@ -147,15 +143,69 @@ def mask_sequence_tensor(tensor: torch.Tensor, lengths: torch.Tensor):
     batch_size, *_, max_lengths = tensor.shape
 
     if len(tensor.shape) == 2:
-        mask = torch.ones(batch_size, max_lengths).cumsum(dim=-1).type_as(lengths)
+        mask = torch.ones(batch_size, max_lengths, dtype=lengths.dtype, device=lengths.device).cumsum(dim=-1)
         mask = mask <= einops.rearrange(lengths, 'B -> B 1')
     elif len(tensor.shape) == 3:
-        mask = torch.ones(batch_size, 1, max_lengths).cumsum(dim=-1).type_as(lengths)
+        mask = torch.ones(batch_size, 1, max_lengths, dtype=lengths.dtype, device=lengths.device).cumsum(dim=-1)
         mask = mask <= einops.rearrange(lengths, 'B -> B 1 1')
     elif len(tensor.shape) == 4:
-        mask = torch.ones(batch_size, 1, 1, max_lengths).cumsum(dim=-1).type_as(lengths)
+        mask = torch.ones(batch_size, 1, 1, max_lengths, dtype=lengths.dtype, device=lengths.device).cumsum(dim=-1)
         mask = mask <= einops.rearrange(lengths, 'B -> B 1 1 1')
     else:
         raise ValueError('Can only mask tensors of shape B x L, B x D x L and B x D1 x D2 x L')
 
     return tensor * mask
+
+
+class ClampActivation(nn.Module):
+
+    def __init__(self, min_value: float = -1.0, max_value: float = 1.0):
+        super().__init__()
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(input, min=self.min_value, max=self.max_value)
+
+
+@torch.jit.script
+def snake(x: torch.Tensor, alpha: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
+    """
+    equation for snake activation function: x + (alpha + eps)^-1 * sin(alpha * x)^2
+    """
+    shape = x.shape
+    x = x.reshape(shape[0], shape[1], -1)
+    x = x + (alpha + eps).reciprocal() * torch.sin(alpha * x).pow(2)
+    x = x.reshape(shape)
+    return x
+
+
+class Snake(nn.Module):
+    """
+    Snake activation function introduced in 'https://arxiv.org/abs/2006.08195'
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(1, channels, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return snake(x, self.alpha)
+
+
+class HalfSnake(nn.Module):
+    """
+    Activation which applies snake to the first half of input elements and leaky relu to the second half.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.snake_channels = channels // 2
+        self.snake_act = Snake(self.snake_channels)
+        self.lrelu = torch.nn.LeakyReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        snake_out = self.snake_act(x[:, : self.snake_channels, :])
+        lrelu_out = self.lrelu(x[:, self.snake_channels :, :])
+        out = torch.cat([snake_out, lrelu_out], dim=1)
+        return out

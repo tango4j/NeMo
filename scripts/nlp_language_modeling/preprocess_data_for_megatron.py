@@ -80,6 +80,14 @@ python scripts/nlp_language_modeling/preprocess_data_for_megatron.py \
     --chunk_size=64 \
     --workers=64 
 ```
+
+This script supports multiple tokenizer libraries for data preprocessing.
+
+Example1: Preprocess data using any tokenizer hosted on HuggingFace:
+          --tokenizer-library=sentencepiece --tokenizer-type=HF-URL
+Example2: Preprocess data using SentencePiece tokenizer with tokenizer.model:
+          --tokenizer-library=sentencepiece --tokenizer-model=tokenizer.model
+Refer to get_nmt_tokenizer in nemo/collections/nlp/modules/common/tokenizer_util.py for complete usage.
 """
 
 import argparse
@@ -132,6 +140,7 @@ def get_tokenizer(args):
         vocab_file=args.vocab_file,
         merges_file=args.merge_file,
         delimiter=args.delimiter,
+        use_fast=args.use_fast,
     )
     if args.need_pad_id:
         if not hasattr(tokenizer, "pad_id"):
@@ -232,6 +241,11 @@ def get_args():
         type=str,
         default=None,
         help='Path to tokenizer model.',
+    )
+    group.add_argument(
+        '--use-fast',
+        action='store_true',
+        help='Use fast tokenizer.',
     )
     group.add_argument('--vocab-file', type=str, default=None, help='Path to the vocab file')
     group.add_argument('--files-filter', type=str, default='**/*.json*', help='files filter str')
@@ -338,7 +352,7 @@ def main():
         if json_file.endswith('.gz'):
             fin = gzip.open(json_file, 'r')
         else:
-            fin = open(args.input, 'r', encoding='utf-8')
+            fin = open(json_file, 'r', encoding='utf-8')
 
         encoded_docs = pool.imap(encoder.encode, fin, 25)
 

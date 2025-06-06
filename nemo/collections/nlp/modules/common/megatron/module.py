@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# flake8: noqa
+# pylint: skip-file
 
 """Megatron Module"""
 
@@ -113,7 +116,7 @@ class MegatronModule(torch.nn.Module):
 
     def initialize_word_embeddings(self, init_method, vocab_size, hidden_size):
         if not self.share_token_embeddings:
-            raise Exception('initialize_word_embeddings() was called but ' 'share_token_embeddings is false')
+            raise Exception('initialize_word_embeddings() was called but share_token_embeddings is false')
 
         # This function just initializes the word embeddings in the final stage
         # when we are using pipeline parallelism. If we aren't using pipeline
@@ -140,7 +143,10 @@ class MegatronModule(torch.nn.Module):
             # set word_embeddings weights to 0 here, then copy first
             # stage's weights using all_reduce below.
             self.word_embeddings = tensor_parallel.VocabParallelEmbedding(
-                vocab_size, hidden_size, init_method=init_method, config=self.config,
+                vocab_size,
+                hidden_size,
+                init_method=init_method,
+                config=self.config,
             )
             self.word_embeddings.weight.data.fill_(0)
             self.word_embeddings.weight.shared = True
@@ -148,7 +154,7 @@ class MegatronModule(torch.nn.Module):
         # Zero out initial weights for decoder embedding.
         # NOTE: We don't currently support T5 with the interleaved schedule.
         # This is the case where PP > 1 and we're on the decoder first stage.
-        if not parallel_state.is_pipeline_first_stage(ignore_virtual=True) and self.pre_process:
+        if not parallel_state.is_pipeline_first_stage() and self.pre_process:
             if hasattr(self, 'language_model'):
                 # Zero params for GPT
                 self.language_model.embedding.zero_parameters()
@@ -290,6 +296,9 @@ class Float16Module(MegatronModule):
         if getattr(self.module, 'pre_process', True):
             inputs = fp32_to_float16(inputs, self.float16_converter)
         outputs = self.module(*inputs, **kwargs)
+        assert (
+            self.config.get("virtual_pipeline_model_parallel_size", None) is None
+        ), "Virtual pipeline model parallel size is no longer supported for nemo 1.0"
         if parallel_state.is_pipeline_last_stage() and self.training:
             outputs = float16_to_fp32(outputs)
         return outputs

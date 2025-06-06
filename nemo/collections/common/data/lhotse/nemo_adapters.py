@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import random
 import re
 import tarfile
@@ -21,10 +20,9 @@ from io import BytesIO
 from pathlib import Path
 from typing import Generator, Iterable, List, Literal
 
-import lhotse.serialization
 import soundfile
 from cytoolz import groupby
-from lhotse import AudioSource, Recording, SupervisionSegment
+from lhotse import AudioSource, MonoCut, Recording, SupervisionSegment
 from lhotse.audio.backend import LibsndfileBackend
 from lhotse.cut import Cut
 from lhotse.dataset.dataloading import resolve_seed
@@ -33,6 +31,8 @@ from lhotse.serialization import open_best
 from lhotse.utils import compute_num_samples, ifnone
 
 from nemo.collections.common.parts.preprocessing.manifest import get_full_path
+from nemo.utils import logging
+from nemo.utils.data_utils import is_datastore_path
 
 
 class LazyNeMoIterator:
@@ -92,6 +92,7 @@ class LazyNeMoIterator:
         self.shuffle_shards = shuffle_shards
         self.shard_seed = shard_seed
         paths = expand_sharded_filepaths(path)
+
         if len(paths) == 1:
             self.source = LazyJsonlIterator(paths[0])
         else:
@@ -109,14 +110,15 @@ class LazyNeMoIterator:
         # Propagate the random seed
         extra_fields = [ExtraField.from_dict({"seed": seed, **field_cfg}) for field_cfg in self.extra_fields or ()]
         for data in self.source:
-            audio_path = get_full_path(str(data.pop("audio_filepath")), str(self.path))
+            # filter out entries with valid "_skipme" values.
+            if data.get("_skipme", False):
+                continue
+            audio_path = get_full_path(str(data.pop("audio_filepath")), str(self.path), force_cache=False)
             duration = data.pop("duration")
             offset = data.pop("offset", None)
-            recording = self._create_recording(audio_path, duration, data.pop("sampling_rate", None))
-            cut = recording.to_cut()
-            if offset is not None:
-                cut = cut.truncate(offset=offset, duration=duration, preserve_id=True)
-                cut.id = f"{cut.id}-{round(offset * 1e2):06d}-{round(duration * 1e2):06d}"
+            cut = self._create_cut(
+                audio_path=audio_path, offset=offset, duration=duration, sampling_rate=data.pop("sampling_rate", None)
+            )
             # Note that start=0 and not start=offset because supervision's start if relative to the
             # start of the cut; and cut.start is already set to offset
             cut.supervisions.append(
@@ -140,6 +142,42 @@ class LazyNeMoIterator:
     def __add__(self, other):
         return LazyIteratorChain(self, other)
 
+    def _create_cut(
+        self,
+        audio_path: str,
+        offset: float,
+        duration: float,
+        sampling_rate: int | None = None,
+    ) -> Cut:
+        if not self.metadata_only:
+            recording = self._create_recording(audio_path, duration, sampling_rate)
+            cut = recording.to_cut()
+            if offset is not None:
+                cut = cut.truncate(offset=offset, duration=duration, preserve_id=True)
+                cut.id = f"{cut.id}-{round(offset * 1e2):06d}-{round(duration * 1e2):06d}"
+        else:
+            # Only metadata requested.
+            # We'll provide accurate metadata for Cut but inaccurate metadata for Recording to avoid
+            # incurring IO penalty (note that Lhotse manifests contain more information than
+            # NeMo manifests, so for actual dataloading we have to fill it using the audio file).
+            sr = ifnone(sampling_rate, 16000)  # fake sampling rate
+            offset = ifnone(offset, 0.0)
+            cut = MonoCut(
+                id=audio_path,
+                start=offset,
+                duration=duration,
+                channel=0,
+                supervisions=[],
+                recording=Recording(
+                    id=audio_path,
+                    sources=[AudioSource(type="dummy", channels=[0], source="")],
+                    sampling_rate=sr,
+                    duration=offset + duration,
+                    num_samples=compute_num_samples(offset + duration, sr),
+                ),
+            )
+        return cut
+
     def _create_recording(
         self,
         audio_path: str,
@@ -148,20 +186,13 @@ class LazyNeMoIterator:
     ) -> Recording:
         if sampling_rate is not None:
             # TODO(pzelasko): It will only work with single-channel audio in the current shape.
+
+            source_type = "url" if is_datastore_path(audio_path) else "file"
             return Recording(
                 id=audio_path,
-                sources=[AudioSource(type="file", channels=[0], source=audio_path)],
+                sources=[AudioSource(type=source_type, channels=[0], source=audio_path)],
                 sampling_rate=sampling_rate,
                 num_samples=compute_num_samples(duration, sampling_rate),
-                duration=duration,
-                channel_ids=[0],
-            )
-        elif self.metadata_only:
-            return Recording(
-                id=audio_path,
-                sources=[AudioSource(type="file", channels=[0], source=audio_path)],
-                sampling_rate=-1,
-                num_samples=-1,
                 duration=duration,
                 channel_ids=[0],
             )
@@ -170,7 +201,7 @@ class LazyNeMoIterator:
 
 
 class LazyNeMoTarredIterator:
-    """
+    r"""
     ``LazyNeMoTarredIterator`` reads a NeMo tarred JSON manifest and converts it on the fly to an ``Iterable[Cut]``.
     It's used to create a ``lhotse.CutSet``.
 
@@ -198,6 +229,11 @@ class LazyNeMoTarredIterator:
     to indicate that we want to read tarred audio data from shards on an AIStore bucket.
     This can be used for other cloud storage APIs such as S3, GCS, etc.
     The same mechanism applies to ``manifest_path``.
+
+    If your data has been filtered so that the JSON manifests refer to just a subset of recordings,
+    set ``skip_missing_manifest_entries` to ``True``.
+    This will still read the tar files sequentially (very fast) and discard the audio files that
+    are not present in the corresponding manifest.
 
     The ``shard_seed`` argument is used to seed the RNG shuffling the shards.
     By default, it's ``trng`` which samples a seed number from OS-provided TRNG (see Python ``secrets`` module).
@@ -240,8 +276,10 @@ class LazyNeMoTarredIterator:
         shard_seed: int | Literal["trng", "randomized"] = "trng",
         text_field: str = "text",
         lang_field: str = "lang",
+        skip_missing_manifest_entries: bool = False,
         extra_fields: list[dict[str, str]] | None = None,
     ) -> None:
+        self.skip_missing_manifest_entries = skip_missing_manifest_entries
         self.shard_id_to_manifest: dict[int, Iterable[dict]]
         self.paths = expand_sharded_filepaths(manifest_path)
         if len(self.paths) == 1:
@@ -320,6 +358,22 @@ class LazyNeMoTarredIterator:
     def shard_ids(self) -> List[int]:
         return sorted(self.shard_id_to_manifest.keys())
 
+    def _iter_sequential(self, tar_path, shard_manifest, manifest_path) -> Generator[tuple[dict, bytes], None, None]:
+        with tarfile.open(fileobj=open_best(tar_path, mode="rb"), mode="r|*") as tar:
+            for tar_info in tar:
+                try:
+                    data = shard_manifest[tar_info.name]
+                    raw_audio = tar.extractfile(tar_info).read()
+                    yield data, raw_audio, tar_info
+                except KeyError as e:
+                    if self.skip_missing_manifest_entries:
+                        continue
+                    else:
+                        raise RuntimeError(
+                            f"Mismatched entry between JSON manifest ('{manifest_path}') and tar file ('{tar_path}'). "
+                            f"Cannot locate JSON entry for tar file '{tar_info.name}'"
+                        ) from e
+
     def __iter__(self) -> Generator[Cut, None, None]:
         shard_ids = self.shard_ids
 
@@ -346,17 +400,8 @@ class LazyNeMoTarredIterator:
 
             shard_manifest: dict[str, list[dict]] = groupby(basename, self.shard_id_to_manifest[sid])
             tar_path = self.shard_id_to_tar_path[sid]
-            with tarfile.open(fileobj=open_best(tar_path, mode="rb"), mode="r|*") as tar:
-                for tar_info in tar:
-                    assert tar_info.name in shard_manifest, (
-                        f"Mismatched entry between JSON manifest ('{manifest_path}') and tar file ('{tar_path}'). "
-                        f"Cannot locate JSON entry for tar file '{tar_info.name}'"
-                    )
-                    raw_audio = tar.extractfile(tar_info).read()
-                    # Note: Lhotse has a Recording.from_bytes() utility that we won't use here because
-                    #       the profiling indicated significant overhead in torchaudio ffmpeg integration
-                    #       that parses full audio instead of just reading the header for WAV files.
-                    # recording = lhotse.Recording.from_bytes(raw_audio, recording_id=tar_info.path)
+            try:
+                for data, raw_audio, tar_info in self._iter_sequential(tar_path, shard_manifest, manifest_path):
                     meta = soundfile.info(BytesIO(raw_audio))
                     recording = Recording(
                         id=tar_info.path,
@@ -367,6 +412,9 @@ class LazyNeMoTarredIterator:
                     )
                     cuts_for_recording = []
                     for data in sorted(shard_manifest[tar_info.name], key=lambda d: d["audio_filepath"]):
+                        # filter out entries with valid "_skipme" values.
+                        if data.get("_skipme", False):
+                            continue
                         # Cut the recording into corresponding segment and discard audio data outside the segment.
                         cut = make_cut_with_subset_inmemory_recording(
                             recording, offset=data.get("offset", 0.0), duration=data.get("duration")
@@ -382,12 +430,18 @@ class LazyNeMoTarredIterator:
                             )
                         )
                         cut.custom = _to_custom_attr_dict(data)
+                        cut.manifest_origin = manifest_path
+                        cut.tar_origin = tar_path
                         for extra_field in extra_fields:
                             extra_field.attach_to(cut)
                         cuts_for_recording.append(cut)
                     del recording  # free the memory - helps with very large audio files
                     del raw_audio
                     yield from cuts_for_recording
+            except tarfile.ReadError:
+                logging.warning(
+                    f"Skipping tar file due to read errors (unstable storage or bad file?): {tar_path=}",
+                )
 
     def __len__(self) -> int:
         return len(self.source)
@@ -415,7 +469,13 @@ def make_cut_with_subset_inmemory_recording(
         return cut
 
     # Otherwise, apply the memory optimization.
-    cut = cut.truncate(offset=offset, duration=duration, preserve_id=True)
+    try:
+        cut = cut.truncate(offset=offset, duration=duration, preserve_id=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Lhotse cut.truncate failed with offset={offset}, duration={duration}, recording={recording}: {e}"
+        ) from e
+
     audiobytes = BytesIO()
     LibsndfileBackend().save_audio(audiobytes, cut.load_audio(), sampling_rate=cut.sampling_rate, format="wav")
     audiobytes.seek(0)

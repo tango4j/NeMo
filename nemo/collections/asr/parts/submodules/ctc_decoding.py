@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import re
+import unicodedata
 from abc import abstractmethod
 from dataclasses import dataclass, field, is_dataclass
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Union
 
 import numpy as np
 import torch
@@ -60,6 +62,12 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
             word_seperator:
                 Str token representing the seperator between words.
+
+            segment_seperators:
+                List containing tokens representing the seperator(s) between segments.
+
+            segment_gap_threshold:
+                The threshold (in frames) that caps the gap between two words necessary for forming the segments.
 
             preserve_alignments:
                 Bool flag which preserves the history of logprobs generated during
@@ -184,11 +192,13 @@ class AbstractCTCDecoding(ConfidenceMixin):
                         of calculation of beam search, so that users may update / change the decoding strategy
                         to point to the correct file.
 
-        blank_id
+        blank_id:
             The id of the RNNT blank token.
+        supported_punctuation:
+            Set of punctuation marks in the vocabulary.
     """
 
-    def __init__(self, decoding_cfg, blank_id: int):
+    def __init__(self, decoding_cfg, blank_id: int, supported_punctuation: Optional[Set] = None):
         super().__init__()
 
         # Convert dataclas to config
@@ -208,12 +218,15 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
         self.cfg = decoding_cfg
         self.blank_id = blank_id
+        self.supported_punctuation = supported_punctuation
         self.preserve_alignments = self.cfg.get('preserve_alignments', None)
         self.compute_timestamps = self.cfg.get('compute_timestamps', None)
         self.batch_dim_index = self.cfg.get('batch_dim_index', 0)
         self.word_seperator = self.cfg.get('word_seperator', ' ')
+        self.segment_seperators = self.cfg.get('segment_seperators', ['.', '?', '!'])
+        self.segment_gap_threshold = self.cfg.get('segment_gap_threshold', None)
 
-        possible_strategies = ['greedy', 'greedy_batch', 'beam', 'pyctcdecode', 'flashlight']
+        possible_strategies = ['greedy', 'greedy_batch', 'beam', 'pyctcdecode', 'flashlight', 'wfst']
         if self.cfg.strategy not in possible_strategies:
             raise ValueError(f"Decoding strategy must be one of {possible_strategies}. Given {self.cfg.strategy}")
 
@@ -230,6 +243,14 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 self.compute_timestamps = self.cfg.greedy.get('compute_timestamps', False)
             elif self.cfg.strategy in ['beam']:
                 self.compute_timestamps = self.cfg.beam.get('compute_timestamps', False)
+
+        # Check if the model supports punctuation
+        # and compile regex pattern to remove A space before supported punctuation marks if applicable
+        # We remove only one space before punctuation marks as for some models punctuation marks are included in the vocabulary with a space.
+        # The presence of multiple spaces before punctuation marks is a result of erroneous prediction of the ASR model, which should not be fixed during the decoding process.
+        if self.supported_punctuation:
+            punct_pattern = '|'.join([re.escape(p) for p in self.supported_punctuation])
+            self.space_before_punct_pattern = re.compile(r'(\s)(' + punct_pattern + ')')
 
         # initialize confidence-related fields
         self._init_confidence(self.cfg.get('confidence_cfg', None))
@@ -314,6 +335,28 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
             self.decoding.override_fold_consecutive_value = False
 
+        elif self.cfg.strategy == 'wfst':
+
+            self.decoding = ctc_beam_decoding.WfstCTCInfer(
+                blank_id=blank_id,
+                beam_size=self.cfg.wfst.get('beam_size', 1),
+                search_type=self.cfg.wfst.get('search_type', 'riva'),
+                return_best_hypothesis=self.cfg.wfst.get('return_best_hypothesis', True),
+                preserve_alignments=self.preserve_alignments,
+                compute_timestamps=self.compute_timestamps,
+                decoding_mode=self.cfg.wfst.get('decoding_mode', 'nbest'),
+                open_vocabulary_decoding=self.cfg.wfst.get('open_vocabulary_decoding', False),
+                beam_width=self.cfg.wfst.get('beam_width', 10.0),
+                lm_weight=self.cfg.wfst.get('lm_weight', 1.0),
+                device=self.cfg.wfst.get('device', 'cuda'),
+                arpa_lm_path=self.cfg.wfst.get('arpa_lm_path', None),
+                wfst_lm_path=self.cfg.wfst.get('wfst_lm_path', None),
+                riva_decoding_cfg=self.cfg.wfst.get('riva_decoding_cfg', None),
+                k2_decoding_cfg=self.cfg.wfst.get('k2_decoding_cfg', None),
+            )
+
+            self.decoding.override_fold_consecutive_value = False
+
         else:
             raise ValueError(
                 f"Incorrect decoding strategy supplied. Must be one of {possible_strategies}\n"
@@ -326,7 +369,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
         decoder_lengths: torch.Tensor = None,
         fold_consecutive: bool = True,
         return_hypotheses: bool = False,
-    ) -> Tuple[List[str], Optional[List[List[str]]], Optional[Union[Hypothesis, NBestHypotheses]]]:
+    ) -> Union[List[Hypothesis], List[List[Hypothesis]]]:
         """
         Decodes a sequence of labels to words
 
@@ -345,8 +388,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 transcribe())
 
         Returns:
-            Either a list of str which represent the CTC decoded strings per sample,
-            or a list of Hypothesis objects containing additional information.
+            A list of Hypothesis objects containing additional information.
         """
 
         if isinstance(decoder_outputs, torch.Tensor):
@@ -374,54 +416,57 @@ class AbstractCTCDecoding(ConfidenceMixin):
             hypotheses_list = hypotheses_list[0]  # type: List[Hypothesis]
 
         if isinstance(hypotheses_list[0], NBestHypotheses):
-            hypotheses = []
-            all_hypotheses = []
+            if self.cfg.strategy == 'wfst':
+                all_hypotheses = [hyp.n_best_hypotheses for hyp in hypotheses_list]
+            else:
+                all_hypotheses = []
 
-            for nbest_hyp in hypotheses_list:  # type: NBestHypotheses
-                n_hyps = nbest_hyp.n_best_hypotheses  # Extract all hypotheses for this sample
-                decoded_hyps = self.decode_hypothesis(
-                    n_hyps, fold_consecutive
+                for nbest_hyp in hypotheses_list:  # type: NBestHypotheses
+                    n_hyps = nbest_hyp.n_best_hypotheses  # Extract all hypotheses for this sample
+                    decoded_hyps = self.decode_hypothesis(
+                        n_hyps, fold_consecutive
+                    )  # type: List[Union[Hypothesis, NBestHypotheses]]
+
+                    # If computing timestamps
+                    if self.compute_timestamps is True:
+                        timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
+                        for hyp_idx in range(len(decoded_hyps)):
+                            decoded_hyps[hyp_idx] = self.compute_ctc_timestamps(decoded_hyps[hyp_idx], timestamp_type)
+
+                    all_hypotheses.append(decoded_hyps)
+
+            if return_hypotheses:
+                return all_hypotheses  # type: list[list[Hypothesis]]
+
+            # alaptev: The line below might contain a bug. Do we really want all_hyp_text to be flat?
+            all_hyp = [[Hypothesis(h.score, h.y_sequence, h.text) for h in hh] for hh in all_hypotheses]
+            return all_hyp
+
+        else:
+            if self.cfg.strategy == 'wfst':
+                hypotheses = hypotheses_list
+            else:
+                hypotheses = self.decode_hypothesis(
+                    hypotheses_list, fold_consecutive
                 )  # type: List[Union[Hypothesis, NBestHypotheses]]
 
                 # If computing timestamps
                 if self.compute_timestamps is True:
+                    # greedy decoding, can get high-level confidence scores
+                    if return_hypotheses and (self.preserve_word_confidence or self.preserve_token_confidence):
+                        hypotheses = self.compute_confidence(hypotheses)
+                    else:
+                        # remove unused token_repetitions from Hypothesis.text
+                        for hyp in hypotheses:
+                            hyp.text = hyp.text[:2]
                     timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
-                    for hyp_idx in range(len(decoded_hyps)):
-                        decoded_hyps[hyp_idx] = self.compute_ctc_timestamps(decoded_hyps[hyp_idx], timestamp_type)
-
-                hypotheses.append(decoded_hyps[0])  # best hypothesis
-                all_hypotheses.append(decoded_hyps)
+                    for hyp_idx in range(len(hypotheses)):
+                        hypotheses[hyp_idx] = self.compute_ctc_timestamps(hypotheses[hyp_idx], timestamp_type)
 
             if return_hypotheses:
-                return hypotheses, all_hypotheses
+                return hypotheses
 
-            best_hyp_text = [h.text for h in hypotheses]
-            all_hyp_text = [h.text for hh in all_hypotheses for h in hh]
-            return best_hyp_text, all_hyp_text
-
-        else:
-            hypotheses = self.decode_hypothesis(
-                hypotheses_list, fold_consecutive
-            )  # type: List[Union[Hypothesis, NBestHypotheses]]
-
-            # If computing timestamps
-            if self.compute_timestamps is True:
-                # greedy decoding, can get high-level confidence scores
-                if return_hypotheses and (self.preserve_word_confidence or self.preserve_token_confidence):
-                    hypotheses = self.compute_confidence(hypotheses)
-                else:
-                    # remove unused token_repetitions from Hypothesis.text
-                    for hyp in hypotheses:
-                        hyp.text = hyp.text[:2]
-                timestamp_type = self.cfg.get('ctc_timestamp_type', 'all')
-                for hyp_idx in range(len(hypotheses)):
-                    hypotheses[hyp_idx] = self.compute_ctc_timestamps(hypotheses[hyp_idx], timestamp_type)
-
-            if return_hypotheses:
-                return hypotheses, None
-
-            best_hyp_text = [h.text for h in hypotheses]
-            return best_hyp_text, None
+            return [Hypothesis(h.score, h.y_sequence, h.text) for h in hypotheses]
 
     def decode_hypothesis(
         self, hypotheses_list: List[Hypothesis], fold_consecutive: bool
@@ -489,11 +534,7 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 # in order to compute exact time stamps.
                 hypothesis = (decoded_prediction, token_lengths, token_repetitions)
             else:
-                hypothesis = self.decode_tokens_to_str(decoded_prediction)
-
-                # TODO: remove
-                # collapse leading spaces before . , ? for PC models
-                hypothesis = re.sub(r'(\s+)([\.\,\?])', r'\2', hypothesis)
+                hypothesis = self.decode_tokens_to_str_with_strip_punctuation(decoded_prediction)
 
             # Preserve this wrapped hypothesis or decoded text tokens.
             hypotheses_list[ind].text = hypothesis
@@ -545,6 +586,19 @@ class AbstractCTCDecoding(ConfidenceMixin):
         return hypotheses_list
 
     @abstractmethod
+    def get_words_offsets(
+        self,
+        char_offsets: List[Dict[str, Union[str, float]]],
+        encoded_char_offsets: List[Dict[str, Union[str, float]]],
+        word_delimiter_char: str,
+        supported_punctuation: Optional[Set],
+    ) -> List[Dict[str, Union[str, float]]]:
+        """
+        Implemented by subclass in order to get the words offsets.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
     def decode_tokens_to_str(self, tokens: List[int]) -> str:
         """
         Implemented by subclass in order to decoder a token id list into a string.
@@ -571,6 +625,16 @@ class AbstractCTCDecoding(ConfidenceMixin):
         """
         raise NotImplementedError()
 
+    def decode_tokens_to_str_with_strip_punctuation(self, tokens: List[int]) -> str:
+        """
+        Decodes a list of tokens to a string and removes a space before supported punctuation marks.
+        """
+        text = self.decode_tokens_to_str(tokens)
+
+        if self.supported_punctuation:
+            text = self.space_before_punct_pattern.sub(r'\2', text)
+        return text
+
     def compute_ctc_timestamps(self, hypothesis: Hypothesis, timestamp_type: str = "all"):
         """
         Method to compute time stamps at char/subword, and word level given some hypothesis.
@@ -583,13 +647,13 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 The ctc collapsed integer ids
                 A list of integers that represents the number of repetitions per token.
             timestamp_type: A str value that represents the type of time stamp calculated.
-                Can be one of "char", "word" or "all"
+                Can be one of "char", "word" "segment" or "all"
 
         Returns:
             A Hypothesis object with a modified `timestep` value, which is now a dictionary containing
             the time stamp information.
         """
-        assert timestamp_type in ['char', 'word', 'all']
+        assert timestamp_type in ['char', 'word', 'segment', 'all']
 
         # Unpack the temporary storage, and set the decoded predictions
         decoded_prediction, token_lengths = hypothesis.text
@@ -608,49 +672,60 @@ class AbstractCTCDecoding(ConfidenceMixin):
                 f" {len(hypothesis.text)}"
             )
 
+        encoded_char_offsets = copy.deepcopy(char_offsets)
+
         # Correctly process the token ids to chars/subwords.
         for i, char in enumerate(hypothesis.text):
             char_offsets[i]["char"] = self.decode_tokens_to_str([char])
 
-        # detect char vs subword models
-        lens = [len(list(v["char"])) > 1 for v in char_offsets]
-        if any(lens):
-            text_type = 'subword'
-        else:
-            text_type = 'char'
+        encoded_char_offsets, char_offsets = self._refine_timestamps(
+            encoded_char_offsets=encoded_char_offsets,
+            char_offsets=char_offsets,
+            supported_punctuation=self.supported_punctuation,
+        )
 
         # retrieve word offsets from character offsets
         word_offsets = None
-        if timestamp_type in ['word', 'all']:
-            if text_type == 'char':
-                word_offsets = self._get_word_offsets_chars(char_offsets, word_delimiter_char=self.word_seperator)
-            else:
-                word_offsets = self._get_word_offsets_subwords_sentencepiece(
-                    char_offsets,
-                    hypothesis,
-                    decode_ids_to_tokens=self.decode_ids_to_tokens,
-                    decode_tokens_to_str=self.decode_tokens_to_str,
-                )
+        if timestamp_type in ['word', 'segment', 'all']:
+            word_offsets = self.get_words_offsets(
+                char_offsets=char_offsets,
+                encoded_char_offsets=encoded_char_offsets,
+                word_delimiter_char=self.word_seperator,
+                supported_punctuation=self.supported_punctuation,
+            )
+
+        segment_offsets = None
+        if timestamp_type in ['segment', 'all']:
+            segment_offsets = segment_offsets = self._get_segment_offsets(
+                word_offsets,
+                segment_delimiter_tokens=self.segment_seperators,
+                supported_punctuation=self.supported_punctuation,
+                segment_gap_threshold=self.segment_gap_threshold,
+            )
 
         # attach results
-        if len(hypothesis.timestep) > 0:
-            timestep_info = hypothesis.timestep
+        if len(hypothesis.timestamp) > 0:
+            timestep_info = hypothesis.timestamp
         else:
             timestep_info = []
 
         # Setup defaults
-        hypothesis.timestep = {"timestep": timestep_info}
+        hypothesis.timestamp = {"timestep": timestep_info}
 
         # Add char / subword time stamps
         if char_offsets is not None and timestamp_type in ['char', 'all']:
-            hypothesis.timestep['char'] = char_offsets
+            hypothesis.timestamp['char'] = char_offsets
 
         # Add word time stamps
         if word_offsets is not None and timestamp_type in ['word', 'all']:
-            hypothesis.timestep['word'] = word_offsets
+            hypothesis.timestamp['word'] = word_offsets
+
+        # Add segment time stamps
+        if segment_offsets is not None and timestamp_type in ['segment', 'all']:
+            hypothesis.timestamp['segment'] = segment_offsets
 
         # Convert the token indices to text
-        hypothesis.text = self.decode_tokens_to_str(hypothesis.text)
+        hypothesis.text = self.decode_tokens_to_str_with_strip_punctuation(hypothesis.text)
 
         return hypothesis
 
@@ -674,8 +749,8 @@ class AbstractCTCDecoding(ConfidenceMixin):
 
         # If the exact timestep information is available, utilize the 1st non-ctc blank token timestep
         # as the start index.
-        if hypothesis.timestep is not None and len(hypothesis.timestep) > 0:
-            start_index = max(0, hypothesis.timestep[0] - 1)
+        if hypothesis.timestamp is not None and len(hypothesis.timestamp) > 0:
+            start_index = max(0, hypothesis.timestamp[0] - 1)
 
         # Construct the start and end indices brackets
         end_indices = np.asarray(token_lengths).cumsum()
@@ -692,141 +767,111 @@ class AbstractCTCDecoding(ConfidenceMixin):
         return offsets
 
     @staticmethod
-    def _get_word_offsets_chars(
-        offsets: Dict[str, Union[str, float]], word_delimiter_char: str = " "
-    ) -> Dict[str, Union[str, float]]:
-        """
-        Utility method which constructs word time stamps out of character time stamps.
+    def _refine_timestamps(
+        encoded_char_offsets: List[Dict[str, Union[str, int]]],
+        char_offsets: List[Dict[str, Union[str, int]]],
+        supported_punctuation: Optional[Set] = None,
+    ) -> List[Dict[str, Union[str, int]]]:
 
-        References:
-            This code is a port of the Hugging Face code for word time stamp construction.
+        if not supported_punctuation:
+            return encoded_char_offsets, char_offsets
 
-        Args:
-            offsets: A list of dictionaries, each containing "char", "start_offset" and "end_offset".
-            word_delimiter_char: Character token that represents the word delimiter. By default, " ".
+        for i, offset in enumerate(char_offsets):
+            # Check if token is a punctuation mark
+            # If so, set its end offset as its start offset
+            # This is done because there was observed a behaviour for CTC decoding,
+            # when punctuation marks are predicted for long frames
+            if offset['char'] and offset['char'][0] in supported_punctuation and i > 0:
+                encoded_char_offsets[i]['end_offset'] = offset['end_offset'] = offset['start_offset']
 
-        Returns:
-            A list of dictionaries containing the word offsets. Each item contains "word", "start_offset" and
-            "end_offset".
-        """
-        word_offsets = []
-
-        last_state = "SPACE"
-        word = ""
-        start_offset = 0
-        end_offset = 0
-        for i, offset in enumerate(offsets):
-            char = offset["char"]
-            state = "SPACE" if char == word_delimiter_char else "WORD"
-
-            if state == last_state:
-                # If we are in the same state as before, we simply repeat what we've done before
-                end_offset = offset["end_offset"]
-                word += char
-            else:
-                # Switching state
-                if state == "SPACE":
-                    # Finishing a word
-                    word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
-                else:
-                    # Starting a new word
-                    start_offset = offset["start_offset"]
-                    end_offset = offset["end_offset"]
-                    word = char
-
-            last_state = state
-        if last_state == "WORD":
-            word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
-
-        return word_offsets
+        return encoded_char_offsets, char_offsets
 
     @staticmethod
-    def _get_word_offsets_subwords_sentencepiece(
-        offsets: Dict[str, Union[str, float]],
-        hypothesis: Hypothesis,
-        decode_ids_to_tokens: Callable[[List[int]], str],
-        decode_tokens_to_str: Callable[[List[int]], str],
-    ) -> Dict[str, Union[str, float]]:
+    def _get_segment_offsets(
+        offsets: List[Dict[str, Union[str, float]]],
+        segment_delimiter_tokens: List[str],
+        supported_punctuation: Optional[Set] = None,
+        segment_gap_threshold: Optional[int] = None,
+    ) -> List[Dict[str, Union[str, float]]]:
         """
-        Utility method which constructs word time stamps out of sub-word time stamps.
-
-        **Note**: Only supports Sentencepiece based tokenizers !
+        Utility method which constructs segment time stamps out of word time stamps.
 
         Args:
-            offsets: A list of dictionaries, each containing "char", "start_offset" and "end_offset".
-            hypothesis: Hypothesis object that contains `text` field, where each token is a sub-word id
-                after ctc collapse.
-            decode_ids_to_tokens: A Callable function that accepts a list of integers and maps it to a sub-word.
-            decode_tokens_to_str: A Callable function that accepts a list of integers and maps it to text / str.
+            offsets: A list of dictionaries, each containing "word", "start_offset" and "end_offset".
+            segments_delimiter_tokens: List containing tokens representing the seperator(s) between segments.
+            supported_punctuation: Set containing punctuation marks in the vocabulary.
+            segment_gap_threshold: Number of frames between 2 consecutive words necessary to form segments out of plain text.
 
         Returns:
-            A list of dictionaries containing the word offsets. Each item contains "word", "start_offset" and
+            A list of dictionaries containing the segment offsets. Each item contains "segment", "start_offset" and
             "end_offset".
         """
-        word_offsets = []
-        built_token = []
-        previous_token_index = 0
-        # For every collapsed sub-word token
-        for i, char in enumerate(hypothesis.text):
-            # Compute the sub-word text representation, and the decoded text (stripped of sub-word markers).
-            token = decode_ids_to_tokens([char])[0]
-            token_text = decode_tokens_to_str([char])
+        if (
+            supported_punctuation
+            and not set(segment_delimiter_tokens).intersection(supported_punctuation)
+            and not segment_gap_threshold
+        ):
+            logging.warning(
+                f"Specified segment seperators are not in supported punctuation {supported_punctuation}. "
+                "If the seperators are not punctuation marks, ignore this warning. "
+                "Otherwise, specify 'segment_gap_threshold' parameter in decoding config to form segments.",
+                mode=logging_mode.ONCE,
+            )
 
-            # It is a sub-word token, or contains an identifier at the beginning such as _ or ## that was stripped
-            # after forcing partial text conversion of the token.
-            if token != token_text:
-                # If there are any partially or fully built sub-word token ids, construct to text.
-                # Note: This is "old" subword, that occurs *after* current sub-word has started.
-                if len(built_token) > 0:
-                    word_offsets.append(
+        segment_offsets = []
+        segment_words = []
+        previous_word_index = 0
+
+        # For every offset word
+        for i, offset in enumerate(offsets):
+
+            word = offset['word']
+            if segment_gap_threshold and segment_words:
+                gap_between_words = offset['start_offset'] - offsets[i - 1]['end_offset']
+
+                if gap_between_words >= segment_gap_threshold:
+                    segment_offsets.append(
                         {
-                            "word": decode_tokens_to_str(built_token),
-                            "start_offset": offsets[previous_token_index]["start_offset"],
-                            "end_offset": offsets[i]["start_offset"],
+                            "segment": ' '.join(segment_words),
+                            "start_offset": offsets[previous_word_index]["start_offset"],
+                            "end_offset": offsets[i - 1]["end_offset"],
                         }
                     )
 
-                # Prepare list of new sub-word ids
-                built_token.clear()
-                built_token.append(char)
-                previous_token_index = i
-            else:
-                # If the token does not contain any sub-word start mark, then the sub-word has not completed yet
-                # Append to current sub-word list.
-                built_token.append(char)
+                    segment_words = [word]
+                    previous_word_index = i
+                    continue
 
-        # Inject the start offset of the first token to word offsets
-        # This is because we always skip the delay the injection of the first sub-word due to the loop
-        # condition and check whether built token is ready or not.
-        # Therefore without this forced injection, the start_offset appears as off by 1.
-        if len(word_offsets) == 0:
-            # alaptev: sometimes word_offsets can be empty
-            if len(built_token) > 0:
-                word_offsets.append(
-                    {
-                        "word": decode_tokens_to_str(built_token),
-                        "start_offset": offsets[0]["start_offset"],
-                        "end_offset": offsets[-1]["end_offset"],
-                    }
-                )
-                built_token.clear()
-        else:
-            word_offsets[0]["start_offset"] = offsets[0]["start_offset"]
+            # check if the word ends with any delimeter token or the word itself is a delimeter
+            elif word and (word[-1] in segment_delimiter_tokens or word in segment_delimiter_tokens):
+                segment_words.append(word)
+                if segment_words:
+                    segment_offsets.append(
+                        {
+                            "segment": ' '.join(segment_words),
+                            "start_offset": offsets[previous_word_index]["start_offset"],
+                            "end_offset": offset["end_offset"],
+                        }
+                    )
 
-            # If there are any remaining tokens left, inject them all into the final word offset.
-            # Note: The start offset of this token is the start time of the first token inside build_token.
-            # Note: The end offset of this token is the end time of the last token inside build_token
-            if len(built_token) > 0:
-                word_offsets.append(
-                    {
-                        "word": decode_tokens_to_str(built_token),
-                        "start_offset": offsets[-(len(built_token))]["start_offset"],
-                        "end_offset": offsets[-1]["end_offset"],
-                    }
-                )
-            built_token.clear()
+                segment_words = []
+                previous_word_index = i + 1
+                continue
 
-        return word_offsets
+            segment_words.append(word)
+
+        if segment_words:
+            start_offset = offsets[previous_word_index]["start_offset"]
+            segment_offsets.append(
+                {
+                    "segment": ' '.join(segment_words),
+                    "start_offset": start_offset,
+                    "end_offset": offsets[-1]["end_offset"],
+                }
+            )
+        segment_words.clear()
+
+        return segment_offsets
 
     @property
     def preserve_alignments(self):
@@ -890,6 +935,12 @@ class CTCDecoding(AbstractCTCDecoding):
 
             word_seperator:
                 Str token representing the seperator between words.
+
+            segment_seperators:
+                List containing tokens representing the seperator(s) between segments.
+
+            segment_gap_threshold:
+                The threshold (in frames) that caps the gap between two words necessary for forming the segments.
 
             preserve_alignments:
                 Bool flag which preserves the history of logprobs generated during
@@ -1026,7 +1077,11 @@ class CTCDecoding(AbstractCTCDecoding):
         self.vocabulary = vocabulary
         self.labels_map = dict([(i, vocabulary[i]) for i in range(len(vocabulary))])
 
-        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id)
+        supported_punctuation = {
+            char for token in vocabulary for char in token if unicodedata.category(char).startswith('P')
+        }
+
+        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id, supported_punctuation=supported_punctuation)
 
         # Finalize Beam Search Decoding framework
         if isinstance(self.decoding, ctc_beam_decoding.AbstractBeamCTCInfer):
@@ -1073,6 +1128,78 @@ class CTCDecoding(AbstractCTCDecoding):
         """
         token_list = [self.labels_map[c] for c in tokens if c != self.blank_id]
         return token_list
+
+    @staticmethod
+    def get_words_offsets(
+        char_offsets: List[Dict[str, Union[str, float]]],
+        encoded_char_offsets: List[Dict[str, Union[str, float]]],
+        word_delimiter_char: str = " ",
+        supported_punctuation: Optional[Set] = None,
+    ) -> List[Dict[str, Union[str, float]]]:
+        """
+        Utility method which constructs word time stamps out of character time stamps.
+
+        References:
+            This code is a port of the Hugging Face code for word time stamp construction.
+
+        Args:
+            char_offsets: A list of dictionaries, each containing "char", "start_offset" and "end_offset",
+                        where "char" is decoded with the tokenizer.
+            encoded_char_offsets: A list of dictionaries, each containing "char", "start_offset" and "end_offset",
+                        where "char" is the original id/ids from the hypotheses (not decoded with the tokenizer).
+                        As we are working with char-based models here, we are using the `char_offsets` to get the word offsets.
+                        `encoded_char_offsets` is passed for keeping the consistency with `AbstractRNNTDecoding`'s abstract method.
+            word_delimiter_char: Character token that represents the word delimiter. By default, " ".
+            supported_punctuation: Set containing punctuation marks in the vocabulary.
+
+        Returns:
+            A list of dictionaries containing the word offsets. Each item contains "word", "start_offset" and
+            "end_offset".
+        """
+
+        word_offsets = []
+
+        last_state = "DELIMITER"
+        word = ""
+        start_offset = 0
+        end_offset = 0
+        for i, offset in enumerate(char_offsets):
+            char = offset["char"]
+            state = "DELIMITER" if char == word_delimiter_char else "WORD"
+
+            next_char = char_offsets[i + 1]['char'] if i < len(char_offsets) - 1 else None
+
+            if next_char:
+                next_punctuation = next_char in supported_punctuation and next_char != word_delimiter_char
+            else:
+                next_punctuation = False
+
+            # If we have a space and the next character is a punctuation, we skip adding the space to the word
+            # This is for being consistent with the final hypothesis text,
+            # For which we are removing a space before a punctuation.
+            if char == " " and next_punctuation:
+                continue
+
+            if state == last_state:
+                # If we are in the same state as before, we simply repeat what we've done before
+                end_offset = offset["end_offset"]
+                word += char
+            else:
+                # Switching state
+                if state == "DELIMITER":
+                    # Finishing a word
+                    word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
+                else:
+                    # Starting a new word
+                    start_offset = offset["start_offset"]
+                    end_offset = offset["end_offset"]
+                    word = char
+
+            last_state = state
+        if last_state == "WORD":
+            word_offsets.append({"word": word, "start_offset": start_offset, "end_offset": end_offset})
+
+        return word_offsets
 
 
 class CTCBPEDecoding(AbstractCTCDecoding):
@@ -1233,8 +1360,16 @@ class CTCBPEDecoding(AbstractCTCDecoding):
     def __init__(self, decoding_cfg, tokenizer: TokenizerSpec):
         blank_id = tokenizer.tokenizer.vocab_size
         self.tokenizer = tokenizer
+        self.tokenizer_type = self.define_tokenizer_type(tokenizer.vocab)
 
-        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id)
+        if hasattr(tokenizer, 'supported_punctuation'):
+            supported_punctuation = tokenizer.supported_punctuation
+        else:
+            supported_punctuation = {
+                char for token in tokenizer.vocab for char in token if unicodedata.category(char).startswith('P')
+            }
+
+        super().__init__(decoding_cfg=decoding_cfg, blank_id=blank_id, supported_punctuation=supported_punctuation)
 
         # Finalize Beam Search Decoding framework
         if isinstance(self.decoding, ctc_beam_decoding.AbstractBeamCTCInfer):
@@ -1250,6 +1385,27 @@ class CTCBPEDecoding(AbstractCTCDecoding):
                 logging.warning("Could not resolve the vocabulary of the tokenizer !")
 
             self.decoding.set_decoding_type('subword')
+
+    @staticmethod
+    def define_tokenizer_type(vocabulary: List[str]) -> str:
+        """
+        Define the tokenizer type based on the vocabulary.
+        """
+        if any(token.startswith("##") for token in vocabulary):
+            return "wpe"
+        return "bpe"
+
+    @staticmethod
+    def define_word_start_condition(tokenizer_type: str, word_delimiter_char: str) -> Callable[[str, str], bool]:
+        """
+        Define the word start condition based on the tokenizer type and word delimiter character.
+        """
+        if word_delimiter_char == " ":
+            if tokenizer_type == "wpe":
+                return lambda token, token_text: token_text and not token_text.startswith("##")
+            return lambda token, token_text: token != token_text
+        else:
+            return lambda token, token_text: token_text == word_delimiter_char
 
     def _aggregate_token_confidence(self, hypothesis: Hypothesis) -> List[float]:
         """
@@ -1294,6 +1450,128 @@ class CTCBPEDecoding(AbstractCTCDecoding):
         token_list = self.tokenizer.ids_to_tokens(tokens)
         return token_list
 
+    def get_words_offsets(
+        self,
+        char_offsets: List[Dict[str, Union[str, float]]],
+        encoded_char_offsets: List[Dict[str, Union[str, float]]],
+        word_delimiter_char: str = " ",
+        supported_punctuation: Optional[Set] = None,
+    ) -> List[Dict[str, Union[str, float]]]:
+        """
+        Utility method which constructs word time stamps out of sub-word time stamps.
+
+        **Note**: Only supports Sentencepiece based tokenizers !
+
+        Args:
+            char_offsets: A list of dictionaries, each containing "char", "start_offset" and "end_offset",
+                        where "char" is decoded with the tokenizer.
+            encoded_char_offsets: A list of dictionaries, each containing "char", "start_offset" and "end_offset",
+                        where "char" is the original id/ids from the hypotheses (not decoded with the tokenizer).
+                        This is needed for subword tokenization models.
+            word_delimiter_char: Character token that represents the word delimiter. By default, " ".
+            supported_punctuation: Set containing punctuation marks in the vocabulary.
+
+        Returns:
+            A list of dictionaries containing the word offsets. Each item contains "word", "start_offset" and
+            "end_offset".
+        """
+        char_offsets = encoded_char_offsets.copy()
+        word_offsets = []
+        previous_token_index = 0
+
+        # Built tokens should be list here as when dealing with wpe tokenizer,
+        # ids should be decoded together to ensure tokens starting with ## are not split
+        built_tokens = []
+
+        condition_for_word_start = self.define_word_start_condition(self.tokenizer_type, word_delimiter_char)
+
+        # For every collapsed sub-word token
+        for i, offset in enumerate(char_offsets):
+
+            char = offset['char']
+
+            # Compute the sub-word text representation, and the decoded text (stripped of sub-word markers).
+            token = self.decode_ids_to_tokens([char])[0]
+            token_text = self.decode_tokens_to_str([char]).strip()
+
+            curr_punctuation = supported_punctuation and token_text in supported_punctuation
+
+            # It is a sub-word token, or contains an identifier at the beginning such as _ or ## that was stripped
+            # after forcing partial text conversion of the token.
+            # AND it is not a supported punctuation mark, which needs to be added to the built word regardless of its identifier.
+            if condition_for_word_start(token, token_text) and not curr_punctuation:
+                # If there are any partially or fully built sub-word token ids, construct to text.
+                # Note: This is "old" subword, that occurs *after* current sub-word has started.
+                if built_tokens:
+                    built_word = self.decode_tokens_to_str(built_tokens)
+                    if built_word:
+                        word_offsets.append(
+                            {
+                                "word": built_word,
+                                "start_offset": char_offsets[previous_token_index]["start_offset"],
+                                "end_offset": char_offsets[i - 1]["end_offset"],
+                            }
+                        )
+
+                # Prepare new built_tokens
+                built_tokens.clear()
+
+                if token_text != word_delimiter_char:
+                    built_tokens.append(char)
+                    previous_token_index = i
+
+            # If the token is a punctuation mark and there is no built word, then the previous word is complete
+            # and lacks the punctuation mark. We need to add the punctuation mark to the previous formed word.
+            elif curr_punctuation and not built_tokens:
+                last_built_word = word_offsets[-1]
+                last_built_word['end_offset'] = offset['end_offset']
+                if last_built_word['word'][-1] == ' ':
+                    last_built_word['word'] = last_built_word['word'][:-1]
+                last_built_word['word'] += token_text
+            else:
+                # If the token does not contain any sub-word start mark, then the sub-word has not completed yet
+                # Append to current built word.
+                # If this token is the first in the built_tokens, we should save its index as the previous token index
+                # because it will be used to calculate the start offset of the word.
+                if not built_tokens:
+                    previous_token_index = i
+                built_tokens.append(char)
+
+        # Inject the start offset of the first token to word offsets
+        # This is because we always skip the delay the injection of the first sub-word due to the loop
+        # condition and check whether built token is ready or not.
+        # Therefore without this forced injection, the start_offset appears as off by 1.
+        if len(word_offsets) == 0:
+            # alaptev: sometimes word_offsets can be empty
+            if built_tokens:
+                built_word = self.decode_tokens_to_str(built_tokens)
+                if built_word:
+                    word_offsets.append(
+                        {
+                            "word": built_word,
+                            "start_offset": char_offsets[0]["start_offset"],
+                            "end_offset": char_offsets[-1]["end_offset"],
+                        }
+                    )
+        else:
+            word_offsets[0]["start_offset"] = char_offsets[0]["start_offset"]
+
+            # If there are any remaining tokens left, inject them all into the final word offset.
+            # Note: The start offset of this token is the start time of the first token inside build_token.
+            # Note: The end offset of this token is the end time of the last token inside build_token
+            if built_tokens:
+                built_word = self.decode_tokens_to_str(built_tokens)
+                if built_word:
+                    word_offsets.append(
+                        {
+                            "word": built_word,
+                            "start_offset": char_offsets[previous_token_index]["start_offset"],
+                            "end_offset": char_offsets[-1]["end_offset"],
+                        }
+                    )
+
+        return word_offsets
+
 
 @dataclass
 class CTCDecodingConfig:
@@ -1307,6 +1585,12 @@ class CTCDecodingConfig:
 
     # token representing word seperator
     word_seperator: str = " "
+
+    # tokens representing segments seperators
+    segment_seperators: Optional[List[str]] = field(default_factory=lambda: [".", "!", "?"])
+
+    # threshold (in frames) that caps the gap between two words necessary for forming the segments
+    segment_gap_threshold: Optional[int] = None
 
     # type of timestamps to calculate
     ctc_timestamp_type: str = "all"  # can be char, word or all for both
@@ -1322,6 +1606,11 @@ class CTCDecodingConfig:
     # beam decoding config
     beam: ctc_beam_decoding.BeamCTCInferConfig = field(
         default_factory=lambda: ctc_beam_decoding.BeamCTCInferConfig(beam_size=4)
+    )
+
+    # wfst decoding config
+    wfst: ctc_beam_decoding.WfstCTCInferConfig = field(
+        default_factory=lambda: ctc_beam_decoding.WfstCTCInferConfig(beam_size=4)
     )
 
     # confidence config

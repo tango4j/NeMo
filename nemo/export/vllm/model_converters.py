@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence, Tuple
+from typing import Generator, Optional, Tuple
 
 import torch
 
@@ -42,7 +42,9 @@ class ModelConverter(ABC):
         pass
 
     @abstractmethod
-    def convert_weights(self, nemo_model_config: dict, state_dict: dict) -> Sequence[Tuple[str, torch.tensor]]:
+    def convert_weights(
+        self, nemo_model_config: dict, state_dict: dict
+    ) -> Generator[Tuple[str, torch.tensor], None, None]:
         """
         Returns or yields a sequence of (name, tensor) tuples that contain model weights in the HF format.
         """
@@ -76,7 +78,8 @@ class LlamaConverter(ModelConverter):
 
         yield ('model.embed_tokens.weight', state_dict['model.embedding.word_embeddings.weight'])
         yield ('model.norm.weight', state_dict['model.decoder.final_layernorm.weight'])
-        yield ('lm_head.weight', state_dict['model.output_layer.weight'])
+        if not nemo_model_config.get("share_embeddings_and_output_weights", False):
+            yield ('lm_head.weight', state_dict['model.output_layer.weight'])
 
         for layer in range(int(num_layers)):
             qkv_weights = state_dict['model.decoder.layers.self_attention.linear_qkv.weight'][layer]
@@ -201,25 +204,29 @@ class GemmaConverter(ModelConverter):
         head_num = nemo_model_config["num_attention_heads"]
         head_size = nemo_model_config["kv_channels"]
         hidden_size = nemo_model_config["hidden_size"]
+        zero_centered_gamma = nemo_model_config.get("layernorm_zero_centered_gamma", False)
         heads_per_group = head_num // num_query_groups
 
         yield ('model.embed_tokens.weight', state_dict['model.embedding.word_embeddings.weight'])
 
         final_layernorm_weight = state_dict['model.decoder.final_layernorm.weight']
-        final_layernorm_weight -= 1.0
+        if not zero_centered_gamma:
+            final_layernorm_weight -= 1.0
         yield ('model.norm.weight', final_layernorm_weight)
 
         for layer in range(int(num_layers)):
             input_layernorm_weight = state_dict['model.decoder.layers.self_attention.linear_qkv.layer_norm_weight'][
                 layer
             ]
-            input_layernorm_weight -= 1.0
+            if not zero_centered_gamma:
+                input_layernorm_weight -= 1.0
             yield (f'model.layers.{layer}.input_layernorm.weight', input_layernorm_weight)
 
             post_attention_layernorm_weight = state_dict['model.decoder.layers.mlp.linear_fc1.layer_norm_weight'][
                 layer
             ]
-            post_attention_layernorm_weight -= 1.0
+            if not zero_centered_gamma:
+                post_attention_layernorm_weight -= 1.0
             yield (f'model.layers.{layer}.post_attention_layernorm.weight', post_attention_layernorm_weight)
 
             gate_up_combined_weight = state_dict['model.decoder.layers.mlp.linear_fc1.weight'][layer]
@@ -293,7 +300,11 @@ class Starcoder2Converter(ModelConverter):
         head_size = hidden_size // head_num
         heads_per_group = head_num // num_query_groups
         qkv_total_dim = head_num + 2 * num_query_groups
-        has_bias = nemo_model_config["bias"]
+
+        if 'bias' in nemo_model_config:
+            has_bias = nemo_model_config["bias"]
+        else:
+            has_bias = nemo_model_config["add_bias_linear"]
 
         yield ('model.embed_tokens.weight', state_dict['model.embedding.word_embeddings.weight'])
 
@@ -330,7 +341,7 @@ class Starcoder2Converter(ModelConverter):
             # Attention dense
             yield (
                 f'model.layers.{layer}.self_attn.o_proj.weight',
-                state_dict[f'model.decoder.layers.self_attention.linear_proj.weight'][layer],
+                state_dict['model.decoder.layers.self_attention.linear_proj.weight'][layer],
             )
             if has_bias:
                 yield (
@@ -400,7 +411,7 @@ def register_model_converter(model_type, cls):
     _MODEL_CONVERTERS[model_type] = cls
 
 
-def get_model_converter(model_type) -> ModelConverter:
+def get_model_converter(model_type) -> Optional[ModelConverter]:
     """
     Returns an instance of the the model conversion class for the given model type, or None.
     """

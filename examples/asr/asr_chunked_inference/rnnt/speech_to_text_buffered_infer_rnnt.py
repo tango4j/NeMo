@@ -23,6 +23,9 @@ The difference between streaming and buffered inference is the chunk size (or th
 Buffered inference will use large chunk sizes (5-10 seconds) + some additional buffer for context.
 Streaming inference will use small chunk sizes (0.1 to 0.25 seconds) + some additional buffer for context.
 
+Note, currently greedy_batched inferece for TDT is not supported. Decoding strategy will be set to greedy for
+TDT automatically.
+
 # Middle Token merge algorithm
 
 python speech_to_text_buffered_infer_rnnt.py \
@@ -61,10 +64,10 @@ import copy
 import glob
 import math
 import os
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch
 from omegaconf import OmegaConf, open_dict
 
@@ -73,6 +76,7 @@ from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConf
 from nemo.collections.asr.parts.utils.eval_utils import cal_write_wer
 from nemo.collections.asr.parts.utils.streaming_utils import (
     BatchedFrameASRRNNT,
+    BatchedFrameASRTDT,
     LongestCommonSubsequenceBatchedFrameASRRNNT,
 )
 from nemo.collections.asr.parts.utils.transcribe_utils import (
@@ -84,11 +88,13 @@ from nemo.collections.asr.parts.utils.transcribe_utils import (
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 
-can_gpu = torch.cuda.is_available()
-
 
 @dataclass
 class TranscriptionConfig:
+    """
+    Transcription Configuration for buffered inference.
+    """
+
     # Required configs
     model_path: Optional[str] = None  # Path to a .nemo file
     pretrained_name: Optional[str] = None  # Name of a pretrained model
@@ -112,7 +118,9 @@ class TranscriptionConfig:
     # Chunked configs
     chunk_len_in_secs: float = 1.6  # Chunk length in seconds
     total_buffer_in_secs: float = 4.0  # Length of buffer (chunk + left and right padding) in seconds
-    model_stride: int = 8  # Model downsampling factor, 8 for Citrinet and FastConformer models and 4 for Conformer models.
+    model_stride: int = (
+        8  # Model downsampling factor, 8 for Citrinet and FastConformer models and 4 for Conformer models.
+    )
 
     # Set `cuda` to int to define CUDA device. If 'None', will look for CUDA
     # device anyway, and do inference on CPU only if CUDA device is not found.
@@ -124,14 +132,17 @@ class TranscriptionConfig:
     overwrite_transcripts: bool = True
 
     # Decoding strategy for RNNT models
-    decoding: RNNTDecodingConfig = RNNTDecodingConfig()
+    decoding: RNNTDecodingConfig = field(default_factory=RNNTDecodingConfig)
 
     # Decoding configs
     max_steps_per_timestep: int = 5  #'Maximum number of tokens decoded per acoustic timestep'
     stateful_decoding: bool = False  # Whether to perform stateful decoding
 
     # Merge algorithm for transducers
-    merge_algo: Optional[str] = 'middle'  # choices=['middle', 'lcs'], choice of algorithm to apply during inference.
+    # choices=['middle', 'lcs', 'tdt'], choice of algorithm to apply during inference.
+    # if None, we use 'middle' for rnnt and 'tdt' for tdt.
+    merge_algo: Optional[str] = None
+
     lcs_alignment_dir: Optional[str] = None  # Path to a directory to store LCS algo alignments
 
     # Config for word / character error rate calculation
@@ -143,14 +154,16 @@ class TranscriptionConfig:
 
 @hydra_runner(config_name="TranscriptionConfig", schema=TranscriptionConfig)
 def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
+    """
+    Transcribes the input audio and can be used to infer long audio files by chunking
+    them into smaller segments.
+    Currently, greedy_batched inferece for TDT is not supported. Decoding strategy
+    will be set to greedy for TDT automatically.
+    """
     logging.info(f'Hydra config: {OmegaConf.to_yaml(cfg)}')
     torch.set_grad_enabled(False)
 
-    for key in cfg:
-        cfg[key] = None if cfg[key] == 'None' else cfg[key]
-
-    if is_dataclass(cfg):
-        cfg = OmegaConf.structured(cfg)
+    cfg = OmegaConf.structured(cfg)
 
     if cfg.random_seed:
         pl.seed_everything(cfg.random_seed)
@@ -208,9 +221,17 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
     asr_model.freeze()
     asr_model = asr_model.to(asr_model.device)
 
+    model_is_tdt = hasattr(asr_model.loss, '_loss') and type(asr_model.loss._loss).__name__ == 'TDTLossNumba'
+    if cfg.merge_algo is None:
+        cfg.merge_algo = "tdt" if model_is_tdt else "middle"
+        logging.info(f"merge_algo not specified. We use the default algorithm (middle for rnnt and tdt for tdt).")
+
+    if model_is_tdt and cfg.merge_algo != "tdt":
+        raise ValueError("merge_algo must be 'tdt' for TDT models")
+
     # Change Decoding Config
     with open_dict(cfg.decoding):
-        if cfg.stateful_decoding:
+        if cfg.stateful_decoding or cfg.merge_algo == 'tdt':
             cfg.decoding.strategy = "greedy"
         else:
             cfg.decoding.strategy = "greedy_batch"
@@ -263,6 +284,16 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         # Set the LCS algorithm delay.
         frame_asr.lcs_delay = math.floor(((total_buffer - chunk_len)) / model_stride_in_secs)
 
+    elif cfg.merge_algo == 'tdt':
+        frame_asr = BatchedFrameASRTDT(
+            asr_model=asr_model,
+            frame_len=chunk_len,
+            total_buffer=cfg.total_buffer_in_secs,
+            batch_size=cfg.batch_size,
+            max_steps_per_timestep=cfg.max_steps_per_timestep,
+            stateful_decoding=cfg.stateful_decoding,
+        )
+
     else:
         raise ValueError("Invalid choice of merge algorithm for transducer buffered inference.")
 
@@ -274,10 +305,11 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         batch_size=cfg.batch_size,
         manifest=manifest,
         filepaths=filepaths,
+        accelerator=accelerator,
     )
 
     output_filename, pred_text_attr_name = write_transcription(
-        hyps, cfg, model_name, filepaths=filepaths, compute_langs=False, compute_timestamps=False
+        hyps, cfg, model_name, filepaths=filepaths, compute_langs=False, timestamps=False
     )
     logging.info(f"Finished writing predictions to {output_filename}!")
 

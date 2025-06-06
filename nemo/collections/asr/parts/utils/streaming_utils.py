@@ -22,10 +22,11 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from nemo.collections.asr.data.audio_to_text_lhotse_prompted import PromptedAudioToTextMiniBatch
-from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
+from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.mixins.streaming import StreamingEncoder
 from nemo.collections.asr.parts.preprocessing.features import normalize_batch
 from nemo.collections.asr.parts.preprocessing.segment import get_samples
+from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.core.classes import IterableDataset
 from nemo.core.neural_types import LengthsType, MelSpectrogramType, NeuralType
 
@@ -79,8 +80,8 @@ def longest_common_subsequence_merge(X, Y, filepath=None):
 
     Assumption is that the two chunks are consecutive chunks, and there exists at least small overlap acoustically.
 
-    It is a sub-word token merge algorithm, operating on the abstract notion of integer ids representing the subword ids.
-    It is independent of text or character encoding.
+    It is a sub-word token merge algorithm, operating on the abstract notion of integer ids representing
+    the subword ids. It is independent of text or character encoding.
 
     Since the algorithm is merge based, and depends on consecutive buffers, the very first buffer is processes using
     the "middle tokens" algorithm.
@@ -107,7 +108,7 @@ def longest_common_subsequence_merge(X, Y, filepath=None):
     # value initially in each cell
     m = len(X)
     n = len(Y)
-    LCSuff = [[0 for k in range(n + 1)] for l in range(m + 1)]
+    LCSuff = [[0 for _ in range(n + 1)] for _ in range(m + 1)]
 
     # To store the length of
     # longest common substring
@@ -292,8 +293,8 @@ def lcs_alignment_merge_buffer(buffer, data, delay, model, max_steps_per_timeste
     Merges the new text from the current frame with the previous text contained in the buffer.
 
     The alignment is based on a Longest Common Subsequence algorithm, with some additional heuristics leveraging
-    the notion that the chunk size is >= the context window. In case this assumptio is violated, the results of the merge
-    will be incorrect (or at least obtain worse WER overall).
+    the notion that the chunk size is >= the context window. In case this assumptio is violated, the results of the
+    merge will be incorrect (or at least obtain worse WER overall).
     """
     # If delay timesteps is 0, that means no future context was used. Simply concatenate the buffer with new data.
     if delay < 1:
@@ -327,8 +328,8 @@ def inplace_buffer_merge(buffer, data, timesteps, model):
     Merges the new text from the current frame with the previous text contained in the buffer.
 
     The alignment is based on a Longest Common Subsequence algorithm, with some additional heuristics leveraging
-    the notion that the chunk size is >= the context window. In case this assumptio is violated, the results of the merge
-    will be incorrect (or at least obtain worse WER overall).
+    the notion that the chunk size is >= the context window. In case this assumptio is violated, the results of
+    the merge will be incorrect (or at least obtain worse WER overall).
     """
     # If delay timesteps is 0, that means no future context was used. Simply concatenate the buffer with new data.
     if timesteps < 1:
@@ -391,7 +392,7 @@ class StreamingFeatureBufferer:
         cfg.preprocessor.dither = 0.0
         cfg.preprocessor.pad_to = 0
         cfg.preprocessor.normalize = "None"
-        self.raw_preprocessor = EncDecCTCModelBPE.from_config_dict(cfg.preprocessor)
+        self.raw_preprocessor = ASRModel.from_config_dict(cfg.preprocessor)
         self.raw_preprocessor.to(asr_model.device)
 
     def reset(self):
@@ -756,7 +757,7 @@ class FrameBatchASR:
         cfg.preprocessor.dither = 0.0
         cfg.preprocessor.pad_to = 0
         cfg.preprocessor.normalize = "None"
-        self.raw_preprocessor = EncDecCTCModelBPE.from_config_dict(cfg.preprocessor)
+        self.raw_preprocessor = ASRModel.from_config_dict(cfg.preprocessor)
         self.raw_preprocessor.to(asr_model.device)
         self.preprocessor = self.raw_preprocessor
 
@@ -1091,12 +1092,15 @@ class BatchedFrameASRRNNT(FrameBatchASR):
             -   For all samples, determine if signal has finished.
                 -   If so, skip calculation of mel-specs.
                 -   If not, compute mel spec and length
-            -   Perform Encoder forward over this sub-batch of samples. Maintain the indices of samples that were processed.
-            -   If performing stateful decoding, prior to decoder forward, remove the states of samples that were not processed.
+            -   Perform Encoder forward over this sub-batch of samples. Maintain the indices of samples that
+                were processed.
+            -   If performing stateful decoding, prior to decoder forward, remove the states of samples that
+                were not processed.
             -   Perform Decoder + Joint forward for samples that were processed.
             -   For all output RNNT alignment matrix of the joint do:
                 -   If signal has ended previously (this was last buffer of padding), skip alignment
-                -   Otherwise, recalculate global index of this sample from the sub-batch index, and preserve alignment.
+                -   Otherwise, recalculate global index of this sample from the sub-batch index, and preserve
+                alignment.
             -   Same for preds
             -   Update indices of sub-batch with global index map.
             - Redo steps until all samples were processed (sub-batch size == 0).
@@ -1142,7 +1146,7 @@ class BatchedFrameASRRNNT(FrameBatchASR):
                 new_prev_hypothesis.append(self.previous_hypotheses[old_pos])
             self.previous_hypotheses = new_prev_hypothesis
 
-        best_hyp, _ = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
+        best_hyp = self.asr_model.decoding.rnnt_decoder_predictions_tensor(
             encoded, encoded_len, return_hypotheses=True, partial_hypotheses=self.previous_hypotheses
         )
 
@@ -1165,13 +1169,13 @@ class BatchedFrameASRRNNT(FrameBatchASR):
             if not has_signal_ended:
                 self.all_preds[global_index_key].append(pred.cpu().numpy())
 
-        timestamps = [hyp.timestep for hyp in best_hyp]
-        for idx, timestep in enumerate(timestamps):
+        timestamps = [hyp.timestamp for hyp in best_hyp]
+        for idx, timestamp in enumerate(timestamps):
             global_index_key = new_batch_keys[idx]  # get index of this sample in the global batch
 
             has_signal_ended = self.frame_bufferer.signal_end[global_index_key]
             if not has_signal_ended:
-                self.all_timestamps[global_index_key].append(timestep)
+                self.all_timestamps[global_index_key].append(timestamp)
 
         if self.stateful_decoding:
             # State resetting is being done on sub-batch only, global index information is not being updated
@@ -1258,6 +1262,108 @@ class BatchedFrameASRRNNT(FrameBatchASR):
         decoded_prediction = [p for p in preds]
         hypothesis = self.asr_model.tokenizer.ids_to_text(decoded_prediction)
         return hypothesis
+
+
+class BatchedFrameASRTDT(BatchedFrameASRRNNT):
+    """
+    Batched implementation of FrameBatchASR for TDT models, where the batch dimension is independent audio samples.
+    It's mostly similar to BatchedFrameASRRNNT with special handling of boundary cases due to the frame-skipping
+    resulted by TDT models.
+    """
+
+    def __init__(
+        self,
+        asr_model,
+        frame_len=1.6,
+        total_buffer=4.0,
+        batch_size=32,
+        max_steps_per_timestep: int = 5,
+        stateful_decoding: bool = False,
+        tdt_search_boundary: int = 4,
+    ):
+        '''
+        Args:
+            asr_model: An RNNT model.
+            frame_len: frame's duration, seconds.
+            total_buffer: duration of total audio chunk size, in seconds.
+            batch_size: Number of independent audio samples to process at each step.
+            max_steps_per_timestep: Maximum number of tokens (u) to process per acoustic timestep (t).
+            stateful_decoding: Boolean whether to enable stateful decoding for preservation of state across buffers.
+            tdt_search_boundary: The max number of frames that we search between chunks to match the token at boundary.
+        '''
+        super().__init__(asr_model, frame_len=frame_len, total_buffer=total_buffer, batch_size=batch_size)
+        self.tdt_search_boundary = tdt_search_boundary
+
+    def transcribe(
+        self,
+        tokens_per_chunk: int,
+        delay: int,
+    ):
+        """
+        Performs "middle token" alignment prediction using the buffered audio chunk.
+        """
+        self.infer_logits()
+
+        self.unmerged = [[] for _ in range(self.batch_size)]
+        for idx, alignments in enumerate(self.all_alignments):
+
+            signal_end_idx = self.frame_bufferer.signal_end_index[idx]
+            if signal_end_idx is None:
+                raise ValueError("Signal did not end")
+
+            for a_idx, alignment in enumerate(alignments):
+                if delay == len(alignment):  # chunk size = buffer size
+                    offset = 0
+                else:  # all other cases
+                    offset = 1
+
+                longer_alignment = alignment[
+                    len(alignment)
+                    - offset
+                    - delay
+                    - self.tdt_search_boundary : len(alignment)
+                    - offset
+                    - delay
+                    + tokens_per_chunk
+                ]
+
+                alignment = alignment[
+                    len(alignment) - offset - delay : len(alignment) - offset - delay + tokens_per_chunk
+                ]
+
+                longer_ids, longer_toks = self._alignment_decoder(
+                    longer_alignment, self.asr_model.tokenizer, self.blank_id
+                )
+                ids, _ = self._alignment_decoder(alignment, self.asr_model.tokenizer, self.blank_id)
+
+                if len(longer_ids) > 0 and a_idx < signal_end_idx:
+                    if a_idx == 0 or len(self.unmerged[idx]) == 0:
+                        self.unmerged[idx] = inplace_buffer_merge(
+                            self.unmerged[idx],
+                            ids,
+                            delay,
+                            model=self.asr_model,
+                        )
+                    elif len(self.unmerged[idx]) > 0 and len(longer_toks) > 1:
+                        id_to_match = self.unmerged[idx][-1]
+                        start = min(len(longer_ids) - len(ids), len(longer_ids) - 1)
+                        end = -1
+                        for i in range(start, end, -1):
+                            if longer_ids[i] == id_to_match:
+                                ids = longer_ids[i + 1 :]
+                                break
+
+                        self.unmerged[idx] = inplace_buffer_merge(
+                            self.unmerged[idx],
+                            ids,
+                            delay,
+                            model=self.asr_model,
+                        )
+
+        output = []
+        for idx in range(self.batch_size):
+            output.append(self.greedy_merge(self.unmerged[idx]))
+        return output
 
 
 class LongestCommonSubsequenceBatchedFrameASRRNNT(BatchedFrameASRRNNT):
@@ -1362,15 +1468,17 @@ class LongestCommonSubsequenceBatchedFrameASRRNNT(BatchedFrameASRRNNT):
 
 class CacheAwareStreamingAudioBuffer:
     """
-    A buffer to be used for cache-aware streaming. It can load a single or multiple audio files/processed signals, split them in chunks and return one on one.
-    It can be used to simulate streaming audio or audios.
+    A buffer to be used for cache-aware streaming. It can load a single or multiple audio
+    files/processed signals, split them in chunks and return one on one. It can be used to
+    simulate streaming audio or audios.
     """
 
     def __init__(self, model, online_normalization=None, pad_and_drop_preencoded=False):
         '''
         Args:
             model: An ASR model.
-            online_normalization (bool): whether to perform online normalization per chunk or normalize the whole audio before chunking
+            online_normalization (bool): whether to perform online normalization per chunk or
+            normalize the whole audio before chunking
             pad_and_drop_preencoded (bool): if true pad first audio chunk and always drop preencoded
         '''
         self.model = model
@@ -1430,7 +1538,8 @@ class CacheAwareStreamingAudioBuffer:
             audio_chunk = self.buffer[:, :, self.buffer_idx : self.buffer_idx + chunk_size]
 
             if self.sampling_frames is not None:
-                # checking to make sure the audio chunk has enough frames to produce at least one output after downsampling
+                # checking to make sure the audio chunk has enough frames to produce at least one output after
+                # downsampling
                 if self.buffer_idx == 0 and isinstance(self.sampling_frames, list):
                     cur_sampling_frames = self.sampling_frames[0]
                 else:
@@ -1602,28 +1711,57 @@ class CacheAwareStreamingAudioBuffer:
 class FrameBatchMultiTaskAED(FrameBatchASR):
     def __init__(self, asr_model, frame_len=4, total_buffer=4, batch_size=4):
         super().__init__(asr_model, frame_len, total_buffer, batch_size, pad_to_buffer_len=False)
+        self.window_stride = asr_model._cfg.preprocessor.window_stride
+        self.subsampling_factor = asr_model._cfg.encoder.subsampling_factor
+        self.chunk_offsets = [
+            0,
+        ]  # chunk offsets in terms of num frames before subsampling
+
+    def reset(self):
+        super().reset()
+        self.chunk_offsets = [
+            0,
+        ]
 
     def get_input_tokens(self, sample: dict):
         if self.asr_model.prompt_format == "canary":
-            missing_keys = [k for k in ("source_lang", "target_lang", "taskname", "pnc") if k not in sample]
-            if missing_keys:
-                raise RuntimeError(
-                    f"We found sample that is missing the following keys: {missing_keys}"
-                    f"Please ensure that every utterance in the input manifests contains these keys. Sample: {sample}"
-                )
-            tokens = self.asr_model.prompt.encode_dialog(
-                turns=[
-                    {
-                        "role": "user",
-                        "slots": {
-                            **sample,
-                            self.asr_model.prompt.PROMPT_LANGUAGE_SLOT: "spl_tokens",
-                        },
-                    }
-                ]
-            )["context_ids"]
+            expected_slots = {"source_lang", "target_lang", "taskname", "pnc"}
+            default_slot_values = {}
+        elif self.asr_model.prompt_format == "canary2":
+            expected_slots = {"source_lang", "target_lang"}
+            default_slot_values = {
+                "decodercontext": "",
+                "emotion": "<|emo:undefined|>",
+                "itn": "<|noitn|>",
+                "timestamp": "<|notimestamp|>",
+                "diarize": "<|nodiarize|>",
+                "pnc": "<|pnc|>",  # consistent with canary1
+            }
         else:
             raise ValueError(f"Unknown prompt format: {self.asr_model.prompt_format}")
+
+        missing_keys = [k for k in expected_slots if k not in sample]
+        if missing_keys:
+            raise RuntimeError(
+                f"We found sample that is missing the following keys: {missing_keys}"
+                f"Please ensure that every utterance in the input manifests contains these keys. Sample: {sample}"
+            )
+
+        # fill optional slots
+        for k, v in default_slot_values.items():
+            sample[k] = sample.get(k, v)
+        tokens = self.asr_model.prompt.encode_dialog(
+            turns=[
+                {
+                    "role": "user",
+                    "slots": {
+                        **sample,
+                        self.asr_model.prompt.PROMPT_LANGUAGE_SLOT: "spl_tokens",
+                    },
+                }
+            ]
+        )["context_ids"]
+
         return torch.tensor(tokens, dtype=torch.long, device=self.asr_model.device).unsqueeze(0)  # [1, T]
 
     def read_audio_file(self, audio_filepath: str, delay, model_stride_in_secs, meta_data):
@@ -1640,6 +1778,8 @@ class FrameBatchMultiTaskAED(FrameBatchASR):
         device = self.asr_model.device
         for batch in iter(self.data_loader):
             feat_signal, feat_signal_len = batch
+            # keep track of chunk offsets
+            self.chunk_offsets.extend(feat_signal_len.tolist())
             feat_signal, feat_signal_len = feat_signal.to(device), feat_signal_len.to(device)
             tokens = self.input_tokens.to(device).repeat(feat_signal.size(0), 1)
             tokens_len = torch.tensor([tokens.size(1)] * tokens.size(0), device=device).long()
@@ -1666,12 +1806,103 @@ class FrameBatchMultiTaskAED(FrameBatchASR):
         """
         self.infer_logits(keep_logits)
 
-        hypothesis = " ".join(self.all_preds)
+        # join hypotheses
+        hypothesis = self._join_hypotheses(self.all_preds)
+
         if not keep_logits:
             return hypothesis
 
         print("keep_logits=True is not supported for MultiTaskAEDFrameBatchInfer. Returning empty logits.")
         return hypothesis, []
+
+    def _join_hypotheses(self, hypotheses):
+        if len(hypotheses) == 1:
+            return hypotheses[0]
+
+        # initialize a new hypothesis
+        merged_hypthesis = rnnt_utils.Hypothesis(
+            score=0.0,
+            y_sequence=torch.tensor([]),
+            timestamp={
+                'char': [],
+                'word': [],
+                'segment': [],
+            },
+        )
+
+        # join
+        merged_hypthesis = self._join_text(merged_hypthesis, hypotheses)
+        merged_hypthesis = self._join_y_sequence(merged_hypthesis, hypotheses)
+        merged_hypthesis = self._join_timestamp(merged_hypthesis, hypotheses)
+
+        return merged_hypthesis
+
+    def _join_text(self, merged_hypothesis, hypotheses):
+        merged_hypothesis.text = " ".join([h.text for h in hypotheses])
+        return merged_hypothesis
+
+    def _join_y_sequence(self, merged_hypothesis, hypotheses):
+        merged_hypothesis.y_sequence = torch.cat([h.y_sequence for h in hypotheses])
+        return merged_hypothesis
+
+    def _join_timestamp(self, merged_hypothesis, hypotheses):
+        # word level
+        cumulative_offset = 0
+        for i, h in enumerate(hypotheses):
+            cumulative_offset += self.chunk_offsets[i]  # self.chunk_offsets starts with 0,
+
+            # update frame numbers
+            updated_timestamps = [
+                {
+                    **word,
+                    'start_offset': word['start_offset']
+                    + cumulative_offset
+                    // self.subsampling_factor,  # dividing here to avoid error accumulation over long audios
+                    'end_offset': word['end_offset'] + cumulative_offset // self.subsampling_factor,
+                }
+                for word in h.timestamp['word']
+            ]
+
+            # update times
+            updated_timestamps = [
+                {
+                    **word,
+                    'start': word['start_offset'] * self.window_stride * self.subsampling_factor,
+                    'end': word['end_offset'] * self.window_stride * self.subsampling_factor,
+                }
+                for word in updated_timestamps
+            ]
+
+            merged_hypothesis.timestamp['word'].extend(updated_timestamps)
+
+        # segment level
+        cumulative_offset = 0
+        for i, h in enumerate(hypotheses):
+            cumulative_offset += self.chunk_offsets[i]
+
+            # update frame numbers
+            updated_timestamps = [
+                {
+                    **segment,
+                    'start_offset': segment['start_offset'] + cumulative_offset // self.subsampling_factor,
+                    'end_offset': segment['end_offset'] + cumulative_offset // self.subsampling_factor,
+                }
+                for segment in h.timestamp['segment']
+            ]
+
+            # update times
+            updated_timestamps = [
+                {
+                    **segment,
+                    'start': segment['start_offset'] * self.window_stride * self.subsampling_factor,
+                    'end': segment['end_offset'] * self.window_stride * self.subsampling_factor,
+                }
+                for segment in updated_timestamps
+            ]
+
+            merged_hypothesis.timestamp['segment'].extend(updated_timestamps)
+
+        return merged_hypothesis
 
 
 class FrameBatchChunkedRNNT(FrameBatchASR):

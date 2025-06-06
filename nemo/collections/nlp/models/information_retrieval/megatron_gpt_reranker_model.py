@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ import os
 
 import numpy as np
 import torch
+from lightning.pytorch.trainer.trainer import Trainer
 from omegaconf import DictConfig, ListConfig
-from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.nlp.data.information_retrieval.gpt_embedding_dataset import GPTRerankerDataset
 from nemo.collections.nlp.data.language_modeling.megatron.base_dataset_utils import (

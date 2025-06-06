@@ -1,10 +1,24 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import types
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import List, Optional
 
-import pytorch_lightning as L
-from pytorch_lightning.utilities.types import OptimizerLRScheduler
+import lightning.pytorch as L
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from torch.optim import Optimizer
 
 from nemo.lightning.io.mixin import IOMixin
@@ -150,9 +164,13 @@ class OptimizerModule(L.Callback, CallbackMethods, IOMixin, ABC):
         raise NotImplementedError("The optimizers method should be implemented by subclasses.")
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx) -> None:
+        # pylint: disable=C0116
         if self._optimizers is not None:
-            lr = self._optimizers[0].param_groups[0]['lr']
-            pl_module.log('lr', lr, rank_zero_only=True, batch_size=1, prog_bar=True)
+            if len(self._optimizers[0].param_groups) > 0:
+                lr = self._optimizers[0].param_groups[0]['lr']
+            else:
+                lr = 0.0
+            pl_module.log('lr', lr, batch_size=1, prog_bar=True)
 
     def __call__(self, model: L.LightningModule, megatron_parallel=None) -> OptimizerLRScheduler:
         """Calls the setup and optimizers methods.
@@ -170,7 +188,6 @@ class OptimizerModule(L.Callback, CallbackMethods, IOMixin, ABC):
             callbacks.append(self)
         if self.lr_scheduler is not None and self.lr_scheduler not in callbacks:
             callbacks.append(self.lr_scheduler)
-
         self._optimizers = self.optimizers(_model)
 
         _opt = self._optimizers[0] if len(self._optimizers) == 1 else self._optimizers

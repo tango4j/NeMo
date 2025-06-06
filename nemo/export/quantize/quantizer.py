@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import tarfile
 from contextlib import nullcontext
 from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
-from megatron.core import mpu, parallel_state
+from megatron.core import parallel_state
 from megatron.core.transformer.module import Float16Module
 from omegaconf.omegaconf import DictConfig, open_dict
 
@@ -31,7 +32,16 @@ from nemo.utils.model_utils import save_artifacts, unwrap_model
 try:
     import modelopt.torch.quantization as mtq
     from modelopt.torch.export import export_tensorrt_llm_checkpoint
-    from modelopt.torch.utils.distributed import set_data_parallel_group, set_tensor_parallel_group
+
+    QUANT_CFG_CHOICES = {
+        "int8": mtq.INT8_DEFAULT_CFG,
+        "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
+        "fp8": mtq.FP8_DEFAULT_CFG,
+        "int4_awq": mtq.INT4_AWQ_CFG,
+        "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
+        "int4": mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+        "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+    }
 
     HAVE_MODELOPT = True
 
@@ -41,14 +51,6 @@ except (ImportError, ModuleNotFoundError) as e:
 
 
 SUPPORTED_DTYPE = [16, "16", "bf16"]  # Default precision for non-quantized layers
-QUANT_CFG_CHOICES = {
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-    "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
-    "int4": mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
-}
 
 
 class Quantizer:
@@ -120,7 +122,7 @@ class Quantizer:
             enable_quant_kv_cache = quantization_config.get("enable_kv_cache", None)
             if enable_quant_kv_cache is None:
                 enable_quant_kv_cache = (
-                    "int8" not in quantization_config.algorithm and quantization_config.decoder_type != "gptnext"
+                    "int8" not in quantization_config.algorithm and quantization_config.decoder_type != "gpt"
                 )
             logging.info(f'{"Enabled" if enable_quant_kv_cache else "Disabled"} KV cache quantization')
             quant_cfg["quant_cfg"]["*output_quantizer"] = {
@@ -157,9 +159,6 @@ class Quantizer:
                 model.trainer.strategy.launcher.launch(dummy, trainer=model.trainer)
             model.trainer.strategy.setup_environment()
 
-        set_data_parallel_group(mpu.get_data_parallel_group())
-        set_tensor_parallel_group(mpu.get_tensor_model_parallel_group())
-
     @staticmethod
     def modify_model_config(model_cfg: DictConfig) -> DictConfig:
         """Modify model config for quantization."""
@@ -167,10 +166,6 @@ class Quantizer:
             if model_cfg.get("sequence_parallel", False):
                 logging.warning("Disabling sequence parallelism for quantization...")
                 model_cfg.sequence_parallel = False
-            # Only custom ModelOpt spec is supported for Quantization: this custom spec is largely based on local Megatron-LM
-            # layer definitions to avoid Transformer Engine implementations that are currently not supported.
-            # This layer spec also requires RoPE fusion to be disabled for tensor view operations in attention
-            # layer implementation from megatron/core/transformer/dot_product_attention.py to be functional.
             model_cfg.name = "modelopt"
             model_cfg.apply_rope_fusion = False
 
@@ -203,7 +198,7 @@ class Quantizer:
 
         model = mtq.quantize(model, self.quant_cfg, forward_loop)
 
-        if self.quantization_config.decoder_type == "gptnext":
+        if self.quantization_config.decoder_type == "gpt":
             # We found squared_relu may have an under-calibration problem.
             # Clamp the scaling_factor with a min threshold to avoid under-calibration.
             maxbound = 0
@@ -251,10 +246,12 @@ class Quantizer:
             )
             dist.barrier()  # Wait until all ranks complete export_model_config step
             logging.info(
-                f"Exporting quantized weights, model artifacts, and tokenizer config to {self.export_config.save_path}..."
+                "Exporting quantized weights, model artifacts,"
+                f" and tokenizer config to {self.export_config.save_path}..."
             )
             if dist.get_rank() == 0:
                 save_artifacts(model, export_dir)
                 if compress:
-                    with tarfile.open(self.export_config.save_path, "w:gz") as tar:
+                    os.makedirs(os.path.dirname(self.export_config.save_path), exist_ok=True)
+                    with tarfile.open(self.export_config.save_path, "w") as tar:
                         tar.add(export_dir, arcname="./")

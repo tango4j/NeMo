@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,4 +13,15 @@
 # limitations under the License.
 
 from nemo.collections.common.data.lhotse.cutset import read_cutset_from_config
-from nemo.collections.common.data.lhotse.dataloader import get_lhotse_dataloader_from_config
+from nemo.collections.common.data.lhotse.dataloader import (
+    LhotseDataLoadingConfig,
+    get_lhotse_dataloader_from_config,
+    get_lhotse_sampler_from_config,
+)
+from nemo.collections.common.data.lhotse.nemo_adapters import LazyNeMoIterator, LazyNeMoTarredIterator
+from nemo.collections.common.data.lhotse.text_adapters import (
+    NeMoMultimodalConversation,
+    NeMoSFTExample,
+    SourceTargetTextExample,
+    TextExample,
+)

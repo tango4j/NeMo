@@ -4,8 +4,8 @@ Checkpoints
 
 In this section, we present key functionalities of NVIDIA NeMo related to checkpoint management.
 
-Understanding Checkpoint Formats
---------------------------------
+Checkpoint Formats
+------------------
 
 A ``.nemo`` checkpoint is fundamentally a tar file that bundles the model configurations (specified inside a YAML file), model weights (inside a ``.ckpt`` file), and other artifacts like tokenizer models or vocabulary files. This consolidated design streamlines sharing, loading, tuning, evaluating, and inference.
 
@@ -25,7 +25,7 @@ For a detailed explanation check the :doc:`dist_ckpt` guide.
 Quantized Checkpoints
 ---------------------
 
-NeMo provides a :doc:`Post-Training Quantization <../nlp/quantization>` workflow that allows you to convert regular ``.nemo`` models into a `TensorRT-LLM checkpoint <https://nvidia.github.io/TensorRT-LLM/architecture/checkpoint.html>`_, commonly referred to as ``.qnemo`` checkpoints in NeMo. These ``.qnemo`` checkpoints can then be used with the `NVIDIA TensorRT-LLM library <https://nvidia.github.io/TensorRT-LLM/index.html>`_ for efficient inference.
+NeMo provides a :doc:`Post-Training Quantization <../nlp/quantization>` workflow that allows you to convert regular ``.nemo`` models into a `TensorRT-LLM checkpoint <https://nvidia.github.io/TensorRT-LLM/latest/architecture/checkpoint.html>`_, commonly referred to as ``.qnemo`` checkpoints in NeMo. These ``.qnemo`` checkpoints can then be used with the `NVIDIA TensorRT-LLM library <https://nvidia.github.io/TensorRT-LLM/index.html>`_ for efficient inference.
 
 A ``.qnemo`` checkpoint, similar to ``.nemo`` checkpoints, is a tar file that bundles the model configuration specified in the ``config.json`` file along with the ``rank{i}.safetensors`` files. These ``.safetensors`` files store the model weights for each rank individually. In addition, a ``tokenizer_config.yaml`` file is saved, containing only the tokenizer section from the original NeMo ``model_config.yaml`` file. This configuration file defines the tokenizer used by the given model.
 
@@ -43,7 +43,7 @@ The following example shows the contents of a quantized model intended to be ser
     └── tokenizer_config.yaml
 
 Community Checkpoint Converter
------------------------------
+------------------------------
 We provide easy-to-use tools that enable users to convert community checkpoints into the NeMo format. These tools facilitate various operations, including resuming training, Supervised Fine-Tuning (SFT), Parameter-Efficient Fine-Tuning (PEFT), and deployment. For detailed instructions and guidelines, please refer to our documentation.
 
 We offer comprehensive guides to assist both end users and developers:

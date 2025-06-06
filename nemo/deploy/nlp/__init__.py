@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +13,10 @@
 # limitations under the License.
 
 
-use_query_llm = True
-try:
-    from nemo.deploy.nlp.query_llm import NemoQueryLLM, NemoQueryLLMPyTorch
-except Exception:
-    use_query_llm = False
+from nemo.deploy.nlp.query_llm import NemoQueryLLM, NemoQueryLLMHF, NemoQueryLLMPyTorch
 
-use_megatron_llm = True
-try:
-    from nemo.deploy.nlp.megatronllm_deployable import MegatronLLMDeployable
-except Exception:
-    use_megatron_llm = False
+__all__ = [
+    "NemoQueryLLM",
+    "NemoQueryLLMHF",
+    "NemoQueryLLMPyTorch",
+]

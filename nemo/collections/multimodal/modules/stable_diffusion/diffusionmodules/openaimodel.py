@@ -40,15 +40,9 @@ from nemo.collections.multimodal.modules.stable_diffusion.diffusionmodules.util 
     zero_module,
 )
 from nemo.utils import logging
+from nemo.utils.import_utils import safe_import
 
-try:
-    # FP8 related import
-    import transformer_engine
-
-    HAVE_TE = True
-
-except (ImportError, ModuleNotFoundError):
-    HAVE_TE = False
+transformer_engine, HAVE_TE = safe_import("transformer_engine")
 
 try:
     from apex.contrib.group_norm import GroupNorm
@@ -204,6 +198,14 @@ class Upsample(nn.Module):
         if self.dims == 3:
             t_factor = 1 if not self.third_up else 2
             x = F.interpolate(x, (t_factor * x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest")
+        elif self.dims == 2:
+            x = (
+                x.permute(0, 2, 3, 1)
+                .view(x.shape[0], x.shape[2], 1, x.shape[3], 1, x.shape[1])
+                .expand(x.shape[0], x.shape[2], 2, x.shape[3], 2, x.shape[1])
+                .reshape(x.shape[0], x.shape[2] * 2, x.shape[3] * 2, x.shape[1])
+                .permute(0, 3, 1, 2)
+            )
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
         if dtype == torch.bfloat16:
@@ -609,6 +611,7 @@ class UNetModel(nn.Module):
         from_NeMo=False,
         # It must be specified when from pretrained is not None. It indicates loading unet from NeMo trained ckpt or HF
         use_flash_attention: bool = False,
+        use_te_dpa: bool = False,
         unet_precision: str = "fp32",
         lora_network_alpha=None,
         timesteps=1000,
@@ -782,6 +785,7 @@ class UNetModel(nn.Module):
                                 use_linear=use_linear_in_transformer,
                                 use_checkpoint=use_checkpoint,
                                 use_flash_attention=use_flash_attention,
+                                use_te_dpa=use_te_dpa,
                                 lora_network_alpha=lora_network_alpha,
                                 use_te=self.use_te_fp8,
                             )
@@ -851,6 +855,7 @@ class UNetModel(nn.Module):
                     use_linear=use_linear_in_transformer,
                     use_checkpoint=use_checkpoint,
                     use_flash_attention=use_flash_attention,
+                    use_te_dpa=use_te_dpa,
                     use_te=self.use_te_fp8,
                     lora_network_alpha=lora_network_alpha,
                 )
@@ -918,6 +923,7 @@ class UNetModel(nn.Module):
                                 use_linear=use_linear_in_transformer,
                                 use_checkpoint=use_checkpoint,
                                 use_flash_attention=use_flash_attention,
+                                use_te_dpa=use_te_dpa,
                                 lora_network_alpha=lora_network_alpha,
                                 use_te=self.use_te_fp8,
                             )
@@ -961,7 +967,7 @@ class UNetModel(nn.Module):
 
                 state_dict = load_safetensors(from_pretrained)
             else:
-                state_dict = torch.load(from_pretrained, map_location='cpu')
+                state_dict = torch.load(from_pretrained, map_location='cpu', weights_only=False)
             if 'state_dict' in state_dict.keys():
                 state_dict = state_dict['state_dict']
             missing_key, unexpected_keys, _, _ = self._load_pretrained_model(state_dict, from_NeMo=from_NeMo)
@@ -978,8 +984,8 @@ class UNetModel(nn.Module):
             self.convert_to_fp16()
         elif unet_precision == 'fp16':
             self.convert_to_fp16(enable_norm_layers=True)
-        elif self.use_te_fp8:
-            assert unet_precision != 'fp16', "fp8 training can't work with fp16 O2 amp recipe"
+        if self.use_te_fp8:
+            assert unet_precision == 'fp16', "fp8 training can't work with fp16 O2 amp recipe"
             convert_module_to_fp8(self)
 
             fp8_margin = int(os.getenv("FP8_MARGIN", '0'))
@@ -1002,6 +1008,7 @@ class UNetModel(nn.Module):
                 amax_history_len=fp8_amax_history_len,
                 amax_compute_algo=fp8_amax_compute_algo,
                 override_linear_precision=(False, False, not fp8_wgrad),
+                # fp8_dpa=use_te_dpa, # TODO; fp8 DPA kernel is not supported now.
             )
             old_state_dict = self.state_dict()
             new_state_dict = self.te_fp8_key_mapping(old_state_dict)

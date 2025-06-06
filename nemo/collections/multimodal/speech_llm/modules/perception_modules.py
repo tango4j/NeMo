@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -200,54 +200,56 @@ class MultiAudioPerceptionModule(NeuralModule, Exportable):
     """
     Audio perception module that consists of multiple audio encoders and shared modality adapter.
     This module is experimental. An example perception cfg is:
-    -------------------
-    perception:
-        modality_adapter:
-            _target_: nemo.collections.multimodal.speechllm.modules.PoolingMLPConnectors
-            hidden_dim: 512
-            pooling: 'cat'
-            pooling_factor: 2
-            num_layers: 4
-            input_dim: -1
-            output_dim: -1
 
-        spec_augment:
-            _target_: nemo.collections.asr.modules.SpectrogramAugmentation
-            freq_masks: 2 # set to zero to disable it
-            time_masks: 10 # set to zero to disable it
-            freq_width: 27
-            time_width: 0.05
+    .. code-block:: yaml
 
-        encoders:
-            asr_model:
-                _target_: nemo.collections.asr.models.ASRModel
-                output_key: d_model
-                freeze: True
-                pretrained_model: stt_en_fastconformer_transducer_large
-            ssl_model:
-                _target_: nemo.collections.asr.models.SpeechEncDecSelfSupervisedModel
-                output_key: d_model
-                freeze: True
-                pretrained_model: ssl_en_conformer_large
-                use_multi_layer_feat: True
-                multi_layer_feat:
-                layer_idx_list: [0,16]
+        perception:
+            modality_adapter:
+                _target_: nemo.collections.multimodal.speechllm.modules.PoolingMLPConnectors
+                hidden_dim: 512
+                pooling: 'cat'
+                pooling_factor: 2
+                num_layers: 4
+                input_dim: -1
+                output_dim: -1
+
+            spec_augment:
+                _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+                freq_masks: 2 # set to zero to disable it
+                time_masks: 10 # set to zero to disable it
+                freq_width: 27
+                time_width: 0.05
+
+            encoders:
+                asr_model:
+                    _target_: nemo.collections.asr.models.ASRModel
+                    output_key: d_model
+                    freeze: True
+                    pretrained_model: stt_en_fastconformer_transducer_large
+                ssl_model:
+                    _target_: nemo.collections.asr.models.SpeechEncDecSelfSupervisedModel
+                    output_key: d_model
+                    freeze: True
+                    pretrained_model: ssl_en_conformer_large
+                    use_multi_layer_feat: True
+                    multi_layer_feat:
+                    layer_idx_list: [0,16]
+                    aggregator:
+                        mode: "cat"
+                        pooling: "avg"
+                        rounding: "floor"
+
+                speaker_model:
+                    segment_length_in_secs: 0.4
+                    freeze: True
+                    pretrained_model: titanet_large
+
+                ref_model: asr_model
                 aggregator:
                     mode: "cat"
-                    pooling: "avg"
+                    pooling: "mean"
                     rounding: "floor"
 
-            speaker_model:
-                segment_length_in_secs: 0.4
-                freeze: True
-                pretrained_model: titanet_large
-
-            ref_model: asr_model
-            aggregator:
-                mode: "cat"
-                pooling: "mean"
-                rounding: "floor"
-    -------------------
     """
 
     def __init__(self, cfg: DictConfig):
@@ -441,9 +443,10 @@ def lens_to_mask(lens, max_length):
 class TransformerCrossAttention(NeuralModule, Exportable):
     """Transformer module for cross-attention between speech and text embeddings.
     The module allows optional projection from the input embeddings to a lower dimension before feeding them to the transformer.
+
     Args:
         cfg: DictConfig, configuration object for the module which should include:
-            xattn: DictConfig, configuration object for the transformer decoder
+        xattn: DictConfig, configuration object for the transformer decoder
     """
 
     def __init__(self, cfg: DictConfig, *args, **kwargs):
@@ -483,23 +486,26 @@ class TransformerCrossAttention(NeuralModule, Exportable):
         decoder_mems_list=None,
         return_mems=False,
     ):
-        assert input_embeds.shape[-1] == encoder_states.shape[-1]
-        enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
-        dec_mask = lens_to_mask(input_lengths, input_embeds.shape[1]).to(input_lengths.dtype)
-        y = self.xattn_decoder(
-            decoder_states=self.input_proj1(input_embeds),
-            decoder_mask=dec_mask,
-            encoder_states=self.input_proj2(encoder_states),
-            encoder_mask=enc_mask,
-            decoder_mems_list=decoder_mems_list,
-            return_mems=return_mems,
-            return_mems_as_list=False,
+        assert input_embeds.shape[-1] == encoder_states.shape[-1], (
+            f"Last dimension of the following shapes must be equal: " f"{input_embeds.shape=} {encoder_states.shape=}"
         )
-        if return_mems:
-            extra_outpus = {'decoder_mems_list': y}
-            y = y[-1][:, -input_embeds.shape[1] :]
-        else:
-            extra_outpus = {}
-        y = self.output_proj(y) + input_embeds
-        assert y.shape == input_embeds.shape
-        return y, extra_outpus
+        with torch.autocast(device_type="cuda"):  # megatron_amp_O2 friendly
+            enc_mask = lens_to_mask(encoded_len, encoder_states.shape[1]).to(encoder_states.dtype)
+            dec_mask = lens_to_mask(input_lengths, input_embeds.shape[1]).to(input_lengths.dtype)
+            y = self.xattn_decoder(
+                decoder_states=self.input_proj1(input_embeds),
+                decoder_mask=dec_mask,
+                encoder_states=self.input_proj2(encoder_states),
+                encoder_mask=enc_mask,
+                decoder_mems_list=decoder_mems_list,
+                return_mems=return_mems,
+                return_mems_as_list=False,
+            )
+            if return_mems:
+                extra_outpus = {'decoder_mems_list': y}
+                y = y[-1][:, -input_embeds.shape[1] :]
+            else:
+                extra_outpus = {}
+            y = self.output_proj(y) + input_embeds
+            assert y.shape == input_embeds.shape, f"{y.shape=} != {input_embeds.shape=}"
+            return y, extra_outpus

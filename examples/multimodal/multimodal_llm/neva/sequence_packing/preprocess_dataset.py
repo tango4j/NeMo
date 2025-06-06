@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -271,6 +271,7 @@ def main():
     logging.info(f"Output directory: {output_dir}")
 
     prefix_path = f"{output_dir}/packed_seq_dataset"
+    os.makedirs(prefix_path, exist_ok=True)
     # Original Datasets to Sequence Lengths Files
     builders = {}
     for item_dict in tqdm(train_dl, desc="Building indexed datasets"):

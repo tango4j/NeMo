@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,13 +22,12 @@ from pathlib import Path
 import torch
 
 from nemo.deploy.nlp.megatronllm_deployable import MegatronLLMDeployable
-from tests.infer_data_path import get_infer_test_data
 
 run_export_tests = True
 try:
     from nemo.deploy import DeployPyTriton
     from nemo.deploy.nlp import NemoQueryLLM, NemoQueryLLMPyTorch
-    from nemo.export import TensorRTLLM
+    from nemo.export.tensorrt_llm import TensorRTLLM
 except Exception as e:
     run_export_tests = False
 
@@ -136,7 +135,7 @@ def run_in_framework_inference(
     nm = DeployPyTriton(
         model=model,
         triton_model_name=model_name,
-        port=8000,
+        http_port=8000,
     )
     nm.deploy()
     nm.run()
@@ -164,6 +163,7 @@ def run_trt_llm_inference(
     use_embedding_sharing=False,
     max_input_len=128,
     max_output_len=128,
+    max_num_tokens=None,
     ptuning=False,
     p_tuning_checkpoint=None,
     lora=False,
@@ -179,8 +179,7 @@ def run_trt_llm_inference(
     stop_words_list=None,
     test_deployment=False,
     test_data_path=None,
-    backend="TensorRT-LLM",
-    save_trt_engine=False,
+    save_engine=False,
 ):
     if Path(checkpoint_path).exists():
         if n_gpu > torch.cuda.device_count():
@@ -240,7 +239,6 @@ def run_trt_llm_inference(
         trt_llm_exporter.export(
             nemo_checkpoint_path=checkpoint_path,
             model_type=model_type,
-            n_gpus=n_gpu,
             tensor_parallelism_size=tp_size,
             pipeline_parallelism_size=pp_size,
             max_input_len=max_input_len,
@@ -249,7 +247,7 @@ def run_trt_llm_inference(
             max_prompt_embedding_table_size=max_prompt_embedding_table_size,
             use_lora_plugin=use_lora_plugin,
             lora_target_modules=lora_target_modules,
-            max_num_tokens=int(max_input_len * max_batch_size * 0.2),
+            max_num_tokens=max_num_tokens,
             opt_num_tokens=60,
             use_embedding_sharing=use_embedding_sharing,
         )
@@ -287,7 +285,7 @@ def run_trt_llm_inference(
             nm = DeployPyTriton(
                 model=trt_llm_exporter,
                 triton_model_name=model_name,
-                port=8000,
+                http_port=8000,
             )
             nm.deploy()
             nm.run()
@@ -318,14 +316,14 @@ def run_trt_llm_inference(
             if test_deployment:
                 nm.stop()
 
-            if not save_trt_engine:
+            if not save_engine:
                 shutil.rmtree(trt_llm_model_dir)
             return result
 
         if test_deployment:
             nm.stop()
 
-        if not save_trt_engine:
+        if not save_engine:
             shutil.rmtree(trt_llm_model_dir)
 
         return None, None, None, None, None
@@ -354,110 +352,15 @@ def test_cpp_runtime(
         print("")
 
 
-def run_existing_checkpoints(
-    model_name,
-    n_gpus,
-    tp_size=None,
-    pp_size=None,
-    ptuning=False,
-    lora=False,
-    streaming=False,
-    run_accuracy=False,
-    test_deployment=False,
-    stop_words_list=None,
-    test_data_path=None,
-    backend="tensorrt-llm",
-    save_trt_engine=False,
-):
-    if n_gpus > torch.cuda.device_count():
-        print("Skipping the test due to not enough number of GPUs")
-        return None, None, None, None, None
-
-    test_data = get_infer_test_data()
-    if not (model_name in test_data.keys()):
-        raise Exception("Model {0} is not supported.".format(model_name))
-
-    model_info = test_data[model_name]
-
-    if n_gpus < model_info["min_gpus"]:
-        print("Min n_gpus for this model is {0}".format(n_gpus))
-        return None, None, None, None, None
-
-    p_tuning_checkpoint = None
-    if ptuning:
-        if "p_tuning_checkpoint" in model_info.keys():
-            p_tuning_checkpoint = model_info["p_tuning_checkpoint"]
-        else:
-            raise Exception("There is not ptuning checkpoint path defined.")
-
-    lora_checkpoint = None
-    if lora:
-        if "lora_checkpoint" in model_info.keys():
-            lora_checkpoint = model_info["lora_checkpoint"]
-        else:
-            raise Exception("There is not lora checkpoint path defined.")
-
-    if model_info["model_type"] == "gemma":
-        print("*********************")
-        use_embedding_sharing = True
-    else:
-        use_embedding_sharing = False
-
-    if backend == "in-framework":
-        return run_in_framework_inference(
-            model_name=model_name,
-            prompt=model_info["prompt_template"],
-            checkpoint_path=model_info["checkpoint"],
-            max_batch_size=model_info["max_batch_size"],
-            max_input_len=None,
-            max_output_len=model_info["max_output_len"],
-        )
-    else:
-        return run_trt_llm_inference(
-            model_name=model_name,
-            model_type=model_info["model_type"],
-            prompt=model_info["prompt_template"],
-            checkpoint_path=model_info["checkpoint"],
-            trt_llm_model_dir=model_info["trt_llm_model_dir"],
-            n_gpu=n_gpus,
-            max_batch_size=model_info["max_batch_size"],
-            use_embedding_sharing=use_embedding_sharing,
-            max_input_len=512,
-            max_output_len=model_info["max_output_len"],
-            ptuning=ptuning,
-            p_tuning_checkpoint=p_tuning_checkpoint,
-            lora=lora,
-            lora_checkpoint=lora_checkpoint,
-            tp_size=tp_size,
-            pp_size=pp_size,
-            top_k=1,
-            top_p=0.0,
-            temperature=1.0,
-            run_accuracy=run_accuracy,
-            debug=True,
-            streaming=streaming,
-            stop_words_list=stop_words_list,
-            test_deployment=test_deployment,
-            test_data_path=test_data_path,
-            save_trt_engine=save_trt_engine,
-        )
-
-
 def get_args():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=f"Deploy nemo models to Triton and benchmark the models",
     )
-
     parser.add_argument(
         "--model_name",
         type=str,
         required=True,
-    )
-    parser.add_argument(
-        "--existing_test_models",
-        default=False,
-        action='store_true',
     )
     parser.add_argument(
         "--model_type",
@@ -468,7 +371,6 @@ def get_args():
         "--min_gpus",
         type=int,
         default=1,
-        required=True,
     )
     parser.add_argument(
         "--max_gpus",
@@ -500,6 +402,10 @@ def get_args():
         default=128,
     )
     parser.add_argument(
+        "--max_num_tokens",
+        type=int,
+    )
+    parser.add_argument(
         "--p_tuning_checkpoint",
         type=str,
     )
@@ -520,10 +426,12 @@ def get_args():
     parser.add_argument(
         "--tp_size",
         type=int,
+        default=1,
     )
     parser.add_argument(
         "--pp_size",
         type=int,
+        default=1,
     )
     parser.add_argument(
         "--top_k",
@@ -576,7 +484,7 @@ def get_args():
         help="Different options to deploy nemo model.",
     )
     parser.add_argument(
-        "--save_trt_engine",
+        "--save_engine",
         type=str,
         default="False",
     )
@@ -590,10 +498,10 @@ def run_inference_tests(args):
     else:
         args.test_deployment = False
 
-    if args.save_trt_engine == "True":
-        args.save_trt_engine = True
+    if args.save_engine == "True":
+        args.save_engine = True
     else:
-        args.save_trt_engine = False
+        args.save_engine = False
 
     if args.run_accuracy == "True":
         args.run_accuracy = True
@@ -606,74 +514,52 @@ def run_inference_tests(args):
 
     result_dic = {}
 
-    if args.existing_test_models:
-        n_gpus = args.min_gpus
-        if args.max_gpus is None:
-            args.max_gpus = args.min_gpus
+    prompt_template = ["The capital of France is", "Largest animal in the sea is"]
+    n_gpus = args.min_gpus
+    if args.max_gpus is None:
+        args.max_gpus = args.min_gpus
 
-        while n_gpus <= args.max_gpus:
-            result_dic[n_gpus] = run_existing_checkpoints(
+    while n_gpus <= args.max_gpus:
+        if args.backend.lower() == "tensorrt-llm":
+            result_dic[n_gpus] = run_trt_llm_inference(
                 model_name=args.model_name,
-                n_gpus=n_gpus,
+                model_type=args.model_type,
+                prompt=prompt_template,
+                checkpoint_path=args.checkpoint_dir,
+                trt_llm_model_dir=args.trt_llm_model_dir,
+                n_gpu=n_gpus,
+                max_batch_size=args.max_batch_size,
+                max_input_len=args.max_input_len,
+                max_output_len=args.max_output_len,
+                max_num_tokens=args.max_num_tokens,
                 ptuning=args.ptuning,
+                p_tuning_checkpoint=args.p_tuning_checkpoint,
                 lora=args.lora,
+                lora_checkpoint=args.lora_checkpoint,
                 tp_size=args.tp_size,
                 pp_size=args.pp_size,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                temperature=args.temperature,
+                run_accuracy=args.run_accuracy,
+                debug=args.debug,
                 streaming=args.streaming,
                 test_deployment=args.test_deployment,
-                run_accuracy=args.run_accuracy,
                 test_data_path=args.test_data_path,
-                backend=args.backend.lower(),
-                save_trt_engine=args.save_trt_engine,
+                save_engine=args.save_engine,
+            )
+        else:
+            result_dic[n_gpus] = run_in_framework_inference(
+                model_name=args.model_name,
+                prompt=prompt_template,
+                checkpoint_path=args.checkpoint_dir,
+                n_gpu=n_gpus,
+                max_batch_size=args.max_batch_size,
+                max_input_len=args.max_input_len,
+                max_output_len=args.max_output_len,
             )
 
-            n_gpus = n_gpus * 2
-    else:
-        prompt_template = ["The capital of France is", "Largest animal in the sea is"]
-        n_gpus = args.min_gpus
-        if args.max_gpus is None:
-            args.max_gpus = args.min_gpus
-
-        while n_gpus <= args.max_gpus:
-            if args.backend.lower() == "tensorrt-llm":
-                result_dic[n_gpus] = run_trt_llm_inference(
-                    model_name=args.model_name,
-                    model_type=args.model_type,
-                    prompt=prompt_template,
-                    checkpoint_path=args.checkpoint_dir,
-                    trt_llm_model_dir=args.trt_llm_model_dir,
-                    n_gpu=n_gpus,
-                    max_batch_size=args.max_batch_size,
-                    max_input_len=args.max_input_len,
-                    max_output_len=args.max_output_len,
-                    ptuning=args.ptuning,
-                    p_tuning_checkpoint=args.p_tuning_checkpoint,
-                    lora=args.lora,
-                    lora_checkpoint=args.lora_checkpoint,
-                    tp_size=args.tp_size,
-                    pp_size=args.pp_size,
-                    top_k=args.top_k,
-                    top_p=args.top_p,
-                    temperature=args.temperature,
-                    run_accuracy=args.run_accuracy,
-                    debug=args.debug,
-                    streaming=args.streaming,
-                    test_deployment=args.test_deployment,
-                    test_data_path=args.test_data_path,
-                    save_trt_engine=args.save_trt_engine,
-                )
-            else:
-                result_dic[n_gpus] = run_in_framework_inference(
-                    model_name=args.model_name,
-                    prompt=prompt_template,
-                    checkpoint_path=args.checkpoint_dir,
-                    n_gpu=n_gpus,
-                    max_batch_size=args.max_batch_size,
-                    max_input_len=args.max_input_len,
-                    max_output_len=args.max_output_len,
-                )
-
-            n_gpus = n_gpus * 2
+        n_gpus = n_gpus * 2
 
     test_result = "PASS"
     print_separator = False

@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# flake8: noqa
+# pylint: skip-file
 
 import itertools
 import json
@@ -23,10 +26,10 @@ from functools import partial
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
+from lightning.pytorch.accelerators import CPUAccelerator
+from lightning.pytorch.trainer.trainer import Trainer
 from omegaconf import OmegaConf, open_dict
 from omegaconf.dictconfig import DictConfig
-from pytorch_lightning.accelerators import CPUAccelerator
-from pytorch_lightning.trainer.trainer import Trainer
 
 from nemo.collections.nlp.data.language_modeling.megatron.data_samplers import (
     MegatronPretrainingRandomSampler,
@@ -66,6 +69,7 @@ from nemo.core.classes import Exportable
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.neural_types import ChannelType, NeuralType
 from nemo.utils import logging
+from nemo.utils.import_utils import safe_import, safe_import_from
 
 try:
     from megatron.core import InferenceParams, parallel_state
@@ -75,6 +79,7 @@ try:
     from megatron.core.models.retro.utils import get_config_path as get_retro_config_path
     from megatron.core.models.retro.utils import get_gpt_data_dir as get_retro_data_dir
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+    from megatron.core.transformer.enums import AttnBackend
     from megatron.core.transformer.module import Float16Module as MCoreFloat16Module
     from megatron.core.transformer.transformer_config import TransformerConfig
     from megatron.core.utils import init_method_normal, scaled_init_method_normal
@@ -98,14 +103,9 @@ except (ImportError, ModuleNotFoundError):
     logging.warning("Megatron num_microbatches_calculator not found, using Apex version.")
     from apex.transformer.pipeline_parallel.utils import get_num_microbatches
 
-try:
-    import transformer_engine
-    from transformer_engine.pytorch import module as te_module
-
-    HAVE_TE = True
-
-except (ImportError, ModuleNotFoundError):
-    HAVE_TE = False
+transformer_engine, HAVE_TE = safe_import("transformer_engine")
+te_module, HAVE_TE_MODULE = safe_import_from("transformer_engine.pytorch", "module")
+HAVE_TE = HAVE_TE and HAVE_TE_MODULE
 
 
 class MegatronRetroModel(MegatronGPTModel):
@@ -431,10 +431,12 @@ class MegatronRetroModel(MegatronGPTModel):
         # Validate Transformer Engine version.
         from importlib.metadata import version
 
-        from pkg_resources import packaging
+        import packaging
 
         te_version = packaging.version.Version(version("transformer-engine"))
         if te_version >= packaging.version.Version("1.3"):
+            if HAVE_MEGATRON_CORE:
+                retro_config.attention_backend = AttnBackend.unfused
             try:
                 os.environ["NVTE_FLASH_ATTN"] = "0"
                 os.environ["NVTE_FUSED_ATTN"] = "0"

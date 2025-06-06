@@ -43,5 +43,10 @@ from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel
 from nemo.collections.asr.models.rnnt_spk_bpe_models import EncDecRNNTSpkBPEModel
 from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel
 from nemo.collections.asr.models.slu_models import SLUIntentSlotBPEModel
-from nemo.collections.asr.models.ssl_models import SpeechEncDecSelfSupervisedModel
+from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel
+from nemo.collections.asr.models.ssl_models import (
+    EncDecDenoiseMaskedTokenPredModel,
+    EncDecMaskedTokenPredModel,
+    SpeechEncDecSelfSupervisedModel,
+)
 from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE
