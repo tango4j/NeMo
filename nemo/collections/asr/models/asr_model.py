@@ -172,8 +172,6 @@ class ASRModel(ModelPT, ABC):
                 logging.warning(f'detected inf or nan values in gradients! Setting gradients to zero.')
                 self.zero_grad()
 
-<<<<<<< HEAD
-=======
     def on_train_epoch_start(self) -> None:
         """
         Decoder with CUDA graphs does not release memory, thus we disable it for training epoch.
@@ -240,7 +238,6 @@ class ASRModel(ModelPT, ABC):
             ],
         }
 
->>>>>>> origin/main
 
 class ExportableEncDecModel(Exportable):
     """
