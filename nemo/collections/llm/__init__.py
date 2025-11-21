@@ -98,7 +98,6 @@ from nemo.collections.llm.gpt.model import (  # noqa: F401
     GPTOSSConfig20B,
     GPTOSSConfig120B,
     GPTOSSModel,
-    HFAutoModelForCausalLM,
     Hyena1bConfig,
     Hyena7bARCLongContextConfig,
     Hyena7bConfig,
@@ -141,6 +140,7 @@ from nemo.collections.llm.gpt.model import (  # noqa: F401
     MistralConfig7B,
     MistralModel,
     MistralNeMoConfig12B,
+    MistralSmall3Config24B,
     MixtralConfig,
     MixtralConfig8x3B,
     MixtralConfig8x7B,
@@ -251,6 +251,7 @@ __all__ = [
     "MaskedTokenLossReduction",
     "MistralConfig7B",
     "MistralNeMoConfig12B",
+    "MistralSmall3Config24B",
     "MistralModel",
     "MixtralConfig",
     "MixtralConfig8x3B",
@@ -393,7 +394,6 @@ __all__ = [
     "dolly",
     "peft",
     "hf_dataset",
-    "HFAutoModelForCausalLM",
     "HFMockDataModule",
 ]
 
