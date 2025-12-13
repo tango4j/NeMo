@@ -1162,7 +1162,7 @@ class SpeakerTaggedASR:
             diar_pred_out_stream = new_chunk_preds
 
         # Apply max number of speakers
-        diar_pred_out_stream[:, :, self._max_num_of_spks:] = 0.0
+        diar_pred_out_stream[:, :, self._max_num_of_spks :] = 0.0
 
         for idx, (uniq_id, _) in enumerate(self.test_manifest_dict.items()):
             if not (len(previous_hypotheses[idx].text) == 0 and step_num <= self._initial_steps):
@@ -1246,8 +1246,8 @@ class SpeakerTaggedASR:
             new_streaming_state = self.instance_manager.diar_states.streaming_state
 
         # Apply max number of speakers
-        new_diar_pred_out_stream[:, :, self._max_num_of_spks:] = 0.0
-        
+        new_diar_pred_out_stream[:, :, self._max_num_of_spks :] = 0.0
+
         # Step 3: update diar states
         self.instance_manager.update_diar_state(
             diar_pred_out_stream=new_diar_pred_out_stream,

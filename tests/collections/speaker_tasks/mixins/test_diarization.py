@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pytest
+import soundfile as sf
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
-import soundfile as sf
+
 from nemo.collections.asr.parts.mixins.diarization import DiarizeConfig, SpkDiarizationMixin
 
 
@@ -47,6 +48,7 @@ class DummyModel(torch.nn.Module):
         out = self.encoder(x)
         return out
 
+
 class AudioPathDataset(Dataset):
     def __init__(self, audio_filepaths: List[str]):
         self._audio_filepaths = audio_filepaths
@@ -62,11 +64,13 @@ class AudioPathDataset(Dataset):
         length = torch.tensor(waveform.shape[0], dtype=torch.long)
         return waveform, length
 
+
 def collate(batch):
     waveforms, lengths = zip(*batch)
     padded = pad_sequence(waveforms, batch_first=True)  # (B, T)
     lengths_tensor = torch.stack(lengths, dim=0)
     return padded, lengths_tensor
+
 
 @pytest.fixture()
 def audio_files(test_data_dir):
@@ -100,8 +104,6 @@ class DiarizableDummy(DummyModel, SpkDiarizationMixin):
                     filepaths.append(json.loads(line)["audio_filepath"])
         else:
             filepaths = list(config["paths2audio_files"])
-
-
 
         return DataLoader(
             dataset=AudioPathDataset(filepaths),
@@ -156,6 +158,7 @@ def dummy_model():
 
 class TestSpkDiarizationMixin:
     pytestmark = pytest.mark.with_downloads()
+
     @pytest.mark.unit
     def test_constructor_non_instance(self):
         model = DummyModel()
@@ -227,7 +230,6 @@ class TestSpkDiarizationMixin:
             ValueError, match=r"Sample rate is not set\. Numpy audio inputs require sample_rate to be set\."
         ):
             _ = dummy_model.diarize(audio_files, batch_size=1)
-
 
     @pytest.mark.unit
     def test_transribe_override_config_incorrect(self, dummy_model, audio_files):
