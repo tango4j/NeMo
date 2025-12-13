@@ -1112,6 +1112,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
     def diarize(
         self,
         audio: Union[str, List[str], np.ndarray, DataLoader],
+        sample_rate: Optional[int] = None,
         batch_size: int = 1,
         include_tensor_outputs: bool = False,
         postprocessing_yaml: Optional[str] = None,

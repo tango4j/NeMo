@@ -58,6 +58,8 @@ class LhotseAudioToSpeechE2ESpkDiarDataset(torch.utils.data.Dataset):
         self.num_mel_frame_per_target_frame = int(self.cfg.get('subsampling_factor', 8))
 
     def __getitem__(self, cuts) -> Tuple[torch.Tensor, ...]:
+        # NOTE: This end-to-end diarization dataloader only loads the 1st ch of the audio file.
+        cuts = cuts.map(lambda c: c.with_channels(channels=[0]))
         audio, audio_lens, cuts = self.load_audio(cuts)
         speaker_activities = []
         for cut in cuts:
