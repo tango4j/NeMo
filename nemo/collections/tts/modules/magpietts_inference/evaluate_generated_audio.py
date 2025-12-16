@@ -16,24 +16,36 @@ Used in infer_and_evaluate.py to obtain metrics such as ASR_WER and UTMOSV2 scor
 """
 import argparse
 import json
-import logging
 import os
 import pprint
 import string
 import tempfile
 import time
-from contextlib import contextmanager
 from functools import partial
+from pathlib import Path
 
 import librosa
 import numpy as np
-import scripts.magpietts.evalset_config as evalset_config
 import soundfile as sf
 import torch
 from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector, WhisperForConditionalGeneration, WhisperProcessor
 
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
+from nemo.utils import logging
+
+# Path to evalset config JSON
+EVALSET_CONFIG_PATH = Path(__file__).parent / 'evalset_config.json'
+
+
+def load_evalset_config(config_path: str = None) -> dict:
+    """Load dataset meta info from JSON config file."""
+    if config_path is None:
+        config_path = EVALSET_CONFIG_PATH
+    with open(config_path, 'r') as f:
+        return json.load(f)
+
+
 from nemo.collections.tts.modules.utmosv2 import UTMOSv2Calculator
 
 
@@ -126,29 +138,10 @@ def pad_audio_to_min_length(audio_np: np.ndarray, sampling_rate: int, min_second
     min_samples = round(min_seconds * sampling_rate)
 
     if n_samples < min_samples:
-        print(f"Padding audio from {n_samples/sampling_rate} seconds to {min_samples/sampling_rate} seconds")
+        logging.info(f"Padding audio from {n_samples/sampling_rate} seconds to {min_samples/sampling_rate} seconds")
         padding_needed = min_samples - n_samples
         audio_np = np.pad(audio_np, (0, padding_needed), mode='constant', constant_values=0)
     return audio_np
-
-
-@contextmanager
-def nemo_log_level(level):
-    """
-    A context manager that temporarily sets the logging level for the NeMo logger
-    and restores the original level when the context manager is exited.
-
-    Args:
-        level (int): The logging level to set.
-    """
-    logger = logging.getLogger("nemo_logger")
-    original_level = logger.level
-    logger.setLevel(level)
-    try:
-        yield
-    finally:
-        # restore the original level when the context manager is exited (even if an exception was raised)
-        logger.setLevel(original_level)
 
 
 def extract_embedding(model, extractor, audio_path, device, sv_model_type):
@@ -170,14 +163,14 @@ def extract_embedding(model, extractor, audio_path, device, sv_model_type):
 
 
 def compute_utmosv2_scores(audio_dir, device):
-    print(f"\nComputing UTMOSv2 scores for files in {audio_dir}...")
+    logging.info(f"\nComputing UTMOSv2 scores for files in {audio_dir}...")
     start_time = time.time()
     utmosv2_calculator = UTMOSv2Calculator(device=device)
     utmosv2_scores = utmosv2_calculator.process_directory(audio_dir)
     # convert to to a dictionary indexed by file path
     utmosv2_scores_dict = {os.path.normpath(item['file_path']): item['predicted_mos'] for item in utmosv2_scores}
     end_time = time.time()
-    print(f"UTMOSv2 scores computed for {len(utmosv2_scores)} files in {end_time - start_time:.2f} seconds\n")
+    logging.info(f"UTMOSv2 scores computed for {len(utmosv2_scores)} files in {end_time - start_time:.2f} seconds\n")
     return utmosv2_scores_dict
 
 
@@ -221,12 +214,11 @@ def evaluate(
         )
         speaker_verification_model = speaker_verification_model.to(device)
         speaker_verification_model.eval()
-    with nemo_log_level(logging.ERROR):
-        # The model `titanet_small` prints thousands of lines during initialization, so suppress logs temporarily
-        print("Loading `titanet_small` model...")
-        speaker_verification_model_alternate = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
-            model_name='titanet_small'
-        )
+    # The model `titanet_small` prints thousands of lines during initialization, so suppress logs temporarily
+    logging.info("Loading `titanet_small` model...")
+    speaker_verification_model_alternate = nemo_asr.models.EncDecSpeakerLabelModel.from_pretrained(
+        model_name='titanet_small'
+    )
     speaker_verification_model_alternate = speaker_verification_model_alternate.to(device)
     speaker_verification_model_alternate.eval()
 
@@ -269,7 +261,7 @@ def evaluate(
                 )
                 gt_audio_text = process_text(gt_audio_text)
         except Exception as e:
-            print("Error during ASR: {}".format(e))
+            logging.info("Error during ASR: {}".format(e))
             pred_text = ""
             gt_audio_text = ""
 
@@ -283,10 +275,10 @@ def evaluate(
         detailed_cer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=True)
         detailed_wer = word_error_rate_detail(hypotheses=[pred_text], references=[gt_text], use_cer=False)
 
-        print("{} GT Text:".format(ridx), gt_text)
-        print("{} Pr Text:".format(ridx), pred_text)
+        logging.info(f"{ridx} GT Text: {gt_text}")
+        logging.info(f"{ridx} Pr Text: {pred_text}")
         # Format cer and wer to 2 decimal places
-        print("CER:", "{:.4f} | WER: {:.4f}".format(detailed_cer[0], detailed_wer[0]))
+        logging.info("CER:", "{:.4f} | WER: {:.4f}".format(detailed_cer[0], detailed_wer[0]))
 
         pred_texts.append(pred_text)
         gt_texts.append(gt_text)
@@ -431,8 +423,8 @@ def main():
     args = parser.parse_args()
 
     if args.evalset is not None:
-        dataset_meta_info = evalset_config.dataset_meta_info
-        assert args.evalset in dataset_meta_info
+        dataset_meta_info = load_evalset_config()
+        assert args.evalset in dataset_meta_info, f"Dataset '{args.evalset}' not found in evalset_config.json"
         args.manifest_path = dataset_meta_info[args.evalset]['manifest_path']
         args.audio_dir = dataset_meta_info[args.evalset]['audio_dir']
 
