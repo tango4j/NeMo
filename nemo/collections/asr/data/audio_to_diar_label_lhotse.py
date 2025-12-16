@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nemo.utils import logging
 from typing import Dict, Optional, Tuple
 
 import torch.utils.data
@@ -24,6 +23,7 @@ from nemo.collections.asr.parts.utils.asr_multispeaker_utils import (
     speaker_to_target,
 )
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, NeuralType
+from nemo.utils import logging
 
 
 class LhotseAudioToSpeechE2ESpkDiarDataset(torch.utils.data.Dataset):
