@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
+from nemo.utils import logging
 from typing import Dict, Optional, Tuple
 
 import torch.utils.data
@@ -59,7 +59,17 @@ class LhotseAudioToSpeechE2ESpkDiarDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, cuts) -> Tuple[torch.Tensor, ...]:
         # NOTE: This end-to-end diarization dataloader only loads the 1st ch of the audio file.
-        cuts = cuts.map(lambda c: c.with_channels(channels=[0]))
+        mono_cuts = []
+        for cut in cuts:
+            if cut.num_channels is not None and cut.num_channels > 1:
+                logging.warning(
+                    "Multiple channels detected in cut '%s' (%d channels). "
+                    "Only the first channel will be used; remaining channels are ignored.",
+                    cut.id,
+                    cut.num_channels,
+                )
+            mono_cuts.append(cut.with_channels(channels=[0]))
+        cuts = type(cuts).from_cuts(mono_cuts)
         audio, audio_lens, cuts = self.load_audio(cuts)
         speaker_activities = []
         for cut in cuts:

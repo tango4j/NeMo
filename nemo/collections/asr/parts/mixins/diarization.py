@@ -461,6 +461,7 @@ class SpkDiarizationMixin(ABC):
                         diarcfg, 'session_len_sec', diarcfg.session_len_sec
                     ),
                     'num_workers': get_value_from_diarization_config(diarcfg, 'num_workers', 1),
+                    'use_lhotse': True,
                 }
             else:
                 # Make `audio_files` a list of audio file paths
@@ -576,6 +577,7 @@ class SpkDiarizationMixin(ABC):
             'temp_dir': temp_dir,
             'session_len_sec': get_value_from_diarization_config(diarcfg, 'session_len_sec', diarcfg.session_len_sec),
             'num_workers': get_value_from_diarization_config(diarcfg, 'num_workers', 1),
+            'use_lhotse': True,
         }
 
         return ds_config
