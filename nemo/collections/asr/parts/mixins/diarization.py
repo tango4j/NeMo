@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import librosa
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -31,6 +31,7 @@ from nemo.collections.common.data.utils import move_data_to_device
 from nemo.utils import logging
 
 GenericDiarizationType = Union[List[Any], List[List[Any]], Tuple[Any], Tuple[List[Any]]]
+
 
 def resample_audio(samples: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     """
@@ -52,6 +53,7 @@ def resample_audio(samples: np.ndarray, orig_sr: int, target_sr: int) -> np.ndar
     resampled_samples = librosa.core.resample(resampled_samples, orig_sr=orig_sr, target_sr=target_sr)
     return resampled_samples.astype(np.float32, copy=False)
 
+
 class NumpyAudioDataset(Dataset):
     def __init__(self, waveforms: List[torch.Tensor], lengths: List[int]):
         self._waveforms = waveforms
@@ -62,6 +64,7 @@ class NumpyAudioDataset(Dataset):
 
     def __getitem__(self, idx: int):
         return self._waveforms[idx], self._lengths[idx]
+
 
 @dataclass
 class InternalDiarizeConfig:
@@ -87,6 +90,7 @@ class InternalDiarizeConfig:
 @dataclass
 class DiarizeConfig:
     """Configuration parameters for diarization inference."""
+
     session_len_sec: float = -1  # End-to-end diarization session length limit in seconds
     batch_size: int = 1
     num_workers: int = 1
@@ -131,6 +135,7 @@ class SpkDiarizationMixin(ABC):
     Creates a template function `diarize()` that provides an interface to perform transcription of audio tensors or
     filepaths.
     """
+
     def __init__(self):
         self._diarize_audio_rttm_map = {}
 
@@ -158,9 +163,7 @@ class SpkDiarizationMixin(ABC):
                 audio_samples = audio_samples.T
             mono_samples = audio_samples.mean(axis=1)
         else:
-            raise ValueError(
-                f"Unsupported numpy audio shape {audio_samples.shape}. Expected 1D or 2D audio."
-            )
+            raise ValueError(f"Unsupported numpy audio shape {audio_samples.shape}. Expected 1D or 2D audio.")
 
         mono_samples = resample_audio(mono_samples, orig_sr=sample_rate, target_sr=target_sample_rate)
 
@@ -282,9 +285,9 @@ class SpkDiarizationMixin(ABC):
         return results
 
     def diarize_generator(
-        self, 
-        audio: Union[str, List[str], np.ndarray, List[np.ndarray], DataLoader], 
-        override_config: Optional[DiarizeConfig]
+        self,
+        audio: Union[str, List[str], np.ndarray, List[np.ndarray], DataLoader],
+        override_config: Optional[DiarizeConfig],
     ):
         """
         A generator version of `diarize` function.
@@ -475,7 +478,7 @@ class SpkDiarizationMixin(ABC):
 
         # Numpy waveform input(s)
         elif isinstance(audio[0], np.ndarray):
-            
+
             sample_rate = get_value_from_diarization_config(diarcfg, 'sample_rate', None)
             if sample_rate is None:
                 raise ValueError("Sample rate is not set. Numpy audio inputs require sample_rate to be set.")
@@ -542,10 +545,7 @@ class SpkDiarizationMixin(ABC):
             )
 
     def _diarize_input_manifest_processing(
-        self, 
-        audio_files: List[Union[str, Dict[str, Any]]], 
-        temp_dir: str, 
-        diarcfg: DiarizeConfig
+        self, audio_files: List[Union[str, Dict[str, Any]]], temp_dir: str, diarcfg: DiarizeConfig
     ) -> Dict[str, Any]:
         """
         Internal function to process the input audio filepaths and return a config dict for the dataloader.
