@@ -272,6 +272,9 @@ class NeMoTurnTakingService(FrameProcessor):
             result={"text": completed_text},
         )
         logger.debug(f"Pushing text frame: {text_frame}")
+        # if self._audio_logger and is_final:
+        #     self._audio_logger.save_user_audio()
+        #     logger.debug(f"[TurnTakingService-HandleCompletedText] is_final: {is_final}, frame_type: {frame_type}, Saved user audio for text: {completed_text}")
         await self.push_frame(text_frame, direction)
 
     async def _handle_user_started_speaking(self, frame: VADUserStartedSpeakingFrame, direction: FrameDirection):
@@ -316,8 +319,8 @@ class NeMoTurnTakingService(FrameProcessor):
                 self._have_sent_user_started_speaking = False
         elif is_backchannel:
             logger.debug(f"Backchannel detected: `{self._user_speaking_buffer}`")
-            if self._audio_logger:
-                self._audio_logger.save_user_audio()
+            # if self._audio_logger:
+            #     self._audio_logger.save_user_audio()
             # push the backchannel string upstream, not downstream
             await self.push_frame(
                 TranscriptionFrame(
@@ -340,8 +343,8 @@ class NeMoTurnTakingService(FrameProcessor):
             await self.push_frame(StartInterruptionFrame(), direction=FrameDirection.DOWNSTREAM)
         elif isinstance(frame, UserStoppedSpeakingFrame):
             logger.debug("User stopped speaking")
-            if self._audio_logger:
-                self._audio_logger.save_user_audio()
+            # if self._audio_logger:
+            #     self._audio_logger.save_user_audio()
             await self.push_frame(frame)
         else:
             logger.debug(f"Unknown frame type for _handle_user_interruption: {type(frame)}")

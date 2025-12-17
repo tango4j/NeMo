@@ -96,9 +96,6 @@ class NemoSTTService(STTService):
         self._load_model()
 
         self.audio_buffer = []
-        # Buffers for accumulating audio and transcriptions for a complete turn (for logging)
-        self._turn_audio_buffer = []
-        self._turn_transcription_buffer = []
 
     def _load_model(self):
         if self._backend == "legacy":
@@ -168,12 +165,19 @@ class NemoSTTService(STTService):
                 self.audio_buffer = []
 
                 transcription, is_final = self._model.transcribe(audio)
-                if self._record_audio_data and self._audio_logger and self._is_vad_active:
-                    self._turn_audio_buffer.append(audio)
-                    # Accumulate transcriptions for turn-based logging
-                    if transcription:
-                        self._turn_transcription_buffer.append(transcription)
-                        self._stage_turn_audio_and_transcription()
+                if self._audio_logger and self._record_audio_data:
+                    if self._is_vad_active:
+                        is_first_frame = False
+                        if len(self._audio_logger.turn_audio_buffer) == 0:
+                            is_first_frame = True
+                            self._audio_logger.turn_audio_buffer.extend(self._audio_logger.lead_in_user_audio_frame_queue)
+                        self._audio_logger.turn_audio_buffer.append(audio)
+                        # Accumulate transcriptions for turn-based logging
+                        if transcription:
+                            self._audio_logger.turn_transcription_buffer.append(transcription)
+                            self._stage_turn_audio_and_transcription(is_first_frame=is_first_frame)
+                    else:
+                        self._audio_logger.add_lead_in_user_audio_frame_queue(audio)
 
                 await self.stop_ttfb_metrics()
                 await self.stop_processing_metrics()
@@ -218,25 +222,25 @@ class NemoSTTService(STTService):
             )
             yield None
 
-    def _stage_turn_audio_and_transcription(self):
+    def _stage_turn_audio_and_transcription(self, is_first_frame: bool):
         """
         Stage the complete turn audio and accumulated transcriptions.
 
         This method is called when a final transcription is received.
         It joins all accumulated audio and transcription chunks and logs them together.
         """
-        if not self._turn_audio_buffer or not self._turn_transcription_buffer:
+        if not self._audio_logger.turn_audio_buffer or not self._audio_logger.turn_transcription_buffer:
             logger.debug("No audio or transcription to log")
             return
 
         try:
             # Join all accumulated audio and transcriptions for this turn
-            complete_turn_audio = b"".join(self._turn_audio_buffer)
-            complete_transcription = "".join(self._turn_transcription_buffer)
+            complete_turn_audio = b"".join(self._audio_logger.turn_audio_buffer)
+            complete_transcription = "".join(self._audio_logger.turn_transcription_buffer)
 
             logger.debug(
-                f"Staging a turn with: {len(self._turn_audio_buffer)} audio chunks, "
-                f"{len(self._turn_transcription_buffer)} transcription chunks"
+                f"Staging a turn with: {len(self._audio_logger.turn_audio_buffer)} audio chunks, "
+                f"{len(self._audio_logger.turn_transcription_buffer)} transcription chunks"
             )
 
             self._audio_logger.stage_user_audio(
@@ -244,13 +248,14 @@ class NemoSTTService(STTService):
                 transcription=complete_transcription,
                 sample_rate=self._sample_rate,
                 num_channels=1,
+                is_first_frame=is_first_frame,
                 is_final=True,
                 additional_metadata={
                     "model": self._model_name,
                     "backend": self._backend,
                     "audio_duration_sec": len(complete_turn_audio) / (self._sample_rate * 2),
-                    "num_transcription_chunks": len(self._turn_transcription_buffer),
-                    "num_audio_chunks": len(self._turn_audio_buffer),
+                    "num_transcription_chunks": len(self._audio_logger.turn_transcription_buffer),
+                    "num_audio_chunks": len(self._audio_logger.turn_audio_buffer),
                 },
             )
 
@@ -300,11 +305,7 @@ class NemoSTTService(STTService):
                 # manualy reset the state of the model when end of utterance is detected by VAD
                 logger.debug("Resetting state of the model due to VADUserStoppedSpeakingFrame")
                 self._model.reset_state()
-                # Clear turn buffers if logging wasn't completed (e.g., no final transcription)
-                if len(self._turn_audio_buffer) > 0 or len(self._turn_transcription_buffer) > 0:
-                    logger.debug("Clearing turn audio and transcription buffers due to VAD user stopped speaking")
-                    self._turn_audio_buffer = []
-                    self._turn_transcription_buffer = []
+  
             elif isinstance(frame, VADUserStartedSpeakingFrame):
                 self._is_vad_active = True
 

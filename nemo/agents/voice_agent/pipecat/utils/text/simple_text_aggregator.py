@@ -175,9 +175,9 @@ class SimpleSegmentedTextAggregator(SimpleTextAggregator):
             result = self._text[:eos_end_index]
             if len(result.strip()) < self._min_sentence_length:
                 result = None
-                logger.debug(f"Text is too short, skipping: `{result}`, full text: `{self._text}`")
+                # logger.debug(f"Text is too short, skipping: `{result}`, full text: `{self._text}`")
             else:
-                logger.debug(f"Text Aggregator Result: `{result}`, full text: `{self._text}`")
+                # logger.debug(f"Text Aggregator Result: `{result}`, full text: `{self._text}`")
                 self._text = self._text[eos_end_index:]
 
         return result

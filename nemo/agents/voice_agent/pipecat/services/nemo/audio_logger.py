@@ -21,8 +21,65 @@ from typing import Optional, Union
 
 import numpy as np
 from loguru import logger
+from pipecat.frames.frames import Frame
+from pipecat.observers.base_observer import BaseObserver, FramePushed
+from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIBotTTSTextMessage, RTVIBotLLMStartedMessage, RTVIBotLLMStoppedMessage, RTVIBotTTSStartedMessage, RTVIBotTTSStoppedMessage, RTVITextMessageData, RTVIBotTranscriptionMessage, RTVIServerMessage, RTVIServerResponseFrame, RTVIServerMessageFrame
 
+from pipecat.processors.aggregators.openai_llm_context import (
+    OpenAILLMContext,
+    OpenAILLMContextFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.services.llm_service import (
+    FunctionCallParams,  # TODO(aleix): we shouldn't import `services` from `processors`
+)
+from pipecat.transports.base_input import BaseInputTransport
+from pipecat.transports.base_output import BaseOutputTransport
+from pipecat.transports.base_transport import BaseTransport
+from pipecat.utils.string import match_endofsentence
 
+from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    Frame,
+    InterimTranscriptionFrame,
+    StartInterruptionFrame,
+    TranscriptionFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
+)
+
+from pipecat.frames.frames import (
+    BotInterruptionFrame,
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    CancelFrame,
+    DataFrame,
+    EndFrame,
+    EndTaskFrame,
+    ErrorFrame,
+    Frame,
+    FunctionCallResultFrame,
+    InputAudioRawFrame,
+    InterimTranscriptionFrame,
+    LLMContextFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMMessagesAppendFrame,
+    LLMTextFrame,
+    MetricsFrame,
+    StartFrame,
+    SystemFrame,
+    TranscriptionFrame,
+    TransportMessageUrgentFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+    TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+)
 class AudioLogger:
     """
     Utility class for logging audio data and transcriptions during voice agent interactions.
@@ -56,18 +113,19 @@ class AudioLogger:
         log_dir: Union[str, Path] = "./audio_logs",
         session_id: Optional[str] = None,
         enabled: bool = True,
+        user_lead_in_frame_count: int = 2,
     ):
         self.enabled = enabled
         if not self.enabled:
-            logger.info("AudioLogger is disabled")
+            logger.info("[AudioLogger] AudioLogger is disabled")
             return
 
         self.log_dir = Path(log_dir)
 
         # Generate session ID if not provided
+        self.session_start_time = datetime.now()
         if session_id is None:
-            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
+            session_id = f"session_{self.session_start_time.strftime('%Y%m%d_%H%M%S')}"
         self.session_id = session_id
         self.session_dir = self.log_dir / session_id
 
@@ -79,21 +137,39 @@ class AudioLogger:
         self.agent_dir.mkdir(parents=True, exist_ok=True)
 
         # Counters for file naming (thread-safe)
+        self.user_lead_in_frame_count = user_lead_in_frame_count
         self._user_counter = 0
         self._agent_counter = 0
         self._lock = threading.Lock()
         self._staged_metadata = None
         self._staged_audio_data = None
 
+        self.turn_audio_buffer = []
+        self.turn_transcription_buffer = []
+        self.lead_in_user_audio_frame_queue = []
+
         # Session metadata
         self.session_metadata = {
             "session_id": session_id,
-            "start_time": datetime.now().isoformat(),
+            "start_time": self.session_start_time,
             "user_entries": [],
             "agent_entries": [],
         }
 
-        logger.info(f"AudioLogger initialized: {self.session_dir}")
+        logger.info(f"[AudioLogger] AudioLogger initialized: {self.session_dir}")
+
+    def add_lead_in_user_audio_frame_queue(self, audio_frame):
+        # Add an audio frame to the lead in user audio frame queue
+        self.lead_in_user_audio_frame_queue.append(audio_frame)
+        if len(self.lead_in_user_audio_frame_queue) >= self.user_lead_in_frame_count:
+            # pop the first frame from the queue
+            self.lead_in_user_audio_frame_queue.pop(0)
+
+    def get_time_from_start_of_session(self) -> float:
+        """Get the time from the start of the session to the given datetime string."""
+        # get the time difference in seconds.
+        time_diff = datetime.now() - self.session_start_time
+        return time_diff.total_seconds()
 
     def _get_next_counter(self, speaker: str) -> int:
         """Get the next counter value for a speaker in a thread-safe manner."""
@@ -141,9 +217,9 @@ class AudioLogger:
                 wav_file.setframerate(sample_rate)
                 wav_file.writeframes(audio_bytes)
 
-            logger.debug(f"Saved audio to {file_path}")
+            logger.debug(f"[AudioLogger] Saved audio to {file_path}")
         except Exception as e:
-            logger.error(f"Error saving audio to {file_path}: {e}")
+            logger.error(f"[AudioLogger] Error saving audio to {file_path}: {e}")
             raise
 
     def _save_metadata_json(self, metadata: dict, file_path: Path):
@@ -151,10 +227,20 @@ class AudioLogger:
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
-            logger.debug(f"Saved metadata to {file_path}")
+            logger.debug(f"[AudioLogger] Saved metadata to {file_path}")
         except Exception as e:
-            logger.error(f"Error saving metadata to {file_path}: {e}")
+            logger.error(f"[AudioLogger] Error saving metadata to {file_path}: {e}")
             raise
+
+    def clear_user_audio_buffer(self):
+        """ 
+        Clear the user audio buffer if the user stopped speaking detected by VAD.
+        """
+        # Clear turn buffers if logging wasn't completed (e.g., no final transcription)
+        if len(self.turn_audio_buffer) > 0 or len(self.turn_transcription_buffer) > 0:
+            logger.debug("[AudioLogger] Clearing turn audio and transcription buffers due to VAD user stopped speaking")
+            self.turn_audio_buffer = []
+            self.turn_transcription_buffer = []
 
     def stage_user_audio(
         self,
@@ -162,6 +248,7 @@ class AudioLogger:
         transcription: str,
         sample_rate: int = 16000,
         num_channels: int = 1,
+        is_first_frame: bool = False,
         is_final: bool = True,
         additional_metadata: Optional[dict] = None,
     ) -> Optional[dict]:
@@ -186,8 +273,8 @@ class AudioLogger:
         try:
             # Get counter and generate filenames
             counter = self._get_next_counter("user")
-            timestamp = datetime.now().strftime('%H%M%S')
-            base_name = f"{counter:05d}_{timestamp}"
+            timestamp_now = datetime.now()
+            base_name = f"{counter:05d}_{timestamp_now.strftime('%H%M%S')}"
 
             audio_file = self.user_dir / f"{base_name}.wav"
             metadata_file = self.user_dir / f"{base_name}.json"
@@ -196,22 +283,35 @@ class AudioLogger:
             # self._save_audio_wav(audio_data, audio_file, sample_rate, num_channels)
             self._staged_audio_data = audio_data
 
+            if is_first_frame:
+                _start_time = self.get_time_from_start_of_session(timestamp_now)
+            else:
+                if self._staged_metadata:
+                    _start_time = self._staged_metadata["start_time"]
+                else:
+                    raise ValueError("No staged metadata found: self._staged_metadata is None")
+                
+            if isinstance(audio_data, bytes):
+                audio_duration_sec = len(audio_data) / (sample_rate * num_channels * 2)
+            else:
+                audio_duration_sec = len(audio_data) / sample_rate
+
+            _end_time = _start_time + audio_duration_sec
+
             # Prepare metadata
             self._staged_metadata = {
                 "base_name": base_name,
                 "counter": counter,
                 "speaker": "user",
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": timestamp_now.strftime('%H%M%S'),
+                "start_time": _start_time,
+                "end_time": _end_time,
                 "transcription": transcription,
                 "is_final": is_final,
                 "audio_file": audio_file.name,
                 "sample_rate": sample_rate,
                 "num_channels": num_channels,
-                "audio_duration_sec": (
-                    len(audio_data) / (sample_rate * num_channels * 2)
-                    if isinstance(audio_data, bytes)
-                    else len(audio_data) / sample_rate
-                ),
+                "audio_duration_sec": audio_duration_sec,
             }
 
             if additional_metadata:
@@ -234,21 +334,40 @@ class AudioLogger:
 
     def save_user_audio(self):
         """Save the user audio to the disk."""
-        audio_file = self.user_dir / f"{self._staged_metadata['base_name']}.wav"
-        metadata_file = self.user_dir / f"{self._staged_metadata['base_name']}.json"
+        # Safety check: ensure staged metadata and audio data exist
+        if self._staged_metadata is None:
+            logger.warning("[AudioLogger] Attempted to save user audio but no staged metadata found")
+            return
+        
+        if self._staged_audio_data is None:
+            logger.warning("[AudioLogger] Attempted to save user audio but no staged audio data found")
+            return
+        
+        try:
+            audio_file = self.user_dir / f"{self._staged_metadata['base_name']}.wav"
+            metadata_file = self.user_dir / f"{self._staged_metadata['base_name']}.json"
 
-        self._save_audio_wav(
-            audio_data=self._staged_audio_data, file_path=audio_file, sample_rate=self._staged_metadata["sample_rate"]
-        )
+            self._save_audio_wav(
+                audio_data=self._staged_audio_data, file_path=audio_file, sample_rate=self._staged_metadata["sample_rate"]
+            )
 
-        self._save_metadata_json(metadata=self._staged_metadata, file_path=metadata_file)
-        logger.info(
-            f"Saved user audio #{self._staged_metadata['counter']}: '{self._staged_metadata['transcription'][:50]}{'...' if len(self._staged_metadata['transcription']) > 50 else ''}'"
-        )
-        # Update session metadata
-        with self._lock:
-            self.session_metadata["user_entries"].append(self._staged_metadata)
-            self._save_session_metadata()
+            self._save_metadata_json(metadata=self._staged_metadata, file_path=metadata_file)
+            logger.info(
+                f"[AudioLogger] Saved user audio #{self._staged_metadata['counter']}: '{self._staged_metadata['transcription'][:50]}{'...' if len(self._staged_metadata['transcription']) > 50 else ''}'"
+            )
+            # Update session metadata
+            with self._lock:
+                self.session_metadata["user_entries"].append(self._staged_metadata)
+                self._save_session_metadata()
+
+            self.clear_user_audio_buffer()
+            
+            # Clear staged data after successful save
+            self._staged_metadata = None
+            self._staged_audio_data = None
+        except Exception as e:
+            logger.error(f"[AudioLogger] Error saving user audio: {e}")
+            raise
 
     def log_agent_audio(
         self,
@@ -313,7 +432,7 @@ class AudioLogger:
                 self.session_metadata["agent_entries"].append(metadata)
                 self._save_session_metadata()
 
-            logger.info(f"Logged agent audio #{counter}: '{text[:50]}{'...' if len(text) > 50 else ''}'")
+            logger.info(f"[AudioLogger] Logged agent audio #{counter}: '{text[:50]}{'...' if len(text) > 50 else ''}'")
 
             return {
                 "audio_file": str(audio_file),
@@ -322,7 +441,7 @@ class AudioLogger:
             }
 
         except Exception as e:
-            logger.error(f"Error logging agent audio: {e}")
+            logger.error(f"[AudioLogger] Error logging agent audio: {e}")
             return None
 
     def _save_session_metadata(self):
@@ -335,7 +454,7 @@ class AudioLogger:
             self.session_metadata["last_updated"] = datetime.now().isoformat()
             self._save_metadata_json(self.session_metadata, metadata_file)
         except Exception as e:
-            logger.error(f"Error saving session metadata: {e}")
+            logger.error(f"[AudioLogger] Error saving session metadata: {e}")
 
     def finalize_session(self):
         """Finalize the session and save final metadata."""
@@ -346,7 +465,7 @@ class AudioLogger:
         self.session_metadata["total_user_entries"] = self._user_counter
         self.session_metadata["total_agent_entries"] = self._agent_counter
         self._save_session_metadata()
-        logger.info(f"Session finalized: {self.session_id} (User: {self._user_counter}, Agent: {self._agent_counter})")
+        logger.info(f"[AudioLogger] Session finalized: {self.session_id} (User: {self._user_counter}, Agent: {self._agent_counter})")
 
     def get_session_info(self) -> dict:
         """Get current session information."""
@@ -357,3 +476,15 @@ class AudioLogger:
             "agent_entries": self._agent_counter,
             "enabled": self.enabled,
         }
+
+class RTVIAudioLoggerObserver(BaseObserver):
+    def __init__(self, audio_logger: AudioLogger):
+        super().__init__()
+        self._audio_logger = audio_logger
+
+    async def on_push_frame(self, data: FramePushed):
+        frame = data.frame
+        if isinstance(frame, TranscriptionFrame):
+            self._audio_logger.save_user_audio()
+        # Call parent class's on_push_frame method
+        await super().on_push_frame(data) 

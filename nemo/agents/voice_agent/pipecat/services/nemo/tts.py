@@ -498,12 +498,8 @@ class KokoroTTSService(BaseNemoTTSService):
             # We only need the audio component
             for i, (gs, ps, audio) in enumerate(generator):
                 logger.debug(
-<<<<<<< HEAD
-                    f"Kokoro generated audio chunk {i}: gs={gs}, ps={ps}, audio_shape={audio.shape if hasattr(audio, 'shape') else len(audio)}"
-=======
                     f"Kokoro generated audio chunk {i}: gs={gs}, ps={ps},"
                     f"audio_shape={audio.shape if hasattr(audio, 'shape') else len(audio)}"
->>>>>>> origin/heh/va_fix_misc
                 )
                 if isinstance(audio, torch.Tensor):
                     audio = audio.detach().cpu().numpy()
