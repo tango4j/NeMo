@@ -29,11 +29,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frameworks.rtvi import RTVIAction, RTVIConfig, RTVIProcessor
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
-<<<<<<< HEAD
 from nemo.agents.voice_agent.pipecat.services.nemo.audio_logger import AudioLogger, RTVIAudioLoggerObserver
-=======
-
->>>>>>> origin/main
 from nemo.agents.voice_agent.pipecat.processors.frameworks.rtvi import RTVIObserver
 from nemo.agents.voice_agent.pipecat.services.nemo.diar import NemoDiarService
 from nemo.agents.voice_agent.pipecat.services.nemo.llm import get_llm_service_from_config
@@ -309,11 +305,7 @@ async def run_bot_websocket_server(host: str = "0.0.0.0", port: int = 8765):
 
     pipeline = Pipeline(pipeline)
 
-<<<<<<< HEAD
-    rtvi_text_aggregator = SimpleSegmentedTextAggregator("\n?!.", min_sentence_length=5)
-=======
     rtvi_text_aggregator = SimpleSegmentedTextAggregator(punctuation_marks=".!?\n")
->>>>>>> origin/main
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -324,12 +316,8 @@ async def run_bot_websocket_server(host: str = "0.0.0.0", port: int = 8765):
             report_only_initial_ttfb=True,
             idle_timeout=None,  # Disable idle timeout
         ),
-<<<<<<< HEAD
         observers=[RTVIObserver(rtvi, text_aggregator=rtvi_text_aggregator), RTVIAudioLoggerObserver(audio_logger=audio_logger)],
         # observers=[RTVIObserver(rtvi, text_aggregator=rtvi_text_aggregator)],
-=======
-        observers=[RTVIObserver(rtvi, text_aggregator=rtvi_text_aggregator)],
->>>>>>> origin/main
         idle_timeout_secs=None,
         cancel_on_idle_timeout=False,
     )
