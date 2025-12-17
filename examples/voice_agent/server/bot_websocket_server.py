@@ -20,9 +20,8 @@ import signal
 import sys
 
 from loguru import logger
-from omegaconf import OmegaConf
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import EndTaskFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -30,7 +29,11 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frameworks.rtvi import RTVIAction, RTVIConfig, RTVIProcessor
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
+<<<<<<< HEAD
 from nemo.agents.voice_agent.pipecat.services.nemo.audio_logger import AudioLogger, RTVIAudioLoggerObserver
+=======
+
+>>>>>>> origin/main
 from nemo.agents.voice_agent.pipecat.processors.frameworks.rtvi import RTVIObserver
 from nemo.agents.voice_agent.pipecat.services.nemo.diar import NemoDiarService
 from nemo.agents.voice_agent.pipecat.services.nemo.llm import get_llm_service_from_config
@@ -114,7 +117,10 @@ def signal_handler(signum, frame):
     shutdown_event.set()
 
 
-async def run_bot_websocket_server():
+async def run_bot_websocket_server(host: str = "0.0.0.0", port: int = 8765):
+    logger.info(f"Starting websocket server on {host}:{port}")
+    logger.info(f"Server configured to run indefinitely with no timeouts, use Ctrl+C to quit.")
+
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -164,8 +170,8 @@ async def run_bot_websocket_server():
             is None,  # if backchannel phrases are disabled, we can use VAD to interrupt the bot immediately
             audio_out_10ms_chunks=TRANSPORT_AUDIO_OUT_10MS_CHUNKS,
         ),
-        host="0.0.0.0",  # Bind to all interfaces
-        port=8765,
+        host=host,
+        port=port,
     )
 
     logger.info("Initializing STT service...")
@@ -303,7 +309,11 @@ async def run_bot_websocket_server():
 
     pipeline = Pipeline(pipeline)
 
+<<<<<<< HEAD
     rtvi_text_aggregator = SimpleSegmentedTextAggregator("\n?!.", min_sentence_length=5)
+=======
+    rtvi_text_aggregator = SimpleSegmentedTextAggregator(punctuation_marks=".!?\n")
+>>>>>>> origin/main
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -314,8 +324,12 @@ async def run_bot_websocket_server():
             report_only_initial_ttfb=True,
             idle_timeout=None,  # Disable idle timeout
         ),
+<<<<<<< HEAD
         observers=[RTVIObserver(rtvi, text_aggregator=rtvi_text_aggregator), RTVIAudioLoggerObserver(audio_logger=audio_logger)],
         # observers=[RTVIObserver(rtvi, text_aggregator=rtvi_text_aggregator)],
+=======
+        observers=[RTVIObserver(rtvi, text_aggregator=rtvi_text_aggregator)],
+>>>>>>> origin/main
         idle_timeout_secs=None,
         cancel_on_idle_timeout=False,
     )
