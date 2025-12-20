@@ -68,6 +68,8 @@ from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 from nemo.utils.trainer_utils import resolve_trainer_cfg
 
+import torch
+torch.set_float32_matmul_precision('medium')
 
 @hydra_runner(config_path="experimental/contextnet_rnnt", config_name="config_rnnt_bpe")
 def main(cfg):
