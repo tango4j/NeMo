@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import uuid
 import inspect
 from collections.abc import AsyncGenerator
 from typing import Iterator, List, Optional
@@ -249,9 +250,12 @@ class BaseNemoTTSService(TTSService):
         try:
             await self.start_ttfb_metrics()
             yield TTSStartedFrame()
+            
+            # Increment turn index at the start of agent speaking (only if speaker changed)
+            if self._audio_logger and self._record_audio_data:
+                self._audio_logger.increment_turn_index(speaker="agent")
 
             # Generate unique request ID
-            import uuid
 
             request_id = str(uuid.uuid4())
 
@@ -282,6 +286,8 @@ class BaseNemoTTSService(TTSService):
 
                 # Collect all audio for logging
                 all_audio_bytes = b""
+                # Capture the start time when TTS begins (not when it ends)
+                tts_start_time = None
 
                 # Process the audio result (same as before)
                 if (
@@ -295,6 +301,9 @@ class BaseNemoTTSService(TTSService):
                         if first_chunk:
                             await self.stop_ttfb_metrics()
                             first_chunk = False
+                            # Capture start time on first chunk
+                            if self._audio_logger and self._record_audio_data:
+                                tts_start_time = self._audio_logger.get_time_from_start_of_session()
 
                         if audio_chunk is None:
                             break
@@ -314,6 +323,9 @@ class BaseNemoTTSService(TTSService):
                 else:
                     # Handle single result case
                     await self.stop_ttfb_metrics()
+                    # Capture start time for single result
+                    if self._audio_logger and self._record_audio_data:
+                        tts_start_time = self._audio_logger.get_time_from_start_of_session()
                     audio_bytes = self._convert_to_bytes(audio_result)
                     all_audio_bytes = audio_bytes
 
@@ -337,6 +349,7 @@ class BaseNemoTTSService(TTSService):
                             additional_metadata={
                                 "model": self._model_name,
                             },
+                            tts_generation_time=tts_start_time,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to log agent audio: {e}")

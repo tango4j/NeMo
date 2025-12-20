@@ -141,6 +141,10 @@ class NeMoTurnTakingService(FrameProcessor):
         elif isinstance(frame, BotStartedSpeakingFrame):
             logger.debug("BotStartedSpeakingFrame received")
             self._bot_speaking = True
+            # Capture the actual start time when audio starts playing
+            # This is more accurate than capturing during TTS generation
+            if self._audio_logger:
+                self._audio_logger.set_agent_turn_start_time()
         elif isinstance(frame, BotStoppedSpeakingFrame):
             logger.debug("BotStoppedSpeakingFrame received")
             self._bot_stop_time = time.time()
@@ -341,6 +345,12 @@ class NeMoTurnTakingService(FrameProcessor):
             logger.debug("User started speaking")
             await self.push_frame(frame)
             await self.push_frame(StartInterruptionFrame(), direction=FrameDirection.DOWNSTREAM)
+            # Record cutoff time for agent audio when TTS is interrupted
+            if self._audio_logger and self._bot_speaking:
+                self._audio_logger.set_agent_cutoff_time()
+            # Increment turn index when user starts speaking (only if speaker changed)
+            if self._audio_logger:
+                self._audio_logger.increment_turn_index(speaker="user")
         elif isinstance(frame, UserStoppedSpeakingFrame):
             logger.debug("User stopped speaking")
             # if self._audio_logger:

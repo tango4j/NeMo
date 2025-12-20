@@ -35,7 +35,6 @@ from pipecat.utils.tracing.service_decorators import traced_stt
 from pydantic import BaseModel
 
 from nemo.agents.voice_agent.pipecat.services.nemo.audio_logger import AudioLogger
-from nemo.agents.voice_agent.pipecat.services.nemo.legacy_asr import NemoLegacyASRService
 from nemo.agents.voice_agent.pipecat.services.nemo.streaming_asr import NemoStreamingASRService
 from nemo.agents.voice_agent.pipecat.services.nemo.streaming_diar import NeMoStreamingDiarService
 
@@ -78,7 +77,6 @@ class NemoSTTService(STTService):
         **kwargs,
     ):
         super().__init__(**kwargs)
-
         self._queue = asyncio.Queue()
         self._sample_rate = sample_rate
         params.buffer_size = params.frame_len_in_secs // params.raw_audio_frame_len_in_secs
@@ -168,23 +166,21 @@ class NemoSTTService(STTService):
                 audio = b"".join(self.audio_buffer)
                 self.audio_buffer = []
 
+                # Append to global user audio buffer (records entire conversation)
+                if self._audio_logger and self._record_audio_data:
+                    self._audio_logger.append_global_user_audio(audio)
+
                 asr_result = self._model.transcribe(audio)
                 transcription = asr_result.text
                 is_final = asr_result.is_final
                 if self._audio_logger and self._record_audio_data:
                     if self._is_vad_active:
                         is_first_frame = False
-                        if len(self._audio_logger.turn_audio_buffer) == 0:
-                            is_first_frame = True
-                            self._audio_logger.turn_audio_buffer.extend(self._audio_logger.lead_in_user_audio_frame_queue)
                         self._audio_logger.turn_audio_buffer.append(audio)
                         # Accumulate transcriptions for turn-based logging
                         if transcription:
                             self._audio_logger.turn_transcription_buffer.append(transcription)
                             self._stage_turn_audio_and_transcription(is_first_frame=is_first_frame)
-                    else:
-                        self._audio_logger.add_lead_in_user_audio_frame_queue(audio)
-
                 eou_latency = asr_result.eou_latency
                 eob_latency = asr_result.eob_latency
                 eou_prob = asr_result.eou_prob
@@ -322,15 +318,14 @@ class NemoSTTService(STTService):
         self._load_model()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        if isinstance(self._model, NemoLegacyASRService):
-            if isinstance(frame, VADUserStoppedSpeakingFrame):
-                self._is_vad_active = False
-                # manualy reset the state of the model when end of utterance is detected by VAD
-                logger.debug("Resetting state of the model due to VADUserStoppedSpeakingFrame")
-                self._model.reset_state()
-  
-            elif isinstance(frame, VADUserStartedSpeakingFrame):
-                self._is_vad_active = True
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._is_vad_active = False
+            # manualy reset the state of the model when end of utterance is detected by VAD
+            logger.debug("Resetting state of the model due to VADUserStoppedSpeakingFrame")
+            self._model.reset_state()
+
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._is_vad_active = True
 
         if isinstance(frame, VADUserStoppedSpeakingFrame) and isinstance(self._model, NeMoStreamingDiarService):
             # manualy reset the state of the model when end of utterance is detected by VAD

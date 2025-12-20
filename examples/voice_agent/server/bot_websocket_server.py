@@ -147,6 +147,9 @@ async def run_bot_websocket_server(host: str = "0.0.0.0", port: int = 8765):
     else:
         logger.info("Audio logging is disabled")
 
+    if audio_logger is None:
+        raise ValueError("Audio logger is not initialized")
+
     vad_analyzer = SileroVADAnalyzer(
         sample_rate=SAMPLE_RATE,
         params=vad_params,
