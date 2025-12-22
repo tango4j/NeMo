@@ -119,9 +119,9 @@ model:
   encoder:
     _target_: nemo.collections.asr.modules.TransformerEncoder
     n_mels: ${model.preprocessor.features}
-    d_model: 1024
+    d_model: 1280
     n_heads: 16
-    n_layers: 8
+    n_layers: 32
     drop_rate: 0.1
     qkv_bias: False
     causal_mask: False

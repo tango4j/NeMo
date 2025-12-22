@@ -22,6 +22,9 @@ from torchmetrics.text.rouge import ROUGEScore
 from nemo.collections.asr.metrics.wer import word_error_rate_detail
 from nemo.utils import logging
 from nemo.utils.nemo_logging import LogMode
+import sys
+sys.path.append("/disk1/NVIDIA/repos/open_asr_leaderboard/")
+from normalizer import data_utils
 
 TEXT_METRICS_MAPPING = {
     'bleu': SacreBLEUScore,
@@ -208,6 +211,9 @@ def cal_write_wer(
             if ignore_capitalization:
                 ref = ref.lower()
                 hyp = hyp.lower()
+
+            hyp = data_utils.normalizer(hyp)
+            ref = data_utils.normalizer(ref)
 
             wer, tokens, ins_rate, del_rate, sub_rate = word_error_rate_detail(
                 hypotheses=[hyp], references=[ref], use_cer=use_cer

@@ -4,7 +4,7 @@ from torch.nn import Conv1d
 from dataclasses import dataclass
 from torch.nn import GELU as TorchGELU
 from torch.nn.functional import scaled_dot_product_attention
-
+# from flash_attn import flash_attn_func
 @dataclass
 class GPTConfig():
     vocab_size: int = 50257
@@ -63,7 +63,39 @@ class LayerNorm(nn.Module):
             output = self.scale * norm + self.shift
 
         return output
+class MultiHeadAttentionWithFA(nn.Module):
+    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
+        super().__init__()
+        self.d_out = dim_out
+        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.num_heads = num_heads
+        self.head_dim = dim_out // num_heads
+        self.dropout = dropout
+        self.causal_mask = causal_mask
+        self.out_proj = nn.Linear(self.d_out, self.d_out)
 
+
+    def forward(self, x):
+        
+        B, num_tokens, d_in  = x.shape
+        H = self.num_heads
+
+        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
+        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
+        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
+        
+        dropout = 0 if self.training == False else self.dropout        
+        output = flash_attn_func(queries,keys,values, dropout_p=dropout, causal=self.causal_mask)
+
+        # Bxnum_tokens x Hx head_dim
+
+        output = output.contiguous().view(B,num_tokens,self.d_out)
+
+        output = self.out_proj(output)
+
+        return output
 class MultiHeadAttentionWithSDPA(nn.Module):
     def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
         super().__init__()
