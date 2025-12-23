@@ -14,8 +14,10 @@
 coverage run -a --data-file=/workspace/.coverage --source=/workspace/nemo examples/tts/magpietts_inference.py \
     --codecmodel_path /home/TestData/tts/AudioCodec_21Hz_no_eliz_without_wavlm_disc.nemo \
     --datasets_json_path examples/tts/evalset_config.json \
-    --out_dir ./mp_zs_0 \
+    --out_dir ./mplf_zs_0 \
     --batch_size 4 \
+    --longform_mode always \
+    --longform_max_decoder_steps 50000 \
     --use_cfg \
     --cfg_scale 2.5 \
     --num_repeats 1 \
