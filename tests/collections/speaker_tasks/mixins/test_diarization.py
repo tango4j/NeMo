@@ -220,7 +220,7 @@ class TestSpkDiarizationMixin:
         # Check if it raises an error without sample rate when using numpy list input
         with pytest.raises(ValueError):
             _ = dummy_model.diarize(audio=numpy_audio_list, batch_size=2)
-        
+
         # Set sample rate and check if it works
         sample_rate = 16000
         outputs = dummy_model.diarize(audio=numpy_audio_list, batch_size=2, sample_rate=sample_rate)
