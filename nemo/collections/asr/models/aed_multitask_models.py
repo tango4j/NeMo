@@ -1111,9 +1111,9 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             setattr(merged_hypotheses, 'id', cut_id)
             return [merged_hypotheses]
 
-        if trcfg.enable_chunking:
-            for hyp in hypotheses:
-                setattr(hyp, 'id', cut_id)
+        if trcfg.enable_chunking and len(hypotheses) == 1:
+            setattr(hypotheses[0], 'id', batch.cuts[0].id)
+
         return hypotheses
 
     def _setup_transcribe_dataloader(self, config: Dict) -> 'torch.utils.data.DataLoader':

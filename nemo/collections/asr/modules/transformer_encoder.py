@@ -14,6 +14,7 @@ class GPTConfig():
     n_layers: int = 12
     drop_rate: int = 0.1
     qkv_bias: bool = False
+    theta_base: int = 10_000
 
 @dataclass
 class TransformerEncoderConfig():
@@ -24,6 +25,8 @@ class TransformerEncoderConfig():
     drop_rate: float = 0.1
     qkv_bias: bool = False
     causal_mask: bool = False
+    theta_base: int = 10_000
+    context_length: int = 4096
 
 class FeedForward(nn.Module):
     def __init__(self, dim):
@@ -63,6 +66,49 @@ class LayerNorm(nn.Module):
             output = self.scale * norm + self.shift
 
         return output
+
+def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=torch.float32):
+    assert head_dim % 2 == 0, "Embedding dimension must be even"
+
+    # Compute the inverse frequencies
+    inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype)[: (head_dim // 2)].float() / head_dim))
+
+    # Generate position indices
+    positions = torch.arange(context_length, dtype=dtype)
+
+    # Compute the angles
+    angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0) # Shape: (context_length, head_dim // 2)
+
+    # Expand angles to match the head_dim
+    angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
+
+    # Precompute sine and cosine
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+
+    return cos, sin
+
+def apply_rope(x, cos, sin):
+    # x: (batch_size, num_heads, seq_len, head_dim)
+    batch_size, num_heads, seq_len, head_dim = x.shape
+    assert head_dim % 2 == 0, "Head dimension must be even"
+
+    # Split x into first half and second half
+    x1 = x[..., : head_dim // 2]  # First half
+    x2 = x[..., head_dim // 2:]  # Second half
+
+    # Adjust sin and cos shapes
+    cos = cos[:seq_len, :].unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, seq_len, head_dim)
+    sin = sin[:seq_len, :].unsqueeze(0).unsqueeze(0)
+
+    # Apply the rotary transformation
+    rotated = torch.cat((-x2, x1), dim=-1)
+    x_rotated = (x * cos) + (rotated * sin)
+
+    # It's ok to use lower-precision after applying cos and sin rotation
+    return x_rotated.to(dtype=x.dtype)
+
+
 class MultiHeadAttentionWithFA(nn.Module):
     def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
         super().__init__()
@@ -274,6 +320,127 @@ class TransformerEncoder(nn.Module):
         length = length // 2
         for idx, layer in enumerate(self.layers):
             x = layer(x)
+        x = x.transpose(1, 2) # BxTxC -> BxCxT
+        return x, length
+    
+    def freeze(self):
+        for param in self.parameters():
+            param.requires_grad = False
+    
+    def unfreeze(self, partial=False):
+        for param in self.parameters():
+            param.requires_grad = True
+
+class MultiHeadAttentionWithRoPE(nn.Module):
+    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
+        super().__init__()
+        self.d_out = dim_out
+        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.num_heads = num_heads
+        self.head_dim = dim_out // num_heads
+        self.dropout = dropout
+        self.causal_mask = causal_mask
+        self.out_proj = nn.Linear(self.d_out, self.d_out)
+
+    def forward(self, x, use_cache=False, cos=None, sin=None):
+        
+        B, num_tokens, d_in  = x.shape
+        H = self.num_heads
+
+        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
+        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
+        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
+
+        keys = keys.transpose(1,2) # BxHxnum_tokens,head_dim
+        queries = queries.transpose(1,2)
+        values = values.transpose(1,2)
+
+        # Apply RoPE to keys and queries
+        keys = apply_rope(keys, cos, sin)
+        queries = apply_rope(queries, cos, sin)
+        
+        dropout = 0 if self.training == False else self.dropout
+        output = scaled_dot_product_attention(queries,keys,values, is_causal=self.causal_mask, dropout_p=dropout) # B xH x num_tokens x head_dim
+
+        output = output.transpose(1,2) # Bxnum_tokens x Hx head_dim
+
+        output = output.contiguous().view(B,num_tokens,self.d_out)
+
+        output = self.out_proj(output)
+
+        return output
+class TransformerBlockWithRoPE(nn.Module):
+    def __init__(self, cfg: TransformerEncoderConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.pre_norm = nn.RMSNorm(self.cfg.d_model)
+        self.mha = MultiHeadAttentionWithRoPE(
+            dim_in=self.cfg.d_model, 
+            dim_out=self.cfg.d_model, 
+            dropout=self.cfg.drop_rate, 
+            qkv_bias=self.cfg.qkv_bias, 
+            num_heads=self.cfg.n_heads,
+            causal_mask=self.cfg.causal_mask
+            )
+        self.dropout = nn.Dropout(self.cfg.drop_rate)
+        self.post_norm = nn.RMSNorm(self.cfg.d_model)
+        self.ffn = FeedForward(self.cfg.d_model)
+
+    def forward(self, x, use_cache=False, cos=None, sin=None):
+        pre_norm = self.pre_norm(x)
+
+        attn_output = self.mha(pre_norm, use_cache=use_cache, cos=cos, sin=sin)
+        attn_output = x + self.dropout(attn_output)
+
+        post_norm = self.post_norm(attn_output)
+        ffn = self.ffn(post_norm)
+        output = attn_output + self.dropout(ffn)
+        return output 
+class TransformerEncoderWithRoPE(nn.Module):
+    def __init__(self, 
+                n_mels: int = 80,
+                d_model: int = 512,
+                n_heads: int = 8,
+                n_layers: int = 17,
+                drop_rate: float = 0.1,
+                qkv_bias: bool = False,
+                causal_mask: bool = False,
+                theta_base: int = 10_000,
+                context_length: int = 4096,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.conv1 = Conv1d(n_mels, d_model, kernel_size=3, padding=1)
+        self.conv2 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1) # Decreases the temporal dimension by 2
+        self.conv3 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1) # Decreases the temporal dimension by 2
+
+        cfg = TransformerEncoderConfig(d_model=d_model, n_heads=n_heads, n_layers=n_layers, drop_rate=drop_rate, qkv_bias=qkv_bias, causal_mask=causal_mask)
+        self.layers = nn.ModuleList([TransformerBlockWithRoPE(cfg) for _ in range(n_layers)])
+        self.gelu = TorchGELU()
+        self.layer_norm = nn.RMSNorm(d_model)
+        
+        head_dim = d_model // n_heads
+        
+        # Precompute cos and sin for RoPE
+        cos, sin = compute_rope_params(head_dim, theta_base=theta_base, context_length=context_length)
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+    def forward(self, audio_signal, length): 
+        x = audio_signal
+        x = self.conv1(x)
+        x = self.gelu(x)
+        x = self.conv2(x)
+        length = length // 2
+        x = self.conv3(x)
+        x = self.gelu(x)
+        x = x.transpose(1, 2) # BxCxT -> BxTxC
+        x = self.layer_norm(x)
+        length = length // 2
+        for idx, layer in enumerate(self.layers):
+            x = layer(x, cos=self.cos, sin=self.sin)
         x = x.transpose(1, 2) # BxTxC -> BxCxT
         return x, length
     
