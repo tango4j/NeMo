@@ -272,16 +272,12 @@ class MagpieInferenceRunner:
             logging.info("Creating MagpieTTSDataset for standard inference")
             dataset = MagpieTTSDataset(
                 dataset_meta=dataset_meta,
-                sample_rate=self.model.sample_rate,
+                sample_rate=self.model.output_sample_rate,
                 min_duration=0.5,
                 max_duration=20,
                 codec_model_samples_per_frame=self.model.codec_model_samples_per_frame,
                 bos_id=self.model.bos_id,
                 eos_id=self.model.eos_id,
-                context_audio_bos_id=self.model.context_audio_bos_id,
-                context_audio_eos_id=self.model.context_audio_eos_id,
-                audio_bos_id=self.model.audio_bos_id,
-                audio_eos_id=self.model.audio_eos_id,
                 num_audio_codebooks=self.model.num_audio_codebooks,
                 prior_scaling_factor=None,
                 load_cached_codes_if_available=False,
@@ -307,6 +303,7 @@ class MagpieInferenceRunner:
         audio_base_dir: Optional[str] = None,
         save_cross_attention_maps: bool = True,
         save_context_audio: bool = True,
+        save_predicted_codes: bool = True,
     ) -> Tuple[List[dict], List[str]]:
         """Run inference on a dataset.
 
@@ -321,11 +318,13 @@ class MagpieInferenceRunner:
             audio_base_dir: Base directory for audio paths (uses cached if None).
             save_cross_attention_maps: Whether to save attention map images.
             save_context_audio: Whether to copy context audio files.
+            save_predicted_codes: Whether to save predicted code files.
 
         Returns:
             Tuple of:
                 - rtf_metrics: List of real-time factor metrics per batch.
                 - generated_audio_paths: List of paths to generated audio files.
+                - codec_file_paths: List of paths to predicted codes files.
         """
         # Use cached values if not provided
         if manifest_records is None:
@@ -342,12 +341,18 @@ class MagpieInferenceRunner:
         if self._use_longform:
             logging.info("Using longform inference path")
             return self._run_longform_inference(
-                dataset, output_dir, manifest_records, audio_base_dir, save_context_audio
+                dataset, output_dir, manifest_records, audio_base_dir, save_context_audio, save_predicted_codes
             )
         else:
             logging.info("Using standard inference path")
             return self._run_standard_inference(
-                dataset, output_dir, manifest_records, audio_base_dir, save_cross_attention_maps, save_context_audio
+                dataset,
+                output_dir,
+                manifest_records,
+                audio_base_dir,
+                save_cross_attention_maps,
+                save_context_audio,
+                save_predicted_codes,
             )
 
     def _run_standard_inference(
@@ -358,6 +363,7 @@ class MagpieInferenceRunner:
         audio_base_dir: str,
         save_cross_attention_maps: bool = True,
         save_context_audio: bool = True,
+        save_predicted_codes: bool = True,
     ) -> Tuple[List[dict], List[str]]:
         """Run standard single-pass inference on a dataset.
 
@@ -368,11 +374,13 @@ class MagpieInferenceRunner:
             audio_base_dir: Base directory for resolving audio paths.
             save_cross_attention_maps: Whether to save attention map images.
             save_context_audio: Whether to copy context audio files.
+            save_predicted_codes: Whether to save predicted code files.
 
         Returns:
             Tuple of:
                 - rtf_metrics: List of real-time factor metrics per batch.
                 - generated_audio_paths: List of paths to generated audio files.
+                - codec_file_paths: List of paths to predicted codes files.
         """
         os.makedirs(output_dir, exist_ok=True)
         self._delete_old_generated_files(output_dir)
@@ -388,17 +396,21 @@ class MagpieInferenceRunner:
         item_idx = 0
         all_rtf_metrics = []
         generated_audio_paths = []
+        codec_file_paths = []
 
         for batch_idx, batch in enumerate(dataloader):
             logging.info(f"Processing batch {batch_idx + 1}/{len(dataloader)}")
 
             # Move batch to GPU
-            batch_cuda = self._batch_to_cuda(batch)
+            batch = self._batch_to_cuda(batch)
+
+            batch['sample_rate'] = self.model.output_sample_rate
+            batch['context_sample_rate'] = self.model.output_sample_rate
 
             # Run inference
             start_time = time.time()
             output = self.model.infer_batch(
-                batch_cuda,
+                batch,
                 max_decoder_steps=self.config.max_decoder_steps,
                 temperature=self.config.temperature,
                 topk=self.config.topk,
@@ -422,6 +434,8 @@ class MagpieInferenceRunner:
 
             predicted_audio = output.predicted_audio
             predicted_audio_lens = output.predicted_audio_lens
+            predicted_codes = output.predicted_codes
+            predicted_codes_lens = output.predicted_codes_lens
             rtf_metrics = output.rtf_metrics
             cross_attention_maps = output.cross_attention_maps
 
@@ -441,7 +455,7 @@ class MagpieInferenceRunner:
                 audio_np = predicted_audio[idx].float().detach().cpu().numpy()
                 audio_np = audio_np[: predicted_audio_lens[idx]]
                 audio_path = os.path.join(output_dir, f"predicted_audio_{item_idx}.wav")
-                sf.write(audio_path, audio_np, self.model.sample_rate)
+                sf.write(audio_path, audio_np, self.model.output_sample_rate)
                 generated_audio_paths.append(audio_path)
 
                 # Copy context and target audio if available
@@ -453,9 +467,14 @@ class MagpieInferenceRunner:
                         item_idx,
                     )
 
+                if save_predicted_codes:
+                    codes_path = os.path.join(output_dir, f"predicted_codes_{item_idx}.pt")
+                    predicted_codes_current = predicted_codes[idx, :, : predicted_codes_lens[idx]]  # C, T
+                    torch.save(predicted_codes_current, codes_path)
+                    codec_file_paths.append(codes_path)
                 item_idx += 1
 
-        return all_rtf_metrics, generated_audio_paths
+        return all_rtf_metrics, generated_audio_paths, codec_file_paths
 
     @staticmethod
     def _batch_to_cuda(batch: dict) -> dict:
@@ -552,14 +571,10 @@ class MagpieInferenceRunner:
         # Create dataset - inherits from MagpieTTSDataset, so uses same dataset_meta format
         dataset = LongFormTTSInferenceDataset(
             dataset_meta=dataset_meta,
-            sample_rate=self.model.sample_rate,
+            sample_rate=self.model.output_sample_rate,
             tokenizer_name=tokenizer_name,
             codec_model_samples_per_frame=self.model.codec_model_samples_per_frame,
             eos_id=self.model.eos_id,
-            audio_bos_id=self.model.audio_bos_id,
-            audio_eos_id=self.model.audio_eos_id,
-            context_audio_bos_id=self.model.context_audio_bos_id,
-            context_audio_eos_id=self.model.context_audio_eos_id,
             num_audio_codebooks=self.model.num_audio_codebooks,
             context_duration_min=context_duration_min,
             context_duration_max=context_duration_max,
@@ -581,7 +596,8 @@ class MagpieInferenceRunner:
         manifest_records: List[dict],
         audio_base_dir: str,
         save_context_audio: bool = True,
-    ) -> Tuple[List[dict], List[str]]:
+        save_predicted_codes: bool = True,
+    ) -> Tuple[List[dict], List[str], List[str]]:
         """Run longform inference with automatic sentence chunking.
 
         Processes text sentence-by-sentence using generate_long_form_speech().
@@ -592,11 +608,13 @@ class MagpieInferenceRunner:
             manifest_records: List of manifest record dictionaries.
             audio_base_dir: Base directory for resolving audio paths.
             save_context_audio: Whether to copy context audio files.
+            save_predicted_codes: Whether to save predicted code files.
 
         Returns:
             Tuple of:
                 - rtf_metrics: List of real-time factor metrics per batch.
                 - generated_audio_paths: List of paths to generated audio files.
+                - codec_file_paths: List of paths to predicted codes files.
         """
         os.makedirs(output_dir, exist_ok=True)
         self._delete_old_generated_files(output_dir)
@@ -611,6 +629,7 @@ class MagpieInferenceRunner:
 
         all_rtf_metrics = []
         generated_audio_paths = []
+        codec_file_paths = []
         global_item_idx = 0
 
         for batch_idx, batch in enumerate(dataloader):
@@ -618,6 +637,9 @@ class MagpieInferenceRunner:
 
             # Move batch tensors to CUDA
             batch = self._batch_to_cuda(batch)
+
+            batch['sample_rate'] = self.model.output_sample_rate
+            batch['context_sample_rate'] = self.model.output_sample_rate
 
             batch_size = len(batch['chunked_tokens'])
             max_num_chunks = max(len(tokens) for tokens in batch['chunked_tokens'])
@@ -706,13 +728,13 @@ class MagpieInferenceRunner:
             predicted_codes = stack_tensors(predicted_codes_list, max_lens=[max_code_len]).cuda()
             predicted_codes_lens_tensor = torch.tensor(predicted_codes_lens, dtype=torch.long, device='cuda')
 
-            predicted_audio, predicted_audio_lens = self.model.codes_to_audio(
+            predicted_audio, predicted_audio_lens, _ = self.model.codes_to_audio(
                 predicted_codes, predicted_codes_lens_tensor
             )
 
             # Compute RTF metrics
             total_audio_samples = sum(predicted_audio_lens.cpu().tolist())
-            total_audio_seconds = total_audio_samples / self.model.sample_rate
+            total_audio_seconds = total_audio_samples / self.model.output_sample_rate
             rtf = elapsed / total_audio_seconds if total_audio_seconds > 0 else 0.0
             rtf_metrics = {
                 'inference_time': elapsed,
@@ -730,7 +752,7 @@ class MagpieInferenceRunner:
                 audio_np = predicted_audio_np[b_idx, :audio_len]
 
                 audio_path = os.path.join(output_dir, f"predicted_audio_{sample_idx}.wav")
-                sf.write(audio_path, audio_np, self.model.sample_rate)
+                sf.write(audio_path, audio_np, self.model.output_sample_rate)
                 generated_audio_paths.append(audio_path)
 
                 # Copy reference audio if requested
@@ -742,9 +764,15 @@ class MagpieInferenceRunner:
                         sample_idx,
                     )
 
+                if save_predicted_codes:
+                    codes_path = os.path.join(output_dir, f"predicted_codes_{sample_idx}.pt")
+                    predicted_codes_current = predicted_codes[b_idx, :, : predicted_codes_lens[b_idx]]  # C, T
+                    torch.save(predicted_codes_current, codes_path)
+                    codec_file_paths.append(codes_path)
+
                 global_item_idx += 1
 
-        return all_rtf_metrics, generated_audio_paths
+        return all_rtf_metrics, generated_audio_paths, codec_file_paths
 
     def _compute_end_of_text_flags(
         self,
