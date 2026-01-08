@@ -22,65 +22,8 @@ from typing import Optional, Union
 import librosa
 import numpy as np
 from loguru import logger
-from pipecat.frames.frames import Frame
+from pipecat.frames.frames import TranscriptionFrame
 from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.processors.frameworks.rtvi import RTVIProcessor, RTVIBotTTSTextMessage, RTVIBotLLMStartedMessage, RTVIBotLLMStoppedMessage, RTVIBotTTSStartedMessage, RTVIBotTTSStoppedMessage, RTVITextMessageData, RTVIBotTranscriptionMessage, RTVIServerMessage, RTVIServerResponseFrame, RTVIServerMessageFrame
-
-from pipecat.processors.aggregators.openai_llm_context import (
-    OpenAILLMContext,
-    OpenAILLMContextFrame,
-)
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.llm_service import (
-    FunctionCallParams,  # TODO(aleix): we shouldn't import `services` from `processors`
-)
-from pipecat.transports.base_input import BaseInputTransport
-from pipecat.transports.base_output import BaseOutputTransport
-from pipecat.transports.base_transport import BaseTransport
-from pipecat.utils.string import match_endofsentence
-
-from pipecat.frames.frames import (
-    BotStartedSpeakingFrame,
-    BotStoppedSpeakingFrame,
-    Frame,
-    InterimTranscriptionFrame,
-    StartInterruptionFrame,
-    TranscriptionFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
-    VADUserStartedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
-)
-
-from pipecat.frames.frames import (
-    BotInterruptionFrame,
-    BotStartedSpeakingFrame,
-    BotStoppedSpeakingFrame,
-    CancelFrame,
-    DataFrame,
-    EndFrame,
-    EndTaskFrame,
-    ErrorFrame,
-    Frame,
-    FunctionCallResultFrame,
-    InputAudioRawFrame,
-    InterimTranscriptionFrame,
-    LLMContextFrame,
-    LLMFullResponseEndFrame,
-    LLMFullResponseStartFrame,
-    LLMMessagesAppendFrame,
-    LLMTextFrame,
-    MetricsFrame,
-    StartFrame,
-    SystemFrame,
-    TranscriptionFrame,
-    TransportMessageUrgentFrame,
-    TTSStartedFrame,
-    TTSStoppedFrame,
-    TTSTextFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
-)
 class AudioLogger:
     """
     Utility class for logging audio data and transcriptions during voice agent interactions.
@@ -121,7 +64,6 @@ class AudioLogger:
         log_dir: Union[str, Path] = "./audio_logs",
         session_id: Optional[str] = None,
         enabled: bool = True,
-        user_lead_in_frame_count: int = 2,
         user_audio_sample_rate: int = 16000,
     ):
         self.enabled = enabled
@@ -147,7 +89,6 @@ class AudioLogger:
         self.agent_dir.mkdir(parents=True, exist_ok=True)
 
         # Counters for file naming (thread-safe)
-        self.user_lead_in_frame_count = user_lead_in_frame_count
         self._user_counter = 0
         self._agent_counter = 0
         self._turn_index = 0  # Turn index for conversation turns
@@ -160,7 +101,6 @@ class AudioLogger:
         self.turn_audio_buffer = []
         self.continuous_user_audio_buffer = []
         self.turn_transcription_buffer = []
-        # self.lead_in_user_audio_frame_queue = []
 
         # Global user audio recording (entire conversation)
         self._global_user_audio_buffer: list = []
@@ -174,7 +114,6 @@ class AudioLogger:
         self._stereo_sample_rate = user_audio_sample_rate  # Use user audio sample rate (downsample agent audio)
         self._stereo_audio_buffer_left: list = []   # Agent audio (left channel)
         self._stereo_audio_buffer_right: list = []  # User audio (right channel)
-        self._user_audio_stereo_offset = -0.8  # Offset in seconds to compensate for user audio lag
 
         # Session metadata
         # agent_entries is a list of lists: each sublist contains segments for one turn
@@ -392,7 +331,7 @@ class AudioLogger:
         """Get the time from the start of the session to the given datetime string."""
         # get the time difference in seconds.
         if self.first_audio_timestamp is None:
-            raise ValueError(f"First audio timestamp self.first_audio_timestamp is not set. Aborting time calculation.")
+            raise ValueError("First audio timestamp is not set. Aborting time calculation.")
         time_diff = (timestamp if timestamp else datetime.now()) - self.first_audio_timestamp
         return time_diff.total_seconds()
 
@@ -405,10 +344,6 @@ class AudioLogger:
             else:
                 self._agent_counter += 1
                 return self._agent_counter
-
-    def get_turn_index(self) -> int:
-        """Get the current turn index."""
-        return self._turn_index
 
     def increment_turn_index(self, speaker: str = None) -> int:
         """
@@ -453,15 +388,6 @@ class AudioLogger:
         if self._agent_turn_start_time is None:
             self._agent_turn_start_time = self.get_time_from_start_of_session()
             logger.debug(f"[AudioLogger] Agent turn start time set to {self._agent_turn_start_time:.3f}s")
-
-    def get_agent_turn_start_time(self) -> Optional[float]:
-        """
-        Get the start time for the current agent turn.
-        
-        Returns:
-            The agent turn start time, or None if not set.
-        """
-        return self._agent_turn_start_time
 
     def _save_audio_wav(
         self,
@@ -878,16 +804,6 @@ class AudioLogger:
             f"(User: {self._user_counter}, Agent: {self._agent_counter} segments in "
             f"{len(self.session_metadata['agent_entries'])} turns)"
         )
-
-    def get_session_info(self) -> dict:
-        """Get current session information."""
-        return {
-            "session_id": self.session_id,
-            "session_dir": str(self.session_dir),
-            "user_entries": self._user_counter,
-            "agent_entries": self._agent_counter,
-            "enabled": self.enabled,
-        }
 
 class RTVIAudioLoggerObserver(BaseObserver):
     def __init__(self, audio_logger: AudioLogger):

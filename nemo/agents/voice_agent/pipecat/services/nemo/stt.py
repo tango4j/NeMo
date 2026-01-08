@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+from datetime import datetime
 from typing import AsyncGenerator, List, Optional
 
 from loguru import logger
@@ -36,7 +37,6 @@ from pydantic import BaseModel
 
 from nemo.agents.voice_agent.pipecat.services.nemo.audio_logger import AudioLogger
 from nemo.agents.voice_agent.pipecat.services.nemo.streaming_asr import NemoStreamingASRService
-from nemo.agents.voice_agent.pipecat.services.nemo.streaming_diar import NeMoStreamingDiarService
 
 try:
     # disable nemo logging
@@ -53,6 +53,8 @@ except ModuleNotFoundError as e:
 
 
 class NeMoSTTInputParams(BaseModel):
+    """Input parameters for NeMo STT service."""
+
     language: Optional[Language] = Language.EN_US
     att_context_size: Optional[List] = [70, 1]
     frame_len_in_secs: Optional[float] = 0.08  # 80ms for FastConformer model
@@ -62,6 +64,8 @@ class NeMoSTTInputParams(BaseModel):
 
 
 class NemoSTTService(STTService):
+    """NeMo Speech-to-Text service for Pipecat integration."""
+
     def __init__(
         self,
         *,
@@ -96,11 +100,16 @@ class NemoSTTService(STTService):
         self._load_model()
 
         self.audio_buffer = []
+        self.user_is_speaking = False
 
     def _load_model(self):
         if self._backend == "legacy":
             self._model = NemoStreamingASRService(
-                self._model_name, device=self._device, decoder_type=self._decoder_type
+                self._model_name,
+                self._params.att_context_size,
+                device=self._device,
+                decoder_type=self._decoder_type,
+                frame_len_in_secs=self._params.frame_len_in_secs,
             )
         else:
             raise ValueError(f"Invalid ASR backend: {self._backend}")
@@ -162,6 +171,7 @@ class NemoSTTService(STTService):
 
         try:
             is_final = False
+            user_has_finished = False
             transcription = None
             self.audio_buffer.append(audio)
             if len(self.audio_buffer) >= self._params.buffer_size:
@@ -192,16 +202,19 @@ class NemoSTTService(STTService):
                         f"EOU latency: {eou_latency: .4f} seconds. EOU probability: {eou_prob: .2f}."
                         f"Processing time: {asr_result.processing_time: .4f} seconds."
                     )
+                    user_has_finished = True
                 if eob_latency is not None:
                     logger.debug(
                         f"EOB latency: {eob_latency: .4f} seconds. EOB probability: {eob_prob: .2f}."
                         f"Processing time: {asr_result.processing_time: .4f} seconds."
                     )
+                    user_has_finished = True
                 await self.stop_ttfb_metrics()
                 await self.stop_processing_metrics()
 
             if transcription:
                 logger.debug(f"Transcription (is_final={is_final}): `{transcription}`")
+                self.user_is_speaking = True if not user_has_finished else False
 
                 # Get the language from params or default to EN_US
                 language = self._params.language if self._params else Language.EN_US
@@ -320,17 +333,17 @@ class NemoSTTService(STTService):
         self._load_model()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process incoming frames and handle VAD events."""
         if isinstance(frame, VADUserStoppedSpeakingFrame):
             self._is_vad_active = False
-            # manualy reset the state of the model when end of utterance is detected by VAD
+            # manually reset the state of the model when end of utterance is detected by VAD
             logger.debug("Resetting state of the model due to VADUserStoppedSpeakingFrame")
+            if self.user_is_speaking:
+                logger.debug(
+                    "[EOU missing] STT failed to detect end of utterance before VAD detected user stopped speaking"
+                )
             self._model.reset_state()
-
         elif isinstance(frame, VADUserStartedSpeakingFrame):
             self._is_vad_active = True
 
-        if isinstance(frame, VADUserStoppedSpeakingFrame) and isinstance(self._model, NeMoStreamingDiarService):
-            # manualy reset the state of the model when end of utterance is detected by VAD
-            logger.debug("Resetting state of the model due to VADUserStoppedSpeakingFrame")
-            self._model.reset_state()
         await super().process_frame(frame, direction)
