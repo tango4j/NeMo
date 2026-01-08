@@ -157,6 +157,8 @@ class NemoSTTService(STTService):
         """
         await self.start_ttfb_metrics()
         await self.start_processing_metrics()
+        if self._audio_logger.first_audio_timestamp is None:
+            self._audio_logger.first_audio_timestamp = datetime.now()
 
         try:
             is_final = False
@@ -241,7 +243,7 @@ class NemoSTTService(STTService):
             )
             yield None
 
-    def _stage_turn_audio_and_transcription(self, is_first_frame: bool):
+    def _stage_turn_audio_and_transcription(self, is_first_frame: bool, is_backchannel: bool = False):
         """
         Stage the complete turn audio and accumulated transcriptions.
 

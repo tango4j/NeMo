@@ -20,6 +20,7 @@ from typing import Iterator, List, Optional
 
 import numpy as np
 import torch
+from datetime import datetime
 from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
@@ -287,7 +288,8 @@ class BaseNemoTTSService(TTSService):
                 # Collect all audio for logging
                 all_audio_bytes = b""
                 # Capture the start time when TTS begins (not when it ends)
-                tts_start_time = None
+                if self._audio_logger.first_audio_timestamp is None:
+                    self._audio_logger.first_audio_timestamp = datetime.now()
 
                 # Process the audio result (same as before)
                 if (

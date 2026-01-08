@@ -135,6 +135,7 @@ class AudioLogger:
         self.session_start_time = datetime.now()
         if session_id is None:
             session_id = f"session_{self.session_start_time.strftime('%Y%m%d_%H%M%S')}"
+        self.first_audio_timestamp = None
         self.session_id = session_id
         self.session_dir = self.log_dir / session_id
 
@@ -157,6 +158,7 @@ class AudioLogger:
         self._staged_audio_data = None
 
         self.turn_audio_buffer = []
+        self.continuous_user_audio_buffer = []
         self.turn_transcription_buffer = []
         # self.lead_in_user_audio_frame_queue = []
 
@@ -169,7 +171,7 @@ class AudioLogger:
         # Stereo conversation recording (left=agent, right=user)
         self._stereo_conversation_filename = "conversation_stereo.wav"
         self._stereo_conversation_file = self.session_dir / self._stereo_conversation_filename
-        self._stereo_sample_rate = 24000  # TTS sample rate (higher of the two)
+        self._stereo_sample_rate = user_audio_sample_rate  # Use user audio sample rate (downsample agent audio)
         self._stereo_audio_buffer_left: list = []   # Agent audio (left channel)
         self._stereo_audio_buffer_right: list = []  # User audio (right channel)
         self._user_audio_stereo_offset = -0.8  # Offset in seconds to compensate for user audio lag
@@ -203,6 +205,9 @@ class AudioLogger:
             return
         
         self._global_user_audio_buffer.append(audio_data)
+        
+        # Also append to continuous user audio buffer for stereo conversation
+        self.continuous_user_audio_buffer.append(audio_data)
 
     def save_global_user_audio(self):
         """
@@ -331,20 +336,29 @@ class AudioLogger:
         """
         Save the stereo conversation buffer to a WAV file.
         Left channel = Agent, Right channel = User.
+        
+        User audio comes from continuous_user_audio_buffer (not affected by VAD).
         """
         if not self.enabled:
             return
         
-        if not self._stereo_audio_buffer_left and not self._stereo_audio_buffer_right:
+        if not self._stereo_audio_buffer_left and not self.continuous_user_audio_buffer:
             logger.warning("[AudioLogger] No stereo conversation audio to save")
             return
         
         try:
-            # Pad the shorter buffer with zeros
-            max_length = max(len(self._stereo_audio_buffer_left), len(self._stereo_audio_buffer_right))
+            # Build right channel (user) from continuous buffer
+            # This is raw bytes at user sample rate, no resampling needed since stereo uses user sample rate
+            if self.continuous_user_audio_buffer:
+                continuous_audio_bytes = b"".join(self.continuous_user_audio_buffer)
+                right_array = np.frombuffer(continuous_audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                right_array = np.array([], dtype=np.float32)
             
             left_array = np.array(self._stereo_audio_buffer_left, dtype=np.float32)
-            right_array = np.array(self._stereo_audio_buffer_right, dtype=np.float32)
+            
+            # Pad the shorter buffer with zeros
+            max_length = max(len(left_array), len(right_array))
             
             # Pad to same length
             if len(left_array) < max_length:
@@ -377,7 +391,9 @@ class AudioLogger:
     def get_time_from_start_of_session(self, timestamp: datetime = None) -> float:
         """Get the time from the start of the session to the given datetime string."""
         # get the time difference in seconds.
-        time_diff = (timestamp if timestamp else datetime.now()) - self.session_start_time
+        if self.first_audio_timestamp is None:
+            raise ValueError(f"First audio timestamp self.first_audio_timestamp is not set. Aborting time calculation.")
+        time_diff = (timestamp if timestamp else datetime.now()) - self.first_audio_timestamp
         return time_diff.total_seconds()
 
     def _get_next_counter(self, speaker: str) -> int:
@@ -516,6 +532,7 @@ class AudioLogger:
         num_channels: int = 1,
         is_first_frame: bool = False,
         is_final: bool = True,
+        is_backchannel: bool = False,
         additional_metadata: Optional[dict] = None,
     ) -> Optional[dict]:
         """
@@ -576,6 +593,7 @@ class AudioLogger:
                 "sample_rate": sample_rate,
                 "num_channels": num_channels,
                 "audio_duration_sec": audio_duration_sec,
+                "is_backchannel": is_backchannel,
             }
 
             if additional_metadata:
@@ -591,8 +609,12 @@ class AudioLogger:
             logger.error(f"Error logging user audio: {e}")
             return None
 
-    def save_user_audio(self):
-        """Save the user audio to the disk."""
+    def save_user_audio(self, is_backchannel: bool = False):
+        """Save the user audio to the disk.
+        
+        Args:
+            is_backchannel: Whether this audio is a backchannel utterance (default: False)
+        """
         # Safety check: ensure staged metadata and audio data exist
         if self._staged_metadata is None:
             logger.warning("[AudioLogger] Attempted to save user audio but no staged metadata found")
@@ -603,6 +625,9 @@ class AudioLogger:
             return
         
         try:
+            # Add backchannel metadata
+            self._staged_metadata["is_backchannel"] = is_backchannel
+            
             audio_file = self.user_dir / f"{self._staged_metadata['base_name']}.wav"
             metadata_file = self.user_dir / f"{self._staged_metadata['base_name']}.json"
 
@@ -611,19 +636,13 @@ class AudioLogger:
             )
 
             self._save_metadata_json(metadata=self._staged_metadata, file_path=metadata_file)
+            backchannel_label = " [BACKCHANNEL]" if is_backchannel else ""
             logger.info(
-                f"[AudioLogger] Saved user audio #{self._staged_metadata['counter']}: '{self._staged_metadata['transcription'][:50]}{'...' if len(self._staged_metadata['transcription']) > 50 else ''}'"
+                f"[AudioLogger] Saved user audio #{self._staged_metadata['counter']}{backchannel_label}: '{self._staged_metadata['transcription'][:50]}{'...' if len(self._staged_metadata['transcription']) > 50 else ''}'"
             )
             
-            # Append to stereo conversation (right channel = user)
-            # Apply offset to advance user audio to compensate for processing lag
-            user_stereo_start_time = max(0.0, self._staged_metadata["start_time"] + self._user_audio_stereo_offset)
-            self._append_to_stereo_conversation(
-                audio_data=self._staged_audio_data,
-                channel="right",
-                start_time=user_stereo_start_time,
-                sample_rate=self._staged_metadata["sample_rate"],
-            )
+            # Note: User audio for stereo conversation is now handled via continuous_user_audio_buffer
+            # which is populated in append_global_user_audio() (not affected by VAD)
             
             # Update session metadata
             with self._lock:

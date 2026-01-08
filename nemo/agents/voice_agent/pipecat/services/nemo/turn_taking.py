@@ -187,6 +187,10 @@ class NeMoTurnTakingService(FrameProcessor):
                 if self._bot_speaking and self.is_backchannel(completed_text):
                     logger.debug(f"<EOU> detected for a backchannel phrase while bot is speaking: `{completed_text}`")
                     await self._handle_backchannel_text(completed_text)
+                    if self._audio_logger:
+                        self._audio_logger.save_user_audio(is_backchannel=True)
+                        logger.debug(f"[TurnTakingService] Saved backchannel audio also has EOU: {completed_text}")
+
                 else:
                     await self._handle_completed_text(completed_text, direction)
                     await self._handle_user_interruption(UserStoppedSpeakingFrame())
@@ -195,6 +199,9 @@ class NeMoTurnTakingService(FrameProcessor):
             elif has_eob and self._bot_speaking:
                 logger.debug(f"<EOB> detected while bot is speaking: `{self._user_speaking_buffer}`")
                 await self._handle_backchannel_text(str(self._user_speaking_buffer))
+                if self._audio_logger:
+                    self._audio_logger.save_user_audio(is_backchannel=True)
+                    logger.debug(f"[TurnTakingService] Saved backchannel audio for EOB while bot is speaking: `{self._user_speaking_buffer}`")
                 self._user_speaking_buffer = ""
                 self._have_sent_user_started_speaking = False  # user is done speaking, so we reset the flag
             else:
@@ -243,6 +250,9 @@ class NeMoTurnTakingService(FrameProcessor):
                     ),
                     direction=FrameDirection.UPSTREAM,
                 )
+                if self._audio_logger:
+                    self._audio_logger.save_user_audio(is_backchannel=True)
+                    logger.debug(f"[TurnTakingService] Saved backchannel audio (no VAD): {curr_text}")
             else:
                 # if the text segment is not empty and have non-space characters, we append it to the buffer
                 self._user_speaking_buffer += text_segment
@@ -323,9 +333,10 @@ class NeMoTurnTakingService(FrameProcessor):
                 self._have_sent_user_started_speaking = False
         elif is_backchannel:
             logger.debug(f"Backchannel detected: `{self._user_speaking_buffer}`")
-            # if self._audio_logger:
-            #     self._audio_logger.save_user_audio()
-            # push the backchannel string upstream, not downstream
+            if self._audio_logger:
+                self._audio_logger.save_user_audio(is_backchannel=True)
+                logger.debug(f"[TurnTakingService] Saved backchannel audio (VAD stopped): {self._user_speaking_buffer}")
+    
             await self.push_frame(
                 TranscriptionFrame(
                     text=f"({self._user_speaking_buffer})",
