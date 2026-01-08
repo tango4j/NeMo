@@ -54,9 +54,8 @@ class AudioLogger:
     # 12/19/2025 Note: Stereo conversation recording is implemented, but -0.8 seconds offset needs to be applied to make the session sound synced. 
         TODO: 
         1. Make offset compensated conversation_stereo.wav file: Start time is the first turn's start time.
-        2. user_speech.wav in user folder. This is not offset compensated but also start time is the first turn's start time.
-        3. Remove the segment based wav files. (Both TTS and STT, make it configurable, but default to False)
-        4. Do the testing on Jetson. 
+        2. Remove the segment based wav files. (Both TTS and STT, make it configurable, but default to False)
+        3. Do the testing on Jetson. 
     """
 
     def __init__(
@@ -102,12 +101,6 @@ class AudioLogger:
         self.continuous_user_audio_buffer = []
         self.turn_transcription_buffer = []
 
-        # Global user audio recording (entire conversation)
-        self._global_user_audio_buffer: list = []
-        self._global_user_speech_filename = "user_speech.wav"
-        self._global_user_audio_file = self.user_dir / self._global_user_speech_filename
-        self._global_user_audio_sample_rate = user_audio_sample_rate
-
         # Stereo conversation recording (left=agent, right=user)
         self._stereo_conversation_filename = "conversation_stereo.wav"
         self._stereo_conversation_file = self.session_dir / self._stereo_conversation_filename
@@ -127,64 +120,20 @@ class AudioLogger:
 
         logger.info(f"[AudioLogger] AudioLogger initialized: {self.session_dir}")
 
-
-
-    def append_global_user_audio(self, audio_data: bytes):
+    def append_continuous_user_audio(self, audio_data: bytes):
         """
-        Append audio data to the global user audio buffer.
+        Append audio data to the continuous user audio buffer for stereo conversation.
         
         This method should be called for EVERY audio frame received from the user,
         regardless of VAD state, to record the complete conversation audio.
         
         Args:
             audio_data: Raw audio data as bytes
-            sample_rate: Audio sample rate in Hz (default: 16000)
         """
         if not self.enabled:
             return
         
-        self._global_user_audio_buffer.append(audio_data)
-        
-        # Also append to continuous user audio buffer for stereo conversation
         self.continuous_user_audio_buffer.append(audio_data)
-
-    def save_global_user_audio(self):
-        """
-        Save the complete global user audio buffer to user_speech.wav.
-        
-        This method should be called at session finalization to save the
-        entire conversation audio as a single file.
-        """
-        if not self.enabled:
-            return
-        
-        if not self._global_user_audio_buffer:
-            logger.warning("[AudioLogger] No global user audio to save")
-            return
-        
-        try:
-            # Join all audio frames
-            complete_audio = b"".join(self._global_user_audio_buffer)
-            
-            # Save to file
-            self._save_audio_wav(
-                audio_data=complete_audio,
-                file_path=self._global_user_audio_file,
-                sample_rate=self._global_user_audio_sample_rate,
-                num_channels=1,
-            )
-            
-            audio_duration_sec = len(complete_audio) / (self._global_user_audio_sample_rate * 2)
-            logger.info(
-                f"[AudioLogger] Saved global user audio: {self._global_user_audio_file} "
-                f"({audio_duration_sec:.2f} seconds, {len(self._global_user_audio_buffer)} frames)"
-            )
-            
-            # Clear buffer after saving
-            self._global_user_audio_buffer = []
-            
-        except Exception as e:
-            logger.error(f"[AudioLogger] Error saving global user audio: {e}")
 
     def _resample_audio(
         self,
@@ -567,8 +516,8 @@ class AudioLogger:
                 f"[AudioLogger] Saved user audio #{self._staged_metadata['counter']}{backchannel_label}: '{self._staged_metadata['transcription'][:50]}{'...' if len(self._staged_metadata['transcription']) > 50 else ''}'"
             )
             
-            # Note: User audio for stereo conversation is now handled via continuous_user_audio_buffer
-            # which is populated in append_global_user_audio() (not affected by VAD)
+            # Note: User audio for stereo conversation is handled via continuous_user_audio_buffer
+            # which is populated in append_continuous_user_audio() (not affected by VAD)
             
             # Update session metadata
             with self._lock:
@@ -788,9 +737,6 @@ class AudioLogger:
         if not self.enabled:
             return
 
-        # Save global user audio before finalizing
-        self.save_global_user_audio()
-        
         # Save stereo conversation before finalizing
         self.save_stereo_conversation()
 

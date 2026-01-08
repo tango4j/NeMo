@@ -178,9 +178,9 @@ class NemoSTTService(STTService):
                 audio = b"".join(self.audio_buffer)
                 self.audio_buffer = []
 
-                # Append to global user audio buffer (records entire conversation)
+                # Append to continuous user audio buffer for stereo conversation recording
                 if self._audio_logger and self._record_audio_data:
-                    self._audio_logger.append_global_user_audio(audio)
+                    self._audio_logger.append_continuous_user_audio(audio)
 
                 asr_result = self._model.transcribe(audio)
                 transcription = asr_result.text
