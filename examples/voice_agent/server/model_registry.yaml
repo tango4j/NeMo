@@ -32,6 +32,9 @@ tts_models:
   "hexgrad/Kokoro-82M":
     yaml_id: "kokoro_82M.yaml"
 
+  "ResembleAI/chatterbox-turbo":
+    yaml_id: "chatterbox_turbo.yaml"
+
 stt_models:
   "stt_en_fastconformer_hybrid_large_streaming_80ms":
     yaml_id: "nemo_cache_aware_streaming.yaml"

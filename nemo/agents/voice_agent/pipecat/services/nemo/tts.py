@@ -13,12 +13,12 @@
 # limitations under the License.
 
 import asyncio
-import inspect
 from collections.abc import AsyncGenerator
 from typing import Iterator, List, Optional
 
 import numpy as np
 import torch
+import re
 from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame,
@@ -121,7 +121,11 @@ class BaseNemoTTSService(TTSService):
             self._processing_task = None
 
     def _tts_processor(self):
-        """Background processor that handles TTS generation calls."""
+        """Background processor that handles TTS generation calls.
+        
+        Consumes the audio generator in the background thread to avoid
+        blocking the main event loop during GPU inference.
+        """
         try:
             while self._processing_running:
                 try:
@@ -146,13 +150,17 @@ class BaseNemoTTSService(TTSService):
                         logger.warning(f"No response queue found for request {request_id}")
                         continue
 
-                    # Process TTS generation
+                    # Process TTS generation - consume generator in background thread
+                    # to avoid blocking main event loop during GPU inference
                     try:
-                        audio_result = self._generate_audio(text)
+                        audio_generator = self._generate_audio(text)
 
-                        # Send result directly to the waiting request
+                        # Consume generator here in background thread, collect all audio chunks
+                        audio_chunks = list(audio_generator)
+                        
+                        # Send collected audio chunks to the waiting request
                         asyncio.run_coroutine_threadsafe(
-                            response_queue.put(('success', audio_result)), self.get_event_loop()
+                            response_queue.put(('success', audio_chunks)), self.get_event_loop()
                         )
                     except Exception as e:
                         logger.error(f"Error in TTS generation: {e}")
@@ -278,45 +286,24 @@ class BaseNemoTTSService(TTSService):
 
                 await self.start_tts_usage_metrics(text)
 
-                # Process the audio result (same as before)
-                if (
-                    inspect.isgenerator(audio_result)
-                    or hasattr(audio_result, '__iter__')
-                    and hasattr(audio_result, '__next__')
-                ):
-                    # Handle generator case
-                    first_chunk = True
-                    for audio_chunk in audio_result:
-                        if first_chunk:
-                            await self.stop_ttfb_metrics()
-                            first_chunk = False
+                # Process the audio result - now always a list of audio chunks
+                # (generator is consumed in background thread to avoid blocking event loop)
+                await self.stop_ttfb_metrics()
+                
+                for audio_chunk in audio_result:
+                    if audio_chunk is None:
+                        continue
 
-                        if audio_chunk is None:
-                            break
-
-                        audio_bytes = self._convert_to_bytes(audio_chunk)
-                        chunk_size = self.chunk_size
-                        for i in range(0, len(audio_bytes), chunk_size):
-                            audio_chunk_bytes = audio_bytes[i : i + chunk_size]
-                            if not audio_chunk_bytes:
-                                break
-
-                            frame = TTSAudioRawFrame(
-                                audio=audio_chunk_bytes, sample_rate=self.sample_rate, num_channels=1
-                            )
-                            yield frame
-                else:
-                    # Handle single result case
-                    await self.stop_ttfb_metrics()
-                    audio_bytes = self._convert_to_bytes(audio_result)
-
+                    audio_bytes = self._convert_to_bytes(audio_chunk)
                     chunk_size = self.chunk_size
                     for i in range(0, len(audio_bytes), chunk_size):
-                        chunk = audio_bytes[i : i + chunk_size]
-                        if not chunk:
+                        audio_chunk_bytes = audio_bytes[i : i + chunk_size]
+                        if not audio_chunk_bytes:
                             break
 
-                        frame = TTSAudioRawFrame(audio=chunk, sample_rate=self.sample_rate, num_channels=1)
+                        frame = TTSAudioRawFrame(
+                            audio=audio_chunk_bytes, sample_rate=self.sample_rate, num_channels=1
+                        )
                         yield frame
 
                 yield TTSStoppedFrame()
@@ -658,3 +645,236 @@ class KokoroTTSService(BaseNemoTTSService, ToolCallingMixin):
         self.register_direct_function("tool_tts_set_speed", self.tool_tts_set_speed)
         self.register_direct_function("tool_tts_set_voice", self.tool_tts_set_voice)
         self.register_direct_function("tool_tts_reset_voice", self.tool_tts_reset_voice)
+
+
+class ChatterBoxTurboTTSService(BaseNemoTTSService, ToolCallingMixin):
+    """Text-to-Speech service using ChatterBox Turbo model.
+
+    ChatterBox Turbo is a fast, high-quality TTS model with voice cloning capabilities.
+    More info: https://huggingface.co/ResembleAI/chatterbox-turbo
+
+    Args:
+        device: Device to run on (default: 'cuda')
+        sample_rate: Audio sample rate in Hz (default: 44100 for ChatterBox)
+        audio_prompt_path: Optional path to audio prompt for voice cloning (must be >5 seconds)
+        speed: Speaking speed multiplier (default: 1.0)
+        repetition_penalty: Repetition penalty (default: 1.2)
+        top_p: Top-p sampling parameter (default: 0.95)
+        top_k: Top-k sampling parameter (default: 1000)
+        **kwargs: Additional arguments passed to BaseNemoTTSService
+    """
+
+    def __init__(
+        self,
+        device: str = "cuda",
+        sample_rate: int = 44100,
+        speed: float = 1.0,
+        repetition_penalty: float = 1.2,
+        top_p: float = 0.95,
+        top_k: int = 1000,
+        **kwargs,
+    ):
+        # self._audio_prompt_path = audio_prompt_path
+        # self._original_audio_prompt = audio_prompt_path
+        self._speed = speed
+        self._original_speed = speed
+        self._speed_lambda = 1.0
+        self._repetition_penalty = repetition_penalty
+        self._top_p = top_p
+        self._top_k = top_k
+        
+        model_name = "chatterbox-turbo"
+        super().__init__(model=model_name, device=device, sample_rate=sample_rate, **kwargs)
+        self.setup_tool_calling()
+
+    def _setup_model(self):
+        """Initialize the ChatterBox Turbo pipeline."""
+        try:
+            from chatterbox.tts_turbo import ChatterboxTurboTTS
+        except ImportError:
+            raise ImportError(
+                "chatterbox package is required for ChatterBoxTurboTTSService. "
+                "Install it from: https://github.com/resemble-ai/chatterbox"
+            )
+        
+        logger.info(f"Loading ChatterBox Turbo TTS model on device={self._device}")
+        model = ChatterboxTurboTTS.from_pretrained(device=self._device)
+        
+        return model
+
+    def _split_text_into_sentences(self, text: str) -> list[str]:
+        """Split text into sentences/clauses for chunked generation.
+        
+        Splits on sentence endings (.!?) and clause separators (;:,) 
+        as well as dashes and other non-alphabetic pause markers.
+        
+        Args:
+            text: Text to split into sentences
+            
+        Returns:
+            List of sentence/clause strings
+        """
+        # Split on punctuation followed by whitespace:
+        # - Sentence endings: . ! ?
+        # - Clause separators: ; : ,
+        # - Dashes: — – --
+        sentences = re.split(r'(?<=[.!?;:,])\s+|(?<=—)\s*|(?<=–)\s*|(?<=--)\s+', text.strip())
+        # Filter out empty strings
+        return [s.strip() for s in sentences if s.strip()]
+
+    def _generate_audio(self, text: str) -> Iterator[np.ndarray]:
+        """Generate audio using the ChatterBox Turbo model.
+
+        This function splits the text into sentences and generates audio
+        for each sentence, yielding chunks as they are produced for 
+        faster time-to-first-audio streaming.
+
+        Args:
+            text: Text to convert to speech
+
+        Yields:
+            Audio data as numpy arrays
+        """
+        try:
+            # Use fixed temperature of 0.8
+            temperature = 0.8
+            # Adjust temperature based on speed (for simulating faster/slower speech)
+            adjusted_temp = temperature * (2.0 - self._speed) if self._speed != 1.0 else temperature
+            adjusted_temp = max(0.1, min(2.0, adjusted_temp))
+            
+            # Split text into sentences for chunked streaming
+            sentences = self._split_text_into_sentences(text)
+            
+            # If no valid sentences, yield nothing
+            if not sentences:
+                logger.warning("No valid sentences found in text for ChatterBox generation")
+                return
+            
+            # Generate and yield audio for each sentence
+            for i, sentence in enumerate(sentences):
+                logger.debug(f"ChatterBox generating audio chunk {i+1}/{len(sentences)} th: '{sentence[:50]}...'")
+            
+            # Generate audio using ChatterBox Turbo
+            audio = self._model.generate(
+                    sentence,
+                temperature=adjusted_temp,
+                repetition_penalty=self._repetition_penalty,
+                top_p=self._top_p,
+                top_k=self._top_k,
+                audio_prompt_path=None,  # Use pre-loaded conditionals
+                norm_loudness=True,
+            )
+            
+            # Convert torch tensor to numpy array
+            if isinstance(audio, torch.Tensor):
+                audio = audio.detach().cpu().numpy()
+            
+            # Ensure audio is in float32 format [-1, 1]
+            if audio.dtype != np.float32:
+                audio = audio.astype(np.float32)
+            
+            # ChatterBox returns audio with shape (1, samples), squeeze to (samples,)
+            if audio.ndim > 1:
+                audio = audio.squeeze()
+            
+            logger.debug(
+                    f"ChatterBox generated audio chunk {i}: shape={audio.shape}, dtype={audio.dtype}, "
+                f"min={audio.min():.3f}, max={audio.max():.3f}"
+            )
+            
+            yield audio
+
+        except Exception as e:
+            logger.error(f"Error generating audio with ChatterBox Turbo: {e}")
+            raise
+
+    async def tool_tts_set_speed(self, params: FunctionCallParams, speed_lambda: float):
+        """
+        Set a specific speaking speed of the assistant's voice.
+        This tool should be called only when the user specifies the speed explicitly,
+        such as "speak twice as fast" or "speak half as slow" or "speak 1.5 times as fast".
+
+        After calling this tool, continue the previous response if it was unfinished and was
+        interrupted by calling this tool, otherwise start a new response.
+
+        Args:
+            speed_lambda: positive float, the relative change of the speaking speed to the original speed.
+                        E.g., 1.0 for original speed, 1.25 for 25% faster than original speed,
+                        0.8 for 20% slower than original speed.
+
+        """
+        if speed_lambda <= 0:
+            result = {
+                "success": False,
+                "message": f"Speed remains unchanged since the change is not a positive number: {speed_lambda}",
+            }
+            logger.debug(f"Speed remains unchanged since the change is not a positive number: {speed_lambda}")
+        else:
+            self._speed = speed_lambda * self._original_speed
+            result = {
+                "success": True,
+                "message": f"Speed set to {speed_lambda} of the original speed",
+            }
+            logger.debug(f"Speed set to {speed_lambda} of the original speed {self._original_speed}")
+        await params.result_callback(result)
+
+    async def tool_tts_reset_speed(self, params: FunctionCallParams):
+        """
+        Reset the speaking speed to the original speed.
+
+        After calling this tool, continue the previous response if it was unfinished and was
+        interrupted by calling this tool, otherwise start a new response.
+        """
+        self._speed = self._original_speed
+        result = {"success": True, "message": "Speaking speed is reset to the original one"}
+        logger.debug(f"Speaking speed is reset to the original speed {self._original_speed}")
+        await params.result_callback(result)
+
+    async def tool_tts_speak_faster(self, params: FunctionCallParams):
+        """
+        Speak faster by increasing the speaking speed 15% faster each time this function is called.
+
+        After calling this tool, continue the previous response if it was unfinished and was
+        interrupted by calling this tool, otherwise start a new response.
+        """
+        self._speed_lambda = self._speed_lambda + 0.15
+        self._speed = self._speed_lambda * self._original_speed
+        result = {
+            "success": True,
+            "message": f"Speaking speed is increased to {self._speed_lambda} of the original speed",
+        }
+        logger.debug(f"Speed is set to {self._speed_lambda} of the original speed {self._original_speed}")
+        await params.result_callback(result)
+
+    async def tool_tts_speak_slower(self, params: FunctionCallParams):
+        """
+        Speak slower by decreasing the speaking speed 15% slower each time this function is called.
+
+        After calling this tool, continue the previous response if it was unfinished and was
+        interrupted by calling this tool, otherwise start a new response.
+        """
+        self._speed_lambda = self._speed_lambda - 0.15
+        if self._speed_lambda < 0.1:
+            self._speed = 0.1 * self._original_speed
+            result = {
+                "success": True,
+                "message": "Speaking speed is decreased to the minimum of 0.1 of the original speed",
+            }
+            logger.debug(f"Speed is set to the minimum of 0.1 of the original speed {self._original_speed}")
+        else:
+            self._speed = self._speed_lambda * self._original_speed
+            result = {
+                "success": True,
+                "message": f"Speaking speed is decreased to {self._speed_lambda} of the original speed",
+            }
+            logger.debug(f"Speed is set to {self._speed_lambda} of the original speed {self._original_speed}")
+        await params.result_callback(result)
+
+    def setup_tool_calling(self):
+        """
+        Setup the tool calling mixin by registering all available tools.
+        """
+        self.register_direct_function("tool_tts_reset_speed", self.tool_tts_reset_speed)
+        self.register_direct_function("tool_tts_speak_faster", self.tool_tts_speak_faster)
+        self.register_direct_function("tool_tts_speak_slower", self.tool_tts_speak_slower)
+        self.register_direct_function("tool_tts_set_speed", self.tool_tts_set_speed)

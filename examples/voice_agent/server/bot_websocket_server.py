@@ -33,7 +33,7 @@ from nemo.agents.voice_agent.pipecat.processors.frameworks.rtvi import RTVIObser
 from nemo.agents.voice_agent.pipecat.services.nemo.diar import NemoDiarService
 from nemo.agents.voice_agent.pipecat.services.nemo.llm import get_llm_service_from_config
 from nemo.agents.voice_agent.pipecat.services.nemo.stt import ASR_EOU_MODELS, NemoSTTService
-from nemo.agents.voice_agent.pipecat.services.nemo.tts import KokoroTTSService, NeMoFastPitchHiFiGANTTSService
+from nemo.agents.voice_agent.pipecat.services.nemo.tts import ChatterBoxTurboTTSService, KokoroTTSService, NeMoFastPitchHiFiGANTTSService
 from nemo.agents.voice_agent.pipecat.services.nemo.turn_taking import NeMoTurnTakingService
 from nemo.agents.voice_agent.pipecat.transports.network.websocket_server import (
     WebsocketServerParams,
@@ -212,6 +212,14 @@ async def run_bot_websocket_server(host: str = "0.0.0.0", port: int = 8765):
         tts = KokoroTTSService(
             voice=TTS_SUB_MODEL_ID,
             device=TTS_DEVICE,
+            speed=config_manager.server_config.tts.speed,
+            text_aggregator=text_aggregator,
+            think_tokens=TTS_THINK_TOKENS,
+        )
+    elif TTS_TYPE == "chatterboxturbo":
+        tts = ChatterBoxTurboTTSService(
+            device=TTS_DEVICE,
+            sample_rate=22050,
             speed=config_manager.server_config.tts.speed,
             text_aggregator=text_aggregator,
             think_tokens=TTS_THINK_TOKENS,
