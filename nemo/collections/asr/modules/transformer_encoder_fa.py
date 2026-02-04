@@ -3,7 +3,7 @@ import torch
 from torch.nn import Conv1d
 from dataclasses import dataclass
 from torch.nn import GELU as TorchGELU
-from torch.nn.functional import scaled_dot_product_attention
+from flash_attn import flash_attn_func
 @dataclass
 class GPTConfig():
     vocab_size: int = 50257
@@ -66,48 +66,6 @@ class LayerNorm(nn.Module):
 
         return output
 
-def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=torch.float32):
-    assert head_dim % 2 == 0, "Embedding dimension must be even"
-
-    # Compute the inverse frequencies
-    inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype)[: (head_dim // 2)].float() / head_dim))
-
-    # Generate position indices
-    positions = torch.arange(context_length, dtype=dtype)
-
-    # Compute the angles
-    angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0) # Shape: (context_length, head_dim // 2)
-
-    # Expand angles to match the head_dim
-    angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
-
-    # Precompute sine and cosine
-    cos = torch.cos(angles)
-    sin = torch.sin(angles)
-
-    return cos, sin
-
-def apply_rope(x, cos, sin):
-    # x: (batch_size, num_heads, seq_len, head_dim)
-    batch_size, num_heads, seq_len, head_dim = x.shape
-    assert head_dim % 2 == 0, "Head dimension must be even"
-
-    # Split x into first half and second half
-    x1 = x[..., : head_dim // 2]  # First half
-    x2 = x[..., head_dim // 2:]  # Second half
-
-    # Adjust sin and cos shapes
-    cos = cos[:seq_len, :].unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, seq_len, head_dim)
-    sin = sin[:seq_len, :].unsqueeze(0).unsqueeze(0)
-
-    # Apply the rotary transformation
-    rotated = torch.cat((-x2, x1), dim=-1)
-    x_rotated = (x * cos) + (rotated * sin)
-
-    # It's ok to use lower-precision after applying cos and sin rotation
-    return x_rotated.to(dtype=x.dtype)
-
-
 class MultiHeadAttentionWithFA(nn.Module):
     def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
         super().__init__()
@@ -141,128 +99,13 @@ class MultiHeadAttentionWithFA(nn.Module):
         output = self.out_proj(output)
 
         return output
-class MultiHeadAttentionWithSDPA(nn.Module):
-    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
-        super().__init__()
-        self.d_out = dim_out
-        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.num_heads = num_heads
-        self.head_dim = dim_out // num_heads
-        self.dropout = dropout
-        self.causal_mask = causal_mask
-        self.out_proj = nn.Linear(self.d_out, self.d_out)
-
-    def forward(self, x, use_cache=False):
-        
-        B, num_tokens, d_in  = x.shape
-        H = self.num_heads
-
-        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
-        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
-        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
-
-        keys = keys.transpose(1,2) # BxHxnum_tokens,head_dim
-        queries = queries.transpose(1,2)
-        values = values.transpose(1,2)
-
-        
-        dropout = 0 if self.training == False else self.dropout
-        output = scaled_dot_product_attention(queries,keys,values, is_causal=self.causal_mask, dropout_p=dropout)
-
-         # B xH x num_tokens x head_dim
-
-        output = output.transpose(1,2) # Bxnum_tokens x Hx head_dim
-
-        output = output.contiguous().view(B,num_tokens,self.d_out)
-
-        output = self.out_proj(output)
-
-        return output
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
-        super().__init__()
-        self.d_out = dim_out
-        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.num_heads = num_heads
-        self.head_dim = dim_out // num_heads
-        self.dropout = nn.Dropout(dropout)
-        self.causal_mask = causal_mask
-        self.out_proj = nn.Linear(self.d_out, self.d_out)
-
-        self.register_buffer(
-            "mask",
-            torch.triu(torch.ones(context_length, context_length), diagonal=1) if self.causal_mask else torch.zeros(context_length, context_length)
-        )
-        
-        self.register_buffer(
-            "cache_k", None, persistent=False
-        )
-        self.register_buffer(
-            "cache_v", None, persistent=False
-        )
-
-
-    def forward(self, x, use_cache=False):
-        
-        B, num_tokens, d_in  = x.shape
-        H = self.num_heads
-
-        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
-        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
-        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
-
-        if use_cache:
-            if self.cache_k is None:
-                self.cache_k  = keys
-                self.cache_v = values
-            else:
-                self.cache_k = torch.cat((self.cache_k, keys), dim=1)
-                self.cache_v = torch.cat((self.cache_v, values), dim=1)
-            keys, values = self.cache_k, self.cache_v
-
-
-        keys = keys.transpose(1,2) # BxHxnum_tokens,head_dim
-        queries = queries.transpose(1,2)
-        values = values.transpose(1,2)
-
-        attn_scores = torch.matmul(queries, keys.transpose(-1,-2)) # We need to transpose head_dim and num_tokens for keys. alpha = BxNxTqxTk
-        d_k = keys.shape[-1]
-
-        # Masking 
-        T = attn_scores.shape[-1]
-        mask = self.mask[:num_tokens, :num_tokens]
-        masked = attn_scores.masked_fill(mask.bool(), -torch.inf)
-
-        attn_weights = torch.softmax(masked/d_k**0.5, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        output = torch.matmul(attn_weights, values) # B xH x num_tokens x head_dim
-
-        output = output.transpose(1,2) # Bxnum_tokens x Hx head_dim
-
-        output = output.contiguous().view(B,num_tokens,self.d_out)
-
-        output = self.out_proj(output)
-
-        return output
-    
-    def reset_cache(self,):
-        self.cache_k = None
-        self.cache_v = None
-
-
 
 class TransformerBlock(nn.Module):
     def __init__(self, cfg: TransformerEncoderConfig):
         super().__init__()
         self.cfg = cfg
         self.pre_norm = LayerNorm(self.cfg.d_model)
-        self.mha = MultiHeadAttentionWithSDPA(
+        self.mha = MultiHeadAttentionWithFA(
             dim_in=self.cfg.d_model, 
             dim_out=self.cfg.d_model, 
             dropout=self.cfg.drop_rate, 
