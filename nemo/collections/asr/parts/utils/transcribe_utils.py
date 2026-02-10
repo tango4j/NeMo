@@ -295,18 +295,71 @@ def wrap_transcription(hyps: List[str]) -> List[rnnt_utils.Hypothesis]:
 
 
 def setup_model(cfg: DictConfig, map_location: torch.device) -> Tuple[ASRModel, str]:
-    """Setup model from cfg and return model and model name for next step"""
+    """Setup model from cfg and return model and model name for next step.
+    
+    Supports both .nemo files and .ckpt (PyTorch Lightning checkpoint) files.
+    For .ckpt files, the model class can be specified via cfg.model_class (optional).
+    If not specified, it will try common ASR model classes.
+    """
     if cfg.model_path is not None and cfg.model_path != "None":
-        # restore model from .nemo file path
-        model_cfg = ASRModel.restore_from(restore_path=cfg.model_path, return_config=True)
-        classpath = model_cfg.target  # original class path
-        imported_class = model_utils.import_class_by_path(classpath)  # type: ASRModel
-        logging.info(f"Restoring model : {imported_class.__name__}")
-        asr_model = imported_class.restore_from(
-            restore_path=cfg.model_path,
-            map_location=map_location,
-        )  # type: ASRModel
         model_name = os.path.splitext(os.path.basename(cfg.model_path))[0]
+        
+        # Check if model_path is a .ckpt file (PyTorch Lightning checkpoint)
+        if cfg.model_path.endswith('.ckpt'):
+            logging.info(f"Detected .ckpt file, loading from PyTorch Lightning checkpoint: {cfg.model_path}")
+            
+            # Determine which model class to use
+            model_class = None
+            if hasattr(cfg, 'model_class') and cfg.model_class is not None:
+                # User specified a model class
+                model_class = model_utils.import_class_by_path(cfg.model_class)
+                logging.info(f"Using user-specified model class: {cfg.model_class}")
+            else:
+                # Try to infer model class - attempt common multitask/ASR models
+                # Import additional model classes for .ckpt support
+                try:
+                    from nemo.collections.asr.models import MSEncDecMultiTaskModel
+                    model_classes_to_try = [MSEncDecMultiTaskModel, EncDecMultiTaskModel, ASRModel]
+                except ImportError:
+                    model_classes_to_try = [EncDecMultiTaskModel, ASRModel]
+                
+                # Try each model class until one works
+                for cls in model_classes_to_try:
+                    try:
+                        logging.info(f"Attempting to load checkpoint with {cls.__name__}...")
+                        asr_model = cls.load_from_checkpoint(
+                            cfg.model_path,
+                            map_location=map_location,
+                        )
+                        logging.info(f"Successfully loaded model with {cls.__name__}")
+                        model_class = cls
+                        break
+                    except Exception as e:
+                        logging.debug(f"Failed to load with {cls.__name__}: {e}")
+                        continue
+                
+                if model_class is None:
+                    raise RuntimeError(
+                        f"Could not load .ckpt file with any known model class. "
+                        f"Please specify the model class via cfg.model_class parameter. "
+                        f"Example: +model_class=nemo.collections.asr.models.MSEncDecMultiTaskModel"
+                    )
+            
+            if model_class is not None and 'asr_model' not in locals():
+                asr_model = model_class.load_from_checkpoint(
+                    cfg.model_path,
+                    map_location=map_location,
+                )
+        else:
+            # restore model from .nemo file path
+            model_cfg = ASRModel.restore_from(restore_path=cfg.model_path, return_config=True)
+            classpath = model_cfg.target  # original class path
+            imported_class = model_utils.import_class_by_path(classpath)  # type: ASRModel
+            logging.info(f"Restoring model : {imported_class.__name__}")
+            asr_model = imported_class.restore_from(
+                restore_path=cfg.model_path,
+                map_location=map_location,
+            )  # type: ASRModel
     else:
         # restore model by name
         asr_model = ASRModel.from_pretrained(

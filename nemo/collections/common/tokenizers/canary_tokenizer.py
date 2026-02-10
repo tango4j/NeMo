@@ -224,3 +224,34 @@ def _map_canary1_to_canary2_lang(lang: str, available_langs: list[str]) -> str:
         return mapped
 
     raise RuntimeError(f"Unsupported language: '{lang}' for CanaryTokenizer with languages: {available_langs}")
+
+class MSCanaryTokenizer(CanaryTokenizer):
+    """
+    Wrapper around CanaryTokenizer for Multi-Speaker ASR
+    The transcript is segmented by special speaker tokens:
+    <|speaker0|> transcript0 <|speaker1|> transcript1 ...
+    """
+
+    def __init__(self, tokenizers: Dict):
+        super().__init__(tokenizers)
+
+    def text_to_ids(self, text, lang_id):
+        tokenizer = self.tokenizers_dict[lang_id]
+        split_text = re.split(r"(<\|.*?\|>)", text)
+        spl_tokens = [split_text[i] for i in range(1, len(split_text), 2)]
+        transcripts = [split_text[i] for i in range(2, len(split_text), 2)]
+        assert len(spl_tokens) == len(transcripts)
+        ids = []
+        
+        for i in range(len(spl_tokens)):
+            assert spl_tokens[i] in self.special_tokens
+            # special tokens 
+            tokenizer = self.tokenizers_dict['spl_tokens']
+            offset = self.token_id_offset['spl_tokens']
+            ids += [n + offset for n in tokenizer.text_to_ids(spl_tokens[i])]
+            # segmented transcripts
+            tokenizer = self.tokenizers_dict[lang_id]
+            offset = self.token_id_offset[lang_id]
+            ids += [n + offset for n in tokenizer.text_to_ids(transcripts[i])]
+
+        return ids

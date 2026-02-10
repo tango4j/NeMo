@@ -46,8 +46,10 @@ from nemo.utils.timers import SimpleTimer
 Transcribe audio file on a single CPU/GPU. Useful for transcription of moderate amounts of audio data.
 
 # Arguments
-  model_path: path to .nemo ASR checkpoint
+  model_path: path to .nemo ASR checkpoint OR .ckpt PyTorch Lightning checkpoint
   pretrained_name: name of pretrained ASR model (from NGC registry)
+  model_class: (optional) Full class path for .ckpt files (e.g., nemo.collections.asr.models.MSEncDecMultiTaskModel)
+               If not specified, the script will try common ASR model classes automatically.
   audio_dir: path to directory with audio files
   dataset_manifest: path to dataset JSON manifest file (in NeMo formats
   compute_langs: Bool to request language ID information (if the model supports it)
@@ -85,6 +87,7 @@ append_pred - optional. Allows you to add more than one prediction to an existin
 pred_name_postfix - optional. The name you want to be written for the current model
 Results are returned in a JSON manifest file.
 
+# Example with .nemo file:
 python transcribe_speech.py \
     model_path=null \
     pretrained_name=null \
@@ -100,6 +103,15 @@ python transcribe_speech.py \
     amp=True \
     append_pred=False \
     pred_name_postfix="<remove or use another model name for output filename>"
+
+# Example with .ckpt file (PyTorch Lightning checkpoint):
+python transcribe_speech.py \
+    model_path=/path/to/model.ckpt \
+    +model_class=nemo.collections.asr.models.MSEncDecMultiTaskModel \
+    dataset_manifest=/path/to/manifest.json \
+    batch_size=16 \
+    cuda=0 \
+    amp=True
 """
 
 
@@ -119,8 +131,9 @@ class TranscriptionConfig:
     """
 
     # Required configs
-    model_path: Optional[str] = None  # Path to a .nemo file
+    model_path: Optional[str] = None  # Path to a .nemo file or .ckpt checkpoint
     pretrained_name: Optional[str] = None  # Name of a pretrained model
+    model_class: Optional[str] = None  # Model class for .ckpt files (e.g., nemo.collections.asr.models.MSEncDecMultiTaskModel)
     audio_dir: Optional[str] = None  # Path to a directory which contains audio files
     dataset_manifest: Optional[str] = None  # Path to dataset's JSON manifest
     channel_selector: Optional[Union[int, str]] = (
