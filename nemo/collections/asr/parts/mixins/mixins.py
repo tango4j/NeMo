@@ -728,6 +728,156 @@ class ASRModuleMixin(ASRAdapterModelMixin):
 
         return tuple(result)
 
+    def conformer_stream_step_with_diarization(
+        self,
+        processed_signal: Tensor,
+        processed_signal_length: Tensor = None,
+        cache_last_channel: Tensor = None,
+        cache_last_time: Tensor = None,
+        cache_last_channel_len: Tensor = None,
+        keep_all_outputs: bool = True,
+        previous_hypotheses: List[Hypothesis] = None,
+        previous_pred_out: Tensor = None,
+        drop_extra_pre_encoded: int = None,
+        return_transcription: bool = True,
+        return_log_probs: bool = False,
+        bypass_pre_encode: bool = False,
+        diar_preds: Tensor = None,
+    ):
+        """
+        Streaming step with diarization fusion applied between the encoder
+        and the decoder/joint.
+
+        This is identical to conformer_stream_step() except it calls
+        encoder.cache_aware_stream_step_with_diarization() which applies
+        the model's fuse_diar_preds() on the encoder output before decoding.
+
+        This is critical for MSEncDecRNNTBPEModel streaming: the standard
+        conformer_stream_step() bypasses MSEncDecRNNTBPEModel.forward() and
+        calls the encoder directly, so the speaker_infusion_asr never gets
+        added.  With limited streaming cache context (~5 s), adding diar
+        fusion at every chunk compensates for the short context window.
+
+        Args:
+            processed_signal: input mel-spectrogram features (B, D, T)
+            processed_signal_length: lengths (B,)
+            cache_last_channel: cache for MHA layers
+            cache_last_time: cache for convolution layers
+            cache_last_channel_len: lengths for cache_last_channel
+            keep_all_outputs: keep all outputs including right-context
+            previous_hypotheses: hypotheses from previous step (RNNT)
+            previous_pred_out: predicted outputs from previous step (CTC)
+            drop_extra_pre_encoded: steps to drop after downsampling
+            return_transcription: decode and return transcriptions
+            return_log_probs: return log probs (CTC only)
+            bypass_pre_encode: skip pre-encode (already pre-encoded)
+            diar_preds: (B, T_diar, num_speakers) frame-level speaker
+                predictions from the streaming diarization model.
+                If None, behaves identically to conformer_stream_step().
+
+        Returns:
+            Same as conformer_stream_step().
+        """
+        if not isinstance(self, asr_models.EncDecRNNTModel) and not isinstance(self, asr_models.EncDecCTCModel):
+            raise NotImplementedError(f"stream_step does not support {type(self)}!")
+
+        if not isinstance(self.encoder, StreamingEncoder):
+            raise NotImplementedError("Encoder of this model does not support streaming!")
+
+        if isinstance(self, asr_models.EncDecRNNTModel) and return_transcription is False:
+            logging.info(
+                "return_transcription can not be False for Transducer models as decoder returns the transcriptions too."
+            )
+
+        if not isinstance(self, asr_models.EncDecCTCModel) and return_log_probs is True:
+            logging.info("return_log_probs can only be True for CTC models.")
+
+        # Resolve the diar fusion function from the model if diar_preds is provided
+        diar_fusion_fn = getattr(self, 'fuse_diar_preds', None) if diar_preds is not None else None
+
+        (
+            encoded,
+            encoded_len,
+            cache_last_channel_next,
+            cache_last_time_next,
+            cache_last_channel_next_len,
+        ) = self.encoder.cache_aware_stream_step_with_diarization(
+            processed_signal=processed_signal,
+            processed_signal_length=processed_signal_length,
+            cache_last_channel=cache_last_channel,
+            cache_last_time=cache_last_time,
+            cache_last_channel_len=cache_last_channel_len,
+            keep_all_outputs=keep_all_outputs,
+            drop_extra_pre_encoded=drop_extra_pre_encoded,
+            bypass_pre_encode=bypass_pre_encode,
+            diar_preds=diar_preds,
+            diar_fusion_fn=diar_fusion_fn,
+        )
+
+        # --- Decoding (identical to conformer_stream_step) ---
+        if isinstance(self, asr_models.EncDecCTCModel) or (
+            isinstance(self, asr_models.EncDecHybridRNNTCTCModel) and self.cur_decoder == "ctc"
+        ):
+            if hasattr(self, "ctc_decoder"):
+                decoding = self.ctc_decoding
+                decoder = self.ctc_decoder
+            else:
+                decoding = self.decoding
+                decoder = self.decoder
+
+            log_probs = decoder(encoder_output=encoded)
+            predictions_tensor = log_probs.argmax(dim=-1, keepdim=False)
+
+            greedy_predictions = []
+            if return_transcription:
+                all_hyp_or_transcribed_texts = []
+            else:
+                all_hyp_or_transcribed_texts = None
+            for preds_idx, preds in enumerate(predictions_tensor):
+                if encoded_len is None:
+                    preds_cur = predictions_tensor[preds_idx]
+                else:
+                    preds_cur = predictions_tensor[preds_idx, : encoded_len[preds_idx]]
+                if previous_pred_out is not None:
+                    greedy_predictions_concat = torch.cat((previous_pred_out[preds_idx], preds_cur), dim=-1)
+                    encoded_len[preds_idx] += len(previous_pred_out[preds_idx])
+                else:
+                    greedy_predictions_concat = preds_cur
+                greedy_predictions.append(greedy_predictions_concat)
+
+                if return_transcription:
+                    decoded_out = decoding.ctc_decoder_predictions_tensor(
+                        decoder_outputs=greedy_predictions_concat.unsqueeze(0),
+                        decoder_lengths=encoded_len[preds_idx : preds_idx + 1],
+                        return_hypotheses=False,
+                    )
+                    all_hyp_or_transcribed_texts.append(decoded_out[0])
+            best_hyp = None
+        else:
+            best_hyp = self.decoding.rnnt_decoder_predictions_tensor(
+                encoder_output=encoded,
+                encoded_lengths=encoded_len,
+                return_hypotheses=True,
+                partial_hypotheses=previous_hypotheses,
+            )
+            greedy_predictions = [hyp.y_sequence for hyp in best_hyp]
+
+            all_hyp_or_transcribed_texts = best_hyp
+
+        result = [
+            greedy_predictions,
+            all_hyp_or_transcribed_texts,
+            cache_last_channel_next,
+            cache_last_time_next,
+            cache_last_channel_next_len,
+            best_hyp,
+        ]
+        if return_log_probs:
+            result.append(log_probs)
+            result.append(encoded_len)
+
+        return tuple(result)
+
     @torch.no_grad()
     def transcribe_simulate_cache_aware_streaming(
         self,

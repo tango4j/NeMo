@@ -74,3 +74,76 @@ class StreamingEncoder(ABC):
             self.streaming_cfg.drop_extra_pre_encoded = prev_drop_extra_pre_encoded
 
         return encoder_output
+
+    def cache_aware_stream_step_with_diarization(
+        self,
+        processed_signal,
+        processed_signal_length=None,
+        cache_last_channel=None,
+        cache_last_time=None,
+        cache_last_channel_len=None,
+        keep_all_outputs=True,
+        drop_extra_pre_encoded=None,
+        bypass_pre_encode=False,
+        diar_preds=None,
+        diar_fusion_fn=None,
+    ):
+        """
+        Cache-aware streaming step with optional diarization fusion.
+
+        Runs the standard encoder streaming step via cache_aware_stream_step(),
+        then applies diarization fusion on the encoded output if diar_preds and
+        diar_fusion_fn are both provided.
+
+        The diar_fusion_fn is expected to be provided by the model class
+        (e.g. MSEncDecRNNTBPEModel.fuse_diar_preds) that owns the learned
+        fusion parameters (projection layers, normalization, etc.).
+
+        Args:
+            processed_signal: input mel-spectrogram features (B, D, T)
+            processed_signal_length: lengths (B,)
+            cache_last_channel: cache tensor for last channel layers (MHA)
+            cache_last_time: cache tensor for last time layers (convolutions)
+            cache_last_channel_len: lengths for cache_last_channel
+            keep_all_outputs: if True, keep all outputs including right-context
+            drop_extra_pre_encoded: steps to drop after downsampling
+            bypass_pre_encode: if True, skip pre-encode (already pre-encoded)
+            diar_preds: (B, T_diar, num_speakers) frame-level speaker predictions
+            diar_fusion_fn: callable(encoded, diar_preds) -> fused_encoded
+                A function that fuses diarization predictions with encoder states.
+                Typically MSEncDecRNNTBPEModel.fuse_diar_preds.
+
+        Returns:
+            Same 5-tuple as cache_aware_stream_step:
+            (encoded, encoded_len, cache_last_channel_next,
+             cache_last_time_next, cache_last_channel_next_len)
+            where encoded has diar fusion applied if diar_preds was provided.
+        """
+        (
+            encoded,
+            encoded_len,
+            cache_last_channel_next,
+            cache_last_time_next,
+            cache_last_channel_next_len,
+        ) = self.cache_aware_stream_step(
+            processed_signal=processed_signal,
+            processed_signal_length=processed_signal_length,
+            cache_last_channel=cache_last_channel,
+            cache_last_time=cache_last_time,
+            cache_last_channel_len=cache_last_channel_len,
+            keep_all_outputs=keep_all_outputs,
+            drop_extra_pre_encoded=drop_extra_pre_encoded,
+            bypass_pre_encode=bypass_pre_encode,
+        )
+
+        # Apply diarization fusion on the encoder output
+        if diar_preds is not None and diar_fusion_fn is not None:
+            encoded = diar_fusion_fn(encoded, diar_preds)
+
+        return (
+            encoded,
+            encoded_len,
+            cache_last_channel_next,
+            cache_last_time_next,
+            cache_last_channel_next_len,
+        )
