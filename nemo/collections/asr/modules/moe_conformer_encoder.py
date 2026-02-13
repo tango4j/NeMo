@@ -25,6 +25,7 @@ References:
 - Gu et al., "Omni-Router: Sharing Routing Decisions in Sparse MoE for ASR", 2025
 """
 
+import re
 from typing import List, Optional
 
 import torch
@@ -66,6 +67,11 @@ class MoEConformerEncoder(ConformerEncoder):
             load-balancing loss. Defaults to 0.01.
         moe_jitter_eps (float): Noise scale for the router during training.
             Defaults to 0.0.
+        moe_init_from_ffn (bool): If True, initialize all expert FFN weights
+            from the original (base) FFN weights created by ``super().__init__()``.
+            This ensures that when loading from a pretrained ConformerEncoder,
+            all experts start from the pretrained FFN weights. The router is
+            always randomly initialized. Defaults to True.
     """
 
     def __init__(
@@ -116,6 +122,7 @@ class MoEConformerEncoder(ConformerEncoder):
         moe_layer_indices: Optional[List[int]] = None,
         moe_load_balance_loss_weight: float = 0.01,
         moe_jitter_eps: float = 0.0,
+        moe_init_from_ffn: bool = True,
     ):
         # Initialize the base ConformerEncoder (creates all standard layers)
         super().__init__(
@@ -166,6 +173,7 @@ class MoEConformerEncoder(ConformerEncoder):
         self.moe_router_type = moe_router_type
         self.moe_load_balance_loss_weight = moe_load_balance_loss_weight
         self.moe_jitter_eps = moe_jitter_eps
+        self.moe_init_from_ffn = moe_init_from_ffn
 
         # Validate moe_position
         if moe_position not in ('start', 'end', 'both'):
@@ -218,6 +226,9 @@ class MoEConformerEncoder(ConformerEncoder):
             layer = self.layers[layer_idx]
 
             if moe_position in ('start', 'both'):
+                # Save original FFN weights before replacement
+                original_ff1_state = layer.feed_forward1.state_dict() if moe_init_from_ffn else None
+
                 router = self.omni_router_start if moe_router_type == 'omni' else None
                 moe_ff1 = MoEFeedForward(
                     d_model=d_model,
@@ -230,9 +241,18 @@ class MoEConformerEncoder(ConformerEncoder):
                     router=router,
                     jitter_eps=moe_jitter_eps,
                 )
+
+                # Initialize all experts from the original FFN weights
+                if original_ff1_state is not None:
+                    for expert in moe_ff1.experts:
+                        expert.load_state_dict(original_ff1_state)
+
                 layer.feed_forward1 = moe_ff1
 
             if moe_position in ('end', 'both'):
+                # Save original FFN weights before replacement
+                original_ff2_state = layer.feed_forward2.state_dict() if moe_init_from_ffn else None
+
                 router = self.omni_router_end if moe_router_type == 'omni' else None
                 moe_ff2 = MoEFeedForward(
                     d_model=d_model,
@@ -245,6 +265,12 @@ class MoEConformerEncoder(ConformerEncoder):
                     router=router,
                     jitter_eps=moe_jitter_eps,
                 )
+
+                # Initialize all experts from the original FFN weights
+                if original_ff2_state is not None:
+                    for expert in moe_ff2.experts:
+                        expert.load_state_dict(original_ff2_state)
+
                 layer.feed_forward2 = moe_ff2
 
         num_moe_layers = len(self.moe_layer_indices)
@@ -280,3 +306,75 @@ class MoEConformerEncoder(ConformerEncoder):
             total_loss = self.moe_load_balance_loss_weight * total_loss
 
         return total_loss
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        """Override to remap non-MoE FFN state_dict keys to MoE expert keys.
+
+        When loading from a pretrained ConformerEncoder checkpoint (e.g., via
+        ``init_from_nemo_model``), the FFN keys have the form::
+
+            layers.{i}.feed_forward2.linear1.weight
+
+        but the MoE encoder expects::
+
+            layers.{i}.feed_forward2.experts.{j}.linear1.weight
+
+        This method detects such mismatches and duplicates the pretrained FFN
+        weights into all expert slots, so every expert starts from the pretrained
+        FFN weights. The router weights (which have no pretrained counterpart)
+        remain at their random initialization.
+        """
+        if not self.moe_init_from_ffn:
+            return super()._load_from_state_dict(
+                state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+            )
+
+        # Build the set of FFN attribute names that were replaced with MoE
+        moe_ff_names = set()
+        if self.moe_position in ('start', 'both'):
+            moe_ff_names.add('feed_forward1')
+        if self.moe_position in ('end', 'both'):
+            moe_ff_names.add('feed_forward2')
+
+        # Pattern: prefix + layers.{layer_idx}.{ff_name}.{param_suffix}
+        # where {ff_name} is in moe_ff_names and there is no "experts." in the key
+        # We remap to: prefix + layers.{layer_idx}.{ff_name}.experts.{j}.{param_suffix}
+        pattern = re.compile(
+            r'^(' + re.escape(prefix) + r'layers\.(\d+)\.(' +
+            '|'.join(re.escape(n) for n in moe_ff_names) +
+            r'))\.((?!experts\.).+)$'
+        )
+
+        keys_to_add = {}
+        keys_to_remove = []
+
+        for key in list(state_dict.keys()):
+            m = pattern.match(key)
+            if m:
+                layer_prefix = m.group(1)  # e.g. "layers.0.feed_forward2"
+                layer_idx = int(m.group(2))
+                param_suffix = m.group(4)  # e.g. "linear1.weight"
+
+                # Only remap for layers that actually have MoE
+                if layer_idx in self.moe_layer_indices:
+                    value = state_dict[key]
+                    # Duplicate into each expert
+                    for expert_idx in range(self.moe_num_experts):
+                        new_key = f"{layer_prefix}.experts.{expert_idx}.{param_suffix}"
+                        keys_to_add[new_key] = value.clone()
+                    keys_to_remove.append(key)
+
+        # Apply remapping
+        for key in keys_to_remove:
+            del state_dict[key]
+        state_dict.update(keys_to_add)
+
+        if keys_to_remove:
+            logging.info(
+                f"MoEConformerEncoder: Remapped {len(keys_to_remove)} pretrained FFN keys "
+                f"into {len(keys_to_add)} expert keys for {len(self.moe_layer_indices)} MoE layers."
+            )
+
+        return super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
