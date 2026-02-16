@@ -727,18 +727,15 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
 
             # Pre-encode level diarization fusion: fuse speaker information
             # into ASR pre-encode embeddings before feeding into encoder layers.
-            # Both methods are applied in serial:
-            #   1. 'sinusoidal' — speaker position encoding weighted by diar preds
-            #   2. 'merge' — project + add diar pre-encode to ASR pre-encode
-            # The fused embeddings are fed to the encoder with
-            # bypass_pre_encode=True so speaker context propagates through
+            # Two methods: 'sinusoidal' (speaker position encoding weighted by
+            # diar predictions) or 'merge' (project + add diar pre-encode to
+            # ASR pre-encode).  The fused embeddings are fed to the encoder
+            # with bypass_pre_encode=True so speaker context propagates through
             # all encoder layers and into the MHA cache for future steps.
             self.use_pre_encode_diar_fusion = cfg.get('use_pre_encode_diar_fusion', False)
             if self.use_pre_encode_diar_fusion:
+                self.pre_encode_fusion_type = cfg.get('pre_encode_fusion_type', 'sinusoidal')
                 self._setup_pre_encode_diar_fusion()
-                logging.info("[MSEncDecRNNTBPEModel] use_pre_encode_diar_fusion=True")
-            else:
-                logging.info("[MSEncDecRNNTBPEModel] use_pre_encode_diar_fusion=False")
 
         else:
             self.diar = False
@@ -801,7 +798,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         sm.chunk_left_context = diar_scfg.get('chunk_left_context', 0)
         sm.chunk_right_context = diar_scfg.get('chunk_right_context', 0)
         sm.log = False
-        self.diarization_model._suppress_streaming_pbar = True
 
         logging.info(
             f"[diar_streaming] Configured Sortformer streaming params: "
@@ -820,7 +816,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         #    (streaming_cfg.last_channel_cache_size)
         diar_total_history = sm.spkcache_len + sm.fifo_len
         asr_left_context = scfg.last_channel_cache_size
-        if self.cfg.get('simulate_streaming', False) and diar_total_history != asr_left_context:
+        if diar_total_history != asr_left_context:
             raise ValueError(
                 f"[diar_streaming] Diar/ASR left-context mismatch! "
                 f"SPKCACHE_LEN({sm.spkcache_len}) + FIFO_LEN({sm.fifo_len}) "
@@ -829,30 +825,30 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 f"diarizer's total history window matches the ASR encoder's "
                 f"left context."
             )
-            logging.info(
-                f"[diar_streaming] Left-context sync OK: "
-                f"spkcache({sm.spkcache_len}) + fifo({sm.fifo_len}) "
-                f"= {diar_total_history} == ASR last_channel_cache_size({asr_left_context})"
-            )
+        logging.info(
+            f"[diar_streaming] Left-context sync OK: "
+            f"spkcache({sm.spkcache_len}) + fifo({sm.fifo_len}) "
+            f"= {diar_total_history} == ASR last_channel_cache_size({asr_left_context})"
+        )
 
-            # 2) CHUNK_LEN must equal ASR encoder valid_out_len
-            if scfg is not None and hasattr(scfg, 'valid_out_len'):
-                vol = scfg.valid_out_len
-                if isinstance(vol, list):
-                    vol = vol[-1]  # use the steady-state (non-first) value
-                if sm.chunk_len != vol:
-                    raise ValueError(
-                        f"[diar_streaming] Diar/ASR chunk-length mismatch! "
-                        f"diar chunk_len({sm.chunk_len}) != "
-                        f"ASR encoder valid_out_len({vol}).  These must be equal "
-                        f"so diar and ASR produce the same number of frames "
-                        f"per step."
-                    )
-                logging.info(
-                    f"[diar_streaming] Chunk-length sync OK: "
-                    f"diar chunk_len({sm.chunk_len}) == "
-                    f"encoder valid_out_len({vol})"
+        # 2) CHUNK_LEN must equal ASR encoder valid_out_len
+        if scfg is not None and hasattr(scfg, 'valid_out_len'):
+            vol = scfg.valid_out_len
+            if isinstance(vol, list):
+                vol = vol[-1]  # use the steady-state (non-first) value
+            if sm.chunk_len != vol:
+                raise ValueError(
+                    f"[diar_streaming] Diar/ASR chunk-length mismatch! "
+                    f"diar chunk_len({sm.chunk_len}) != "
+                    f"ASR encoder valid_out_len({vol}).  These must be equal "
+                    f"so diar and ASR produce the same number of frames "
+                    f"per step."
                 )
+            logging.info(
+                f"[diar_streaming] Chunk-length sync OK: "
+                f"diar chunk_len({sm.chunk_len}) == "
+                f"encoder valid_out_len({vol})"
+            )
 
     # ── FastConformer layer fusion ─────────────────────────────────────
 
@@ -965,50 +961,57 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         """
         Set up pre-encode level diarization fusion modules.
 
-        Both methods are always created and applied in serial:
+        Two methods are supported:
 
-        (1) Sinusoidal: speaker position encoding weighted by diar predictions,
-            added to ASR pre-encode embeddings.  Same idea as the post-encode
-            sinusoidal kernel but applied earlier, giving every encoder layer
-            access to speaker identity.
+        (1) 'sinusoidal': Sinusoidal speaker position encoding weighted by
+            diar predictions, added to ASR pre-encode embeddings.  This is the
+            same idea as the post-encode sinusoidal kernel but applied earlier,
+            giving every encoder layer access to speaker identity.
 
-        (2) Merge: project diar encoder's pre-encode embeddings to ASR
+        (2) 'merge': Project diar encoder's pre-encode embeddings to ASR
             dimension and add to ASR pre-encode embeddings.  This directly
             injects speaker-aware representations from the diar encoder into
             the ASR encoder's input, letting self-attention in every encoder
-            layer consume speaker context.
+            layer consume speaker context.  As the fused pre-encode flows
+            through encoder layers, it becomes part of the MHA cache
+            (cache_last_channel), propagating speaker context to future steps.
         """
         d_asr = self.encoder.d_model
 
-        # ── (1) Sinusoidal kernel ─────────────────────────────────────
-        self.pre_encode_diar_kernel = self.get_sinusoid_position_encoding(
-            self.max_num_speakers, d_asr
-        )
-        logging.info(
-            f"[pre_encode_diar_fusion] Sinusoidal kernel setup: "
-            f"max_speakers={self.max_num_speakers}, d_asr={d_asr}"
-        )
+        if self.pre_encode_fusion_type == 'sinusoidal':
+            self.pre_encode_diar_kernel = self.get_sinusoid_position_encoding(
+                self.max_num_speakers, d_asr
+            )
+            logging.info(
+                f"[pre_encode_diar_fusion] Sinusoidal kernel setup: "
+                f"max_speakers={self.max_num_speakers}, d_asr={d_asr}"
+            )
 
-        # ── (2) Merge projection ──────────────────────────────────────
-        d_diar = self.diarization_model.encoder.d_model
-        if d_diar != d_asr:
-            self.pre_encode_merge_proj = torch.nn.Linear(d_diar, d_asr)
+        elif self.pre_encode_fusion_type == 'merge':
+            d_diar = self.diarization_model.encoder.d_model
+            if d_diar != d_asr:
+                self.pre_encode_merge_proj = torch.nn.Linear(d_diar, d_asr)
+            else:
+                self.pre_encode_merge_proj = torch.nn.Identity()
+            logging.info(
+                f"[pre_encode_diar_fusion] Merge projection setup: "
+                f"d_diar={d_diar} -> d_asr={d_asr}, "
+                f"projection={'Linear' if d_diar != d_asr else 'Identity'}"
+            )
+
         else:
-            self.pre_encode_merge_proj = torch.nn.Identity()
-        logging.info(
-            f"[pre_encode_diar_fusion] Merge projection setup: "
-            f"d_diar={d_diar} -> d_asr={d_asr}, "
-            f"projection={'Linear' if d_diar != d_asr else 'Identity'}"
-        )
+            raise ValueError(
+                f"Unknown pre_encode_fusion_type: '{self.pre_encode_fusion_type}'. "
+                f"Expected 'sinusoidal' or 'merge'."
+            )
 
     def _apply_pre_encode_diar_fusion(self, audio_chunk, chunk_lengths, chunk_diar_preds, drop_extra):
         """
         Fuse diarization information at the pre-encode embedding level.
 
-        Runs the ASR encoder's ``pre_encode`` on the audio chunk, then applies
-        **both** fusion methods in serial:
-            1. Sinusoidal speaker embedding (from diar predictions)
-            2. Merge diar pre-encode projection
+        Runs the ASR encoder's ``pre_encode`` on the audio chunk, applies the
+        selected diar fusion method, and returns fused embeddings ready for
+        ``cache_aware_stream_step(bypass_pre_encode=True)``.
 
         Args:
             audio_chunk: (B, D_mel, T) mel features with pre-encode cache prepended.
@@ -1034,42 +1037,48 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             asr_pre_encode = asr_pre_encode[:, drop_extra:, :]
             pre_encode_lengths = (pre_encode_lengths - drop_extra).clamp(min=0)
 
-        # ── (1) Sinusoidal speaker embedding ───────────────────────────
-        dp = chunk_diar_preds
-        if dp.shape[1] != asr_pre_encode.shape[1]:
-            if dp.shape[1] < asr_pre_encode.shape[1]:
-                dp = self.fix_diar_output(dp, asr_pre_encode.shape[1])
-            else:
-                dp = dp[:, :asr_pre_encode.shape[1], :]
+        # ── Apply fusion ───────────────────────────────────────────────
+        if self.pre_encode_fusion_type == 'sinusoidal':
+            # Align diar preds to pre-encode time dimension
+            dp = chunk_diar_preds
+            if dp.shape[1] != asr_pre_encode.shape[1]:
+                if dp.shape[1] < asr_pre_encode.shape[1]:
+                    dp = self.fix_diar_output(dp, asr_pre_encode.shape[1])
+                else:
+                    dp = dp[:, :asr_pre_encode.shape[1], :]
 
-        speaker_emb = torch.matmul(
-            dp, self.pre_encode_diar_kernel.to(dp.device)
-        )
-        if self.kernel_norm == 'l2':
-            speaker_emb = torch.nn.functional.normalize(speaker_emb, p=2, dim=-1)
-
-        asr_pre_encode = asr_pre_encode + speaker_emb
-
-        # ── (2) Merge diar pre-encode projection ──────────────────────
-        with torch.no_grad():
-            diar_pre_encode, _ = self.diarization_model.encoder.pre_encode(
-                x=audio_signal_t, lengths=chunk_lengths
+            speaker_emb = torch.matmul(
+                dp, self.pre_encode_diar_kernel.to(dp.device)
             )
-            if drop_extra > 0:
-                diar_pre_encode = diar_pre_encode[:, drop_extra:, :]
-            diar_pre_encode = diar_pre_encode.detach()
+            if self.kernel_norm == 'l2':
+                speaker_emb = torch.nn.functional.normalize(speaker_emb, p=2, dim=-1)
 
-        projected_diar_pre_encode = self.pre_encode_merge_proj(diar_pre_encode)
+            fused_pre_encode = asr_pre_encode + speaker_emb
 
-        T_asr = asr_pre_encode.shape[1]
-        T_diar = projected_diar_pre_encode.shape[1]
-        if T_asr != T_diar:
-            min_len = min(T_asr, T_diar)
-            asr_pre_encode = asr_pre_encode[:, :min_len, :]
-            projected_diar_pre_encode = projected_diar_pre_encode[:, :min_len, :]
-            pre_encode_lengths = pre_encode_lengths.clamp(max=min_len)
+        elif self.pre_encode_fusion_type == 'merge':
+            # Diar pre-encode (frozen, no gradient)
+            with torch.no_grad():
+                diar_pre_encode, _ = self.diarization_model.encoder.pre_encode(
+                    x=audio_signal_t, lengths=chunk_lengths
+                )
+                if drop_extra > 0:
+                    diar_pre_encode = diar_pre_encode[:, drop_extra:, :]
+                diar_pre_encode = diar_pre_encode.detach()
 
-        fused_pre_encode = asr_pre_encode + projected_diar_pre_encode
+            # Project diar d_model -> ASR d_model (learnable)
+            projected_diar = self.pre_encode_merge_proj(diar_pre_encode)
+
+            # Align time dimensions if subsampling differs
+            T_asr = asr_pre_encode.shape[1]
+            T_diar = projected_diar.shape[1]
+            if T_asr != T_diar:
+                min_len = min(T_asr, T_diar)
+                asr_pre_encode = asr_pre_encode[:, :min_len, :]
+                projected_diar = projected_diar[:, :min_len, :]
+                pre_encode_lengths = pre_encode_lengths.clamp(max=min_len)
+
+            fused_pre_encode = asr_pre_encode + projected_diar
+
         return fused_pre_encode, pre_encode_lengths
 
     def _init_asr_model(self):
@@ -1642,7 +1651,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             1) encoded: Tensor [B, D, T] encoder output (with diarization fused if enabled).
             2) encoded_len: Tensor [B] lengths after encoder.
         """
-        # --- Preprocessing ---
+        # --- ASR encoder forward ---
         has_input_signal = input_signal is not None and input_signal_length is not None
         has_processed_signal = processed_signal is not None and processed_signal_length is not None
         if (has_input_signal ^ has_processed_signal) is False:
@@ -1662,37 +1671,18 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 input_spec=processed_signal, length=processed_signal_length
             )
 
-        # --- Diarization forward (needed before encoder for pre-encode fusion) ---
-        diar_preds = None
+        with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
+            encoded, encoded_len = self.encoder(
+                audio_signal=processed_signal, length=processed_signal_length
+            )
+        # encoded shape: (B, D, T)
+
         if self.diar and input_signal is not None:
+            # --- Diarization forward + fusion ---
             with torch.set_grad_enabled(not self.cfg.get('freeze_diar', False)):
                 diar_preds = self.forward_diar(input_signal, input_signal_length)
                 # diar_preds shape: (B, T_diar, num_speakers)
 
-        # --- ASR encoder forward (with optional pre-encode diar fusion) ---
-        if self.use_pre_encode_diar_fusion and diar_preds is not None:
-            # Pre-encode fusion: run pre_encode ourselves, fuse speaker info,
-            # then feed to encoder with bypass_pre_encode=True.
-            # drop_extra=0 because there is no streaming cache in the
-            # non-streaming forward path (cache_last_channel is None).
-            with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
-                fused_pre_encode, pre_encode_lengths = self._apply_pre_encode_diar_fusion(
-                    processed_signal, processed_signal_length, diar_preds, drop_extra=0,
-                )
-                encoded, encoded_len = self.encoder(
-                    audio_signal=fused_pre_encode,
-                    length=pre_encode_lengths,
-                    bypass_pre_encode=True,
-                )
-        else:
-            with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
-                encoded, encoded_len = self.encoder(
-                    audio_signal=processed_signal, length=processed_signal_length
-                )
-        # encoded shape: (B, D, T)
-
-        # --- Post-encode diar fusion (always applied when diar is available) ---
-        if diar_preds is not None:
             encoded = self.fuse_diar_preds(encoded, diar_preds)
 
         return encoded, encoded_len

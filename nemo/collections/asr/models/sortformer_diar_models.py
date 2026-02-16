@@ -693,7 +693,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
             streaming_loader,
             total=num_chunks,
             desc="Streaming Steps",
-            disable=self.training,
+            disable=self.training or getattr(self, '_suppress_streaming_pbar', False),
         ):
             streaming_state, total_preds = self.forward_streaming_step(
                 processed_signal=chunk_feat_seq_t,

@@ -236,7 +236,22 @@ def get_samples_with_offset(audio_file: str, offset: float = 0.0, duration: floa
     return samples
 
 
-def sot_text_to_seglst(transcription: str, session_id: str) -> list:
+def get_audio_duration_sec(audio_file: str, offset: float = 0.0, duration: float = 0.0) -> float:
+    """
+    Return the effective duration (in seconds) of an audio segment.
+
+    If *duration* > 0 it is returned directly (manifest already specifies it).
+    Otherwise the file is inspected and the duration from *offset* to end is
+    returned.
+    """
+    if duration > 0:
+        return duration
+    with sf.SoundFile(audio_file, 'r') as f:
+        total_dur = f.frames / f.samplerate
+    return total_dur - offset
+
+
+def sot_text_to_seglst(transcription: str, session_id: str, session_duration_sec: float = -1.0) -> list:
     """
     Convert a SOT (Serialized Output Training) transcription string with
     speaker tokens into a list of SegLST-format dictionaries.
@@ -245,25 +260,33 @@ def sot_text_to_seglst(transcription: str, session_id: str) -> list:
     turns.  Each contiguous run of text after a speaker token becomes one
     SegLST entry attributed to that speaker.
 
-    Because SOT streaming does not produce word-level timestamps, start_time
-    and end_time are set to ``"-1"``.
+    When *session_duration_sec* > 0, start and end times are **estimated** by
+    distributing the session duration proportionally across segments based on
+    their character length.  SOT serialises turns roughly in chronological
+    order, so the proportional assignment gives a reasonable approximation
+    that is sufficient for evaluation metrics that tolerate moderate timing
+    errors (e.g. cpWER with a collar).  When *session_duration_sec* <= 0 the
+    timestamps fall back to ``-1``.
 
     Args:
         transcription: SOT transcription, e.g.
             ``"<|spltoken0|> right <|spltoken1|> and i got ..."``
         session_id: Session identifier for this audio file.
+        session_duration_sec: Total duration of the audio session in seconds.
+            Used to proportionally estimate segment timestamps.  Pass ``-1``
+            (default) to disable timestamp estimation.
 
     Returns:
         List[dict] with keys ``session_id``, ``words``, ``speaker``,
         ``start_time``, ``end_time``.
 
-    Example output::
+    Example output (with duration=10.0)::
 
         [
             {"session_id": "en_0638", "words": "right",
-             "speaker": "speaker_0", "start_time": "-1", "end_time": "-1"},
+             "speaker": "speaker_0", "start_time": 0.0, "end_time": 1.515},
             {"session_id": "en_0638", "words": "and i got another apartment",
-             "speaker": "speaker_1", "start_time": "-1", "end_time": "-1"},
+             "speaker": "speaker_1", "start_time": 1.515, "end_time": 9.697},
             ...
         ]
     """
@@ -289,10 +312,24 @@ def sot_text_to_seglst(transcription: str, session_id: str) -> list:
                         "session_id": session_id,
                         "words": text,
                         "speaker": f"speaker_{current_speaker}",
-                        "start_time": "-1",
-                        "end_time": "-1",
                     }
                 )
+
+    # ── Estimate proportional timestamps from character lengths ────────
+    total_chars = sum(len(entry["words"]) for entry in seglst_entries)
+    if session_duration_sec > 0 and total_chars > 0:
+        cursor = 0.0
+        for entry in seglst_entries:
+            proportion = len(entry["words"]) / total_chars
+            seg_dur = proportion * session_duration_sec
+            entry["start_time"] = round(cursor, 3)
+            entry["end_time"] = round(cursor + seg_dur, 3)
+            cursor += seg_dur
+    else:
+        for entry in seglst_entries:
+            entry["start_time"] = -1
+            entry["end_time"] = -1
+
     return seglst_entries
 
 
@@ -334,9 +371,12 @@ def perform_streaming(
     """
     batch_size = len(streaming_buffer.streams_length)
     use_diar = isinstance(asr_model, MSEncDecRNNTBPEModel) and getattr(asr_model, 'diar', False)
+    use_pre_encode_diar_fusion = use_diar and getattr(asr_model, 'use_pre_encode_diar_fusion', False)
 
     if use_diar:
         logging.info("Streaming with diarization fusion enabled (MSEncDecRNNTBPEModel.diar=True)")
+        if use_pre_encode_diar_fusion:
+            logging.info("Pre-encode diar fusion enabled (sinusoidal + merge)")
 
     if compare_vs_offline:
         # Pass the whole audio at once through the model like offline mode
@@ -390,8 +430,10 @@ def perform_streaming(
 
             # ── Diarization streaming step ─────────────────────────────
             diar_preds = None
+            chunk_diar_preds = None
             if use_diar:
                 with torch.no_grad():
+                    prev_diar_len = diar_pred_out_stream.shape[1]
                     diar_streaming_state, diar_pred_out_stream = (
                         asr_model.diarization_model.forward_streaming_step(
                             processed_signal=chunk_audio.transpose(1, 2),
@@ -401,32 +443,62 @@ def perform_streaming(
                             drop_extra_pre_encoded=drop_extra,
                         )
                     )
-                    # Use cumulative diar predictions for fusion
-                    diar_preds = diar_pred_out_stream
+                    # Per-chunk diar predictions (matches training flow)
+                    chunk_diar_preds = diar_pred_out_stream[:, prev_diar_len:, :]
 
             # ── ASR streaming step (with or without diar fusion) ───────
             with torch.no_grad():
                 if use_diar:
-                    (
-                        pred_out_stream,
-                        transcribed_texts,
-                        cache_last_channel,
-                        cache_last_time,
-                        cache_last_channel_len,
-                        previous_hypotheses,
-                    ) = asr_model.conformer_stream_step_with_diarization(
-                        processed_signal=chunk_audio,
-                        processed_signal_length=chunk_lengths,
-                        cache_last_channel=cache_last_channel,
-                        cache_last_time=cache_last_time,
-                        cache_last_channel_len=cache_last_channel_len,
-                        keep_all_outputs=streaming_buffer.is_buffer_empty(),
-                        previous_hypotheses=previous_hypotheses,
-                        previous_pred_out=pred_out_stream,
-                        drop_extra_pre_encoded=drop_extra,
-                        return_transcription=True,
-                        diar_preds=diar_preds,
-                    )
+                    if use_pre_encode_diar_fusion and chunk_diar_preds is not None:
+                        # Pre-encode level fusion: run ASR pre_encode,
+                        # fuse speaker info, then feed to encoder with
+                        # bypass_pre_encode=True — exactly matching the
+                        # training flow in forward_simulated_streaming().
+                        fused_pre_encode, fused_lengths = asr_model._apply_pre_encode_diar_fusion(
+                            chunk_audio, chunk_lengths, chunk_diar_preds, drop_extra,
+                        )
+                        (
+                            pred_out_stream,
+                            transcribed_texts,
+                            cache_last_channel,
+                            cache_last_time,
+                            cache_last_channel_len,
+                            previous_hypotheses,
+                        ) = asr_model.conformer_stream_step_with_diarization(
+                            processed_signal=fused_pre_encode,
+                            processed_signal_length=fused_lengths,
+                            cache_last_channel=cache_last_channel,
+                            cache_last_time=cache_last_time,
+                            cache_last_channel_len=cache_last_channel_len,
+                            keep_all_outputs=streaming_buffer.is_buffer_empty(),
+                            previous_hypotheses=previous_hypotheses,
+                            previous_pred_out=pred_out_stream,
+                            drop_extra_pre_encoded=0,
+                            return_transcription=True,
+                            bypass_pre_encode=True,
+                            diar_preds=chunk_diar_preds,
+                        )
+                    else:
+                        (
+                            pred_out_stream,
+                            transcribed_texts,
+                            cache_last_channel,
+                            cache_last_time,
+                            cache_last_channel_len,
+                            previous_hypotheses,
+                        ) = asr_model.conformer_stream_step_with_diarization(
+                            processed_signal=chunk_audio,
+                            processed_signal_length=chunk_lengths,
+                            cache_last_channel=cache_last_channel,
+                            cache_last_time=cache_last_time,
+                            cache_last_channel_len=cache_last_channel_len,
+                            keep_all_outputs=streaming_buffer.is_buffer_empty(),
+                            previous_hypotheses=previous_hypotheses,
+                            previous_pred_out=pred_out_stream,
+                            drop_extra_pre_encoded=drop_extra,
+                            return_transcription=True,
+                            diar_preds=chunk_diar_preds,
+                        )
                 else:
                     (
                         pred_out_stream,
@@ -643,8 +715,9 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
             )
             # Convert SOT transcription to SegLST
             session_id = os.path.splitext(os.path.basename(cfg.audio_file))[0]
+            audio_dur = get_audio_duration_sec(cfg.audio_file)
             for tran in streaming_tran:
-                all_seglst_entries.extend(sot_text_to_seglst(tran, session_id))
+                all_seglst_entries.extend(sot_text_to_seglst(tran, session_id, session_duration_sec=audio_dur))
 
             dataset_title = session_id
         else:
@@ -715,7 +788,12 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
                     batch_samples = samples[batch_start_idx : sample_idx + 1]
                     for tran, samp in zip(streaming_tran, batch_samples):
                         sid = get_session_id(samp)
-                        all_seglst_entries.extend(sot_text_to_seglst(tran, sid))
+                        audio_dur = get_audio_duration_sec(
+                            samp['audio_filepath'],
+                            offset=float(samp.get("offset", 0)),
+                            duration=float(samp.get("duration", 0)),
+                        )
+                        all_seglst_entries.extend(sot_text_to_seglst(tran, sid, session_duration_sec=audio_dur))
                     batch_start_idx = sample_idx + 1
 
                     streaming_buffer.reset_buffer()
