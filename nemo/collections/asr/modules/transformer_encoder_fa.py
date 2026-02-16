@@ -80,7 +80,7 @@ class MultiHeadAttentionWithFA(nn.Module):
         self.out_proj = nn.Linear(self.d_out, self.d_out)
 
 
-    def forward(self, x):
+    def forward(self, x, use_cache=False):
         
         B, num_tokens, d_in  = x.shape
         H = self.num_heads
@@ -190,7 +190,7 @@ class NGPTStackingSubsampling(torch.nn.Module):
         x = self.proj_out(x)
 
         return x, length
-class TransformerEncoder(nn.Module):
+class TransformerEncoderWithFA(nn.Module):
     def __init__(self, 
                 n_mels: int = 80,
                 d_model: int = 512,
