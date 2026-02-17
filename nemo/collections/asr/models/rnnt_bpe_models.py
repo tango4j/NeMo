@@ -791,8 +791,10 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         """
         diar_scfg = self.cfg.diar_streaming
         sm = self.diarization_model.sortformer_modules
-
-        self.diarization_model.streaming_mode = True
+        if self.cfg.get('simulate_streaming', False):
+            self.diarization_model.streaming_mode = True
+        else:
+            self.diarization_model.streaming_mode = False
 
         sm.spkcache_len = diar_scfg.get('spkcache_len', 210)
         sm.spkcache_refresh_rate = diar_scfg.get('spkcache_refresh_rate', 14)
