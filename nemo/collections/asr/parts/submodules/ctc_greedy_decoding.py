@@ -874,9 +874,10 @@ class GreedyBatchedCTCInfer(Typing, ConfidenceMethodMixin, WithOptionalCudaGraph
         ):
             self._before_loop()
 
-            capture_status, _, graph, _, _ = cu_call(
+            _capture_info = cu_call(
                 cudart.cudaStreamGetCaptureInfo(torch.cuda.current_stream(device=self.state.device).cuda_stream)
             )
+            capture_status, graph = _capture_info[0], _capture_info[2]
             assert capture_status == cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive
 
             # capture: while decoding_active:

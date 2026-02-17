@@ -1930,6 +1930,19 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
 
         return tensorboard_logs
 
+    def on_validation_epoch_start(self) -> None:
+        """Disable CUDA graphs for validation in MSEncDecRNNTBPEModel.
+        The parent class force-enables CUDA graphs here, but CUDA graph
+        capture is incompatible with the dynamic diarization fusion path.
+        """
+        self.disable_cuda_graphs()
+
+    def on_test_epoch_start(self) -> None:
+        """Disable CUDA graphs for testing in MSEncDecRNNTBPEModel.
+        Same reason as on_validation_epoch_start.
+        """
+        self.disable_cuda_graphs()
+
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         metrics = self.validation_pass(batch, batch_idx, dataloader_idx)
         if type(self.trainer.val_dataloaders) == list and len(self.trainer.val_dataloaders) > 1:

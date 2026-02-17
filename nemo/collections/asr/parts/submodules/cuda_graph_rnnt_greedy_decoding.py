@@ -205,9 +205,10 @@ class RNNTGreedyDecodeCudaGraph:
             # Get max sequence length
             self.max_out_len_t = self.encoder_output_length.max()
 
-            capture_status, _, graph, _, _ = cu_call(
+            _capture_info = cu_call(
                 cudart.cudaStreamGetCaptureInfo(torch.cuda.current_stream(device=self.device).cuda_stream)
             )
+            capture_status, graph = _capture_info[0], _capture_info[2]
             assert capture_status == cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive
 
             (for_loop_conditional_handle,) = cu_call(cudart.cudaGraphConditionalHandleCreate(graph, 0, 0))

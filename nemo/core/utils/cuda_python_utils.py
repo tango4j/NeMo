@@ -125,9 +125,10 @@ def with_conditional_node(while_loop_kernel, while_loop_args, while_loop_conditi
     from cuda.bindings import driver as cuda
     from cuda.bindings import runtime as cudart
 
-    capture_status, _, graph, _, _ = cu_call(
+    _capture_info = cu_call(
         cudart.cudaStreamGetCaptureInfo(torch.cuda.current_stream(device=device).cuda_stream)
     )
+    capture_status, graph = _capture_info[0], _capture_info[2]
     assert capture_status == cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive
 
     cuda.cuLaunchKernel(
@@ -144,9 +145,10 @@ def with_conditional_node(while_loop_kernel, while_loop_args, while_loop_conditi
         0,
     )
 
-    capture_status, _, graph, dependencies, _ = cu_call(
+    _capture_info = cu_call(
         cudart.cudaStreamGetCaptureInfo(torch.cuda.current_stream(device=device).cuda_stream)
     )
+    capture_status, graph, dependencies = _capture_info[0], _capture_info[2], _capture_info[3]
     assert capture_status == cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive
 
     driver_params = cuda.CUgraphNodeParams()
