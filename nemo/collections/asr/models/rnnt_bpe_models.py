@@ -661,7 +661,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             self._init_diar_model()
 
             if 'max_num_speakers' in cfg:
-                self.max_num_speakers = cfg.max_num_speakers
+                self.max_num_speakers = int(cfg.max_num_speakers)
             else:
                 self.max_num_speakers = 4
 
