@@ -20,7 +20,7 @@ from nemo.collections.asr.models.classification_models import (
     EncDecFrameClassificationModel,
 )
 from nemo.collections.asr.models.clustering_diarizer import ClusteringDiarizer
-from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
+from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE, MSEncDecCTCModelBPE
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models import EncDecHybridRNNTCTCBPEModel
 from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import EncDecHybridRNNTCTCBPEModelWithPrompt
@@ -66,6 +66,7 @@ __all__ = [
     'EncDecMultiTalkerRNNTBPEModel',
     'EncDecRNNTBPEModel',
     'EncDecRNNTModel',
+    'MSEncDecCTCModelBPE',
     'MSEncDecRNNTBPEModel',
     'EncDecSpeakerLabelModel',
     'EncDecTransfModelBPE',

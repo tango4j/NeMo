@@ -660,8 +660,8 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             # Initialize the Sortformer diarization model
             self._init_diar_model()
 
-            if 'max_num_speakers' in cfg:
-                self.max_num_speakers = cfg.max_num_speakers
+            if 'max_num_speakers' in cfg and cfg.max_num_speakers not in (None, ''):
+                self.max_num_speakers = int(cfg.max_num_speakers)
             else:
                 self.max_num_speakers = 4
 
@@ -715,9 +715,11 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                         torch.nn.Linear(metacat_proj_out_size * 2, metacat_proj_out_size),
                     )
                     self.diar_kernel = self.metacat_diar_joint_proj
-                else:
-                    self.diar_kernel_type = 'projection'
-                    self.diar_kernel = self.diar_joint_proj
+                elif cfg.diar_kernel_type == 'back_projection':
+                    self.diar_kernel_type = cfg.diar_kernel_type
+                    self.post_encode_diar_proj = torch.nn.Linear(
+                        self.max_num_speakers, cfg.model_defaults.enc_hidden
+                    )
             else:
                 self.diar_kernel_type = 'projection'
                 self.diar_kernel = self.diar_joint_proj
@@ -728,63 +730,23 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             if self.use_fc_layer_fusion:
                 self._setup_fc_layer_fusion()
 
-            # Pre-encode level diarization fusion: fuse speaker information
-            # into ASR pre-encode embeddings before feeding into encoder layers.
-            # Two methods: 'sinusoidal' (speaker position encoding weighted by
-            # diar predictions) or 'merge' (project + add diar pre-encode to
-            # ASR pre-encode).  The fused embeddings are fed to the encoder
-            # with bypass_pre_encode=True so speaker context propagates through
+            # Pre-encode level diarization fusion: project diar predictions
+            # (num_speakers -> d_asr) via a learned linear layer and add to
+            # ASR pre-encode embeddings before feeding into encoder layers.
+            # The fused embeddings are fed to the encoder with
+            # bypass_pre_encode=True so speaker context propagates through
             # all encoder layers and into the MHA cache for future steps.
             self.use_pre_encode_diar_fusion = cfg.get('use_pre_encode_diar_fusion', False)
             if self.use_pre_encode_diar_fusion:
-                self.pre_encode_fusion_type = cfg.get('pre_encode_fusion_type', 'sinusoidal')
                 self._setup_pre_encode_diar_fusion()
+                logging.info("[MSEncDecRNNTBPEModel] use_pre_encode_diar_fusion=True")
+            else:
+                logging.info("[MSEncDecRNNTBPEModel] use_pre_encode_diar_fusion=False")
 
         else:
             self.diar = False
             self.use_fc_layer_fusion = False
             self.use_pre_encode_diar_fusion = False
-
-    def _setup_dataloader_from_config(self, config: Optional[Dict]):
-        """
-        Override parent's dataloader setup to use the SOT dataset with
-        ground-truth RTTM speaker targets when lhotse is enabled.
-
-        Falls back to the parent implementation for non-lhotse configs.
-        """
-        if config.get("use_lhotse"):
-            from nemo.collections.asr.data.audio_to_sot_text_lhotse import (
-                LhotseSpeechToTextBpeDataset as LhotseSotDataset,
-            )
-
-            # Build a cfg dict with the parameters the SOT dataset needs.
-            # Note: this method may be called during super().__init__() before
-            # self.encoder exists, so we must not access self.encoder directly.
-            if hasattr(self, 'encoder') and self.encoder is not None:
-                subsampling_factor = getattr(self.encoder, 'subsampling_factor', 8)
-            else:
-                subsampling_factor = self.cfg.get('encoder', {}).get('subsampling_factor', 8)
-
-            dataset_cfg = {
-                'num_speakers': self.cfg.get('max_num_speakers', 4),
-                'sample_rate': self.cfg.get('sample_rate', 16000),
-                'window_stride': self.cfg.get('preprocessor', {}).get('window_stride', 0.01),
-                'subsampling_factor': subsampling_factor,
-            }
-
-            return get_lhotse_dataloader_from_config(
-                config,
-                global_rank=self.global_rank if not config.get("do_transcribe", False) else config.get("global_rank"),
-                world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
-                dataset=LhotseSotDataset(
-                    tokenizer=self.tokenizer,
-                    cfg=DictConfig(dataset_cfg),
-                    return_cuts=config.get("do_transcribe", False),
-                ),
-                tokenizer=self.tokenizer,
-            )
-
-        return super()._setup_dataloader_from_config(config)
 
     def _init_diar_model(self):
         """
@@ -832,9 +794,10 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         """
         diar_scfg = self.cfg.diar_streaming
         sm = self.diarization_model.sortformer_modules
-
-        use_simulated_streaming = self.cfg.get('simulate_streaming', False)
-        self.diarization_model.streaming_mode = use_simulated_streaming
+        if self.cfg.get('simulate_streaming', False):
+            self.diarization_model.streaming_mode = True
+        else:
+            self.diarization_model.streaming_mode = False
 
         sm.spkcache_len = diar_scfg.get('spkcache_len', 210)
         sm.spkcache_refresh_rate = diar_scfg.get('spkcache_refresh_rate', 14)
@@ -843,6 +806,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         sm.chunk_left_context = diar_scfg.get('chunk_left_context', 0)
         sm.chunk_right_context = diar_scfg.get('chunk_right_context', 0)
         sm.log = False
+        self.diarization_model._suppress_streaming_pbar = True
 
         logging.info(
             f"[diar_streaming] Configured Sortformer streaming params: "
@@ -861,16 +825,15 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         #    (streaming_cfg.last_channel_cache_size)
         diar_total_history = sm.spkcache_len + sm.fifo_len
         asr_left_context = scfg.last_channel_cache_size
-        if self.cfg.get('simulate_streaming', False):
-            if diar_total_history != asr_left_context:
-                raise ValueError(
-                    f"[diar_streaming] Diar/ASR left-context mismatch! "
-                    f"SPKCACHE_LEN({sm.spkcache_len}) + FIFO_LEN({sm.fifo_len}) "
-                    f"= {diar_total_history} != ASR streaming_cfg.last_channel_cache_size"
-                    f"({asr_left_context}).  These must be equal so that the "
-                    f"diarizer's total history window matches the ASR encoder's "
-                    f"left context."
-                )
+        if self.cfg.get('simulate_streaming', False) and diar_total_history != asr_left_context:
+            raise ValueError(
+                f"[diar_streaming] Diar/ASR left-context mismatch! "
+                f"SPKCACHE_LEN({sm.spkcache_len}) + FIFO_LEN({sm.fifo_len}) "
+                f"= {diar_total_history} != ASR streaming_cfg.last_channel_cache_size"
+                f"({asr_left_context}).  These must be equal so that the "
+                f"diarizer's total history window matches the ASR encoder's "
+                f"left context."
+            )
             logging.info(
                 f"[diar_streaming] Left-context sync OK: "
                 f"spkcache({sm.spkcache_len}) + fifo({sm.fifo_len}) "
@@ -1007,57 +970,26 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         """
         Set up pre-encode level diarization fusion modules.
 
-        Two methods are supported:
-
-        (1) 'sinusoidal': Sinusoidal speaker position encoding weighted by
-            diar predictions, added to ASR pre-encode embeddings.  This is the
-            same idea as the post-encode sinusoidal kernel but applied earlier,
-            giving every encoder layer access to speaker identity.
-
-        (2) 'merge': Project diar encoder's pre-encode embeddings to ASR
-            dimension and add to ASR pre-encode embeddings.  This directly
-            injects speaker-aware representations from the diar encoder into
-            the ASR encoder's input, letting self-attention in every encoder
-            layer consume speaker context.  As the fused pre-encode flows
-            through encoder layers, it becomes part of the MHA cache
-            (cache_last_channel), propagating speaker context to future steps.
+        Creates a learned linear projection (back-projection) that expands
+        diar predictions from (B, T, num_speakers) to (B, T, d_asr) and adds
+        them directly to ASR pre-encode embeddings.  This gives every encoder
+        layer access to speaker identity from the very first layer.
         """
         d_asr = self.encoder.d_model
 
-        if self.pre_encode_fusion_type == 'sinusoidal':
-            self.pre_encode_diar_kernel = self.get_sinusoid_position_encoding(
-                self.max_num_speakers, d_asr
-            )
-            logging.info(
-                f"[pre_encode_diar_fusion] Sinusoidal kernel setup: "
-                f"max_speakers={self.max_num_speakers}, d_asr={d_asr}"
-            )
+        self.pre_encode_diar_proj = torch.nn.Linear(self.max_num_speakers, d_asr)
+        logging.info(
+            f"[pre_encode_diar_fusion] Back-projection setup: "
+            f"num_speakers={self.max_num_speakers} -> d_asr={d_asr}"
+        )
 
-        elif self.pre_encode_fusion_type == 'merge':
-            d_diar = self.diarization_model.encoder.d_model
-            if d_diar != d_asr:
-                self.pre_encode_merge_proj = torch.nn.Linear(d_diar, d_asr)
-            else:
-                self.pre_encode_merge_proj = torch.nn.Identity()
-            logging.info(
-                f"[pre_encode_diar_fusion] Merge projection setup: "
-                f"d_diar={d_diar} -> d_asr={d_asr}, "
-                f"projection={'Linear' if d_diar != d_asr else 'Identity'}"
-            )
-
-        else:
-            raise ValueError(
-                f"Unknown pre_encode_fusion_type: '{self.pre_encode_fusion_type}'. "
-                f"Expected 'sinusoidal' or 'merge'."
-            )
-
-    def _apply_pre_encode_diar_fusion(self, audio_chunk, chunk_lengths, chunk_diar_preds, drop_extra, gt_diar_preds=None):
+    def _apply_pre_encode_diar_fusion(self, audio_chunk, chunk_lengths, chunk_diar_preds, drop_extra):
         """
         Fuse diarization information at the pre-encode embedding level.
 
-        Runs the ASR encoder's ``pre_encode`` on the audio chunk, applies the
-        selected diar fusion method, and returns fused embeddings ready for
-        ``cache_aware_stream_step(bypass_pre_encode=True)``.
+        Runs the ASR encoder's ``pre_encode`` on the audio chunk, then adds
+        a learned back-projection of diar predictions (num_speakers -> d_asr)
+        directly to the ASR pre-encode embeddings.
 
         Args:
             audio_chunk: (B, D_mel, T) mel features with pre-encode cache prepended.
@@ -1066,10 +998,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 this chunk (already detached from diar model graph).
             drop_extra: int, number of extra pre-encoded frames to drop
                 (same as streaming_cfg.drop_extra_pre_encoded for non-first steps).
-            gt_diar_preds: (B, T_chunk, num_speakers) ground-truth speaker
-                targets from RTTM, or None.  When provided (training), used
-                directly.  When None (inference), model predictions are
-                binarized to match the 0/1 training condition.
 
         Returns:
             fused_pre_encode: (B, T_valid, d_asr) fused pre-encode embeddings.
@@ -1087,53 +1015,16 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             asr_pre_encode = asr_pre_encode[:, drop_extra:, :]
             pre_encode_lengths = (pre_encode_lengths - drop_extra).clamp(min=0)
 
-        # ── Resolve diar preds: GT (training) or binarized model (inference)
-        if gt_diar_preds is not None:
-            dp = gt_diar_preds
-        else:
-            dp = (chunk_diar_preds > 0.5).float()
-
-        # Align diar preds to pre-encode time dimension
+        # ── Back-project diar preds and add to ASR pre-encode ─────────
+        dp = chunk_diar_preds
         if dp.shape[1] != asr_pre_encode.shape[1]:
             if dp.shape[1] < asr_pre_encode.shape[1]:
                 dp = self.fix_diar_output(dp, asr_pre_encode.shape[1])
             else:
                 dp = dp[:, :asr_pre_encode.shape[1], :]
 
-        # ── Apply fusion ───────────────────────────────────────────────
-        if self.pre_encode_fusion_type == 'sinusoidal':
-            speaker_emb = torch.matmul(
-                dp, self.pre_encode_diar_kernel.to(dp.device)
-            )
-            if self.kernel_norm == 'l2':
-                speaker_emb = torch.nn.functional.normalize(speaker_emb, p=2, dim=-1)
-
-            fused_pre_encode = asr_pre_encode + speaker_emb
-
-        elif self.pre_encode_fusion_type == 'merge':
-            # Diar pre-encode (frozen, no gradient)
-            with torch.no_grad():
-                diar_pre_encode, _ = self.diarization_model.encoder.pre_encode(
-                    x=audio_signal_t, lengths=chunk_lengths
-                )
-                if drop_extra > 0:
-                    diar_pre_encode = diar_pre_encode[:, drop_extra:, :]
-                diar_pre_encode = diar_pre_encode.detach()
-
-            # Project diar d_model -> ASR d_model (learnable)
-            projected_diar = self.pre_encode_merge_proj(diar_pre_encode)
-
-            # Align time dimensions if subsampling differs
-            T_asr = asr_pre_encode.shape[1]
-            T_diar = projected_diar.shape[1]
-            if T_asr != T_diar:
-                min_len = min(T_asr, T_diar)
-                asr_pre_encode = asr_pre_encode[:, :min_len, :]
-                projected_diar = projected_diar[:, :min_len, :]
-                pre_encode_lengths = pre_encode_lengths.clamp(max=min_len)
-
-            fused_pre_encode = asr_pre_encode + projected_diar
-
+        speaker_emb = self.pre_encode_diar_proj(dp)  # (B, T, num_speakers) -> (B, T, d_asr)
+        fused_pre_encode = asr_pre_encode + speaker_emb
         return fused_pre_encode, pre_encode_lengths
 
     def _init_asr_model(self):
@@ -1236,49 +1127,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         )
         return preds
 
-    def compute_diar_f1(self, signal, signal_len, gt_diar_preds, gt_diar_len=None):
-        """
-        Compute frame-level diarization F1, precision, and recall by comparing
-        the diar model's binarized sigmoid output against ground-truth RTTM
-        targets.
-
-        Args:
-            signal: [B, T] raw audio signal.
-            signal_len: [B] audio lengths.
-            gt_diar_preds: [B, T_gt, num_speakers] binary GT speaker targets.
-            gt_diar_len: [B] valid frame counts for GT targets, or None.
-
-        Returns:
-            dict with keys 'f1', 'precision', 'recall' (Python floats).
-        """
-        with torch.no_grad():
-            diar_preds = self.forward_diar(signal, signal_len)
-            diar_binary = (diar_preds > 0.5).float()
-
-            # Align time dimension
-            T_pred = diar_binary.shape[1]
-            T_gt = gt_diar_preds.shape[1]
-            T_min = min(T_pred, T_gt)
-            diar_binary = diar_binary[:, :T_min, :]
-            gt_aligned = gt_diar_preds[:, :T_min, :].float()
-
-            # Mask padded frames
-            if gt_diar_len is not None:
-                frame_idx = torch.arange(T_min, device=diar_binary.device).unsqueeze(0)
-                valid_mask = (frame_idx < gt_diar_len.unsqueeze(1)).unsqueeze(-1)
-                diar_binary = diar_binary * valid_mask
-                gt_aligned = gt_aligned * valid_mask
-
-            tp = (diar_binary * gt_aligned).sum()
-            fp = (diar_binary * (1 - gt_aligned)).sum()
-            fn = ((1 - diar_binary) * gt_aligned).sum()
-
-        return {
-            'f1': (2 * tp / (2 * tp + fp + fn + 1e-8)).item(),
-            'precision': (tp / (tp + fp + 1e-8)).item(),
-            'recall': (tp / (tp + fn + 1e-8)).item(),
-        }
-
     def fix_diar_output(self, diar_pred, asr_frame_count):
         """
         Extend diarization predictions to match the ASR encoder frame count
@@ -1318,7 +1166,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         position_encoding_tensor = torch.tensor(position_encoding, dtype=torch.float32)
         return position_encoding_tensor
 
-    def fuse_diar_preds(self, encoded, diar_preds, gt_diar_preds=None):
+    def fuse_diar_preds(self, encoded, diar_preds):
         """
         Fuse diarization predictions with ASR encoder states.
 
@@ -1333,22 +1181,12 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         Args:
             encoded: [B, D, T] encoder output
             diar_preds: [B, T_diar, num_speakers] frame-level speaker predictions
-            gt_diar_preds: [B, T_gt, num_speakers] ground-truth speaker
-                targets from RTTM, or None.  When provided (training), used
-                directly.  When None (inference), model predictions are
-                binarized to match the 0/1 training condition.
 
         Returns:
             encoded: [B, D, T] fused encoder output
         """
         # Convert encoder output from (B, D, T) to (B, T, D) for fusion
         asr_enc_states = encoded.permute(0, 2, 1)  # (B, T, D)
-
-        # ── Resolve diar preds: GT (training) or binarized model (inference)
-        if gt_diar_preds is not None:
-            diar_preds = gt_diar_preds
-        else:
-            diar_preds = (diar_preds > 0.5).float()
 
         # Fix frame count mismatch between diar and ASR encoder
         if diar_preds.shape[1] != asr_enc_states.shape[1]:
@@ -1366,7 +1204,11 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             asr_enc_states = torch.nn.functional.normalize(asr_enc_states, p=2, dim=-1)
 
         # Fuse diarization predictions with ASR encoder states
-        if self.diar_kernel_type == 'sinusoidal':
+        if self.diar_kernel_type == 'back_projection':
+            speaker_infusion_asr = self.post_encode_diar_proj(diar_preds)
+            enc_states = asr_enc_states + speaker_infusion_asr
+
+        elif self.diar_kernel_type == 'sinusoidal':
             speaker_infusion_asr = torch.matmul(
                 diar_preds, self.diar_kernel.to(diar_preds.device)
             )
@@ -1485,7 +1327,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         input_signal_length=None,
         processed_signal=None,
         processed_signal_length=None,
-        gt_diar_preds=None,
     ):
         """
         Simulated-streaming forward pass for training.
@@ -1507,9 +1348,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             input_signal_length:  Vector [B] of audio lengths.
             processed_signal:  Tensor [B, D, T] of preprocessed audio features.
             processed_signal_length:  Vector [B] of processed audio lengths.
-            gt_diar_preds: Tensor [B, T_target, num_speakers] ground-truth
-                speaker targets from RTTM, or None.  When provided (training),
-                each chunk's GT slice is used instead of model diar predictions.
 
         Returns:
             encoded:     Tensor [B, D, T_total] fused encoder output.
@@ -1645,14 +1483,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                     # alignment with this chunk's encoder output
                     chunk_diar_preds = diar_pred_out_stream[:, prev_diar_len:, :].detach()
 
-                # Slice GT diar preds for this chunk using the same frame offsets
-                chunk_gt_diar = None
-                if gt_diar_preds is not None:
-                    new_diar_len = diar_pred_out_stream.shape[1]
-                    gt_end = min(new_diar_len, gt_diar_preds.shape[1])
-                    gt_start = min(prev_diar_len, gt_end)
-                    chunk_gt_diar = gt_diar_preds[:, gt_start:gt_end, :]
-
                 # Stop capturing and disable flag
                 if self.use_fc_layer_fusion:
                     self._capture_diar_layers = False
@@ -1672,7 +1502,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
                     fused_pre_encode, fused_lengths = self._apply_pre_encode_diar_fusion(
                         audio_chunk, chunk_lengths, chunk_diar_preds, drop_extra,
-                        gt_diar_preds=chunk_gt_diar,
                     )
                     (
                         encoded,
@@ -1711,7 +1540,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             # Sinusoidal/projection/metacat fusion on encoder output,
             # kept alongside pre-encode fusion per user requirement.
             if self.diar and chunk_diar_preds is not None:
-                encoded = self.fuse_diar_preds(encoded, chunk_diar_preds, gt_diar_preds=chunk_gt_diar)
+                encoded = self.fuse_diar_preds(encoded, chunk_diar_preds)
 
             # ── Collect this chunk's output ─────────────────────────────
             all_encoded.append(encoded)
@@ -1740,7 +1569,6 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             return self.forward(
                 processed_signal=processed_signal,
                 processed_signal_length=processed_signal_length,
-                gt_diar_preds=gt_diar_preds,
             )
 
         encoded = torch.cat(all_encoded, dim=-1)  # [B, D, T_total]
@@ -1748,13 +1576,13 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
 
         return encoded, encoded_len
 
+    @typecheck()
     def forward(
         self,
         input_signal=None,
         input_signal_length=None,
         processed_signal=None,
         processed_signal_length=None,
-        gt_diar_preds=None,
     ):
         """
         Forward pass of the model. For RNNT models, forward() only performs the
@@ -1767,16 +1595,13 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             input_signal_length: Vector [B] of audio lengths.
             processed_signal: Tensor [B, D, T] of preprocessed audio (e.g. from DALI).
             processed_signal_length: Vector [B] of processed audio lengths.
-            gt_diar_preds: Tensor [B, T_target, num_speakers] ground-truth
-                speaker targets from RTTM, or None.  When provided (training),
-                used in place of model diar predictions.
 
         Returns:
             A tuple of 2 elements:
             1) encoded: Tensor [B, D, T] encoder output (with diarization fused if enabled).
             2) encoded_len: Tensor [B] lengths after encoder.
         """
-        # --- ASR encoder forward ---
+        # --- Preprocessing ---
         has_input_signal = input_signal is not None and input_signal_length is not None
         has_processed_signal = processed_signal is not None and processed_signal_length is not None
         if (has_input_signal ^ has_processed_signal) is False:
@@ -1796,19 +1621,38 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 input_spec=processed_signal, length=processed_signal_length
             )
 
-        with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
-            encoded, encoded_len = self.encoder(
-                audio_signal=processed_signal, length=processed_signal_length
-            )
-        # encoded shape: (B, D, T)
-
+        # --- Diarization forward (needed before encoder for pre-encode fusion) ---
+        diar_preds = None
         if self.diar and input_signal is not None:
-            # --- Diarization forward + fusion ---
             with torch.set_grad_enabled(not self.cfg.get('freeze_diar', False)):
                 diar_preds = self.forward_diar(input_signal, input_signal_length)
                 # diar_preds shape: (B, T_diar, num_speakers)
 
-            encoded = self.fuse_diar_preds(encoded, diar_preds, gt_diar_preds=gt_diar_preds)
+        # --- ASR encoder forward (with optional pre-encode diar fusion) ---
+        if self.use_pre_encode_diar_fusion and diar_preds is not None:
+            # Pre-encode fusion: run pre_encode ourselves, fuse speaker info,
+            # then feed to encoder with bypass_pre_encode=True.
+            # drop_extra=0 because there is no streaming cache in the
+            # non-streaming forward path (cache_last_channel is None).
+            with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
+                fused_pre_encode, pre_encode_lengths = self._apply_pre_encode_diar_fusion(
+                    processed_signal, processed_signal_length, diar_preds, drop_extra=0,
+                )
+                encoded, encoded_len = self.encoder(
+                    audio_signal=fused_pre_encode,
+                    length=pre_encode_lengths,
+                    bypass_pre_encode=True,
+                )
+        else:
+            with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
+                encoded, encoded_len = self.encoder(
+                    audio_signal=processed_signal, length=processed_signal_length
+                )
+        # encoded shape: (B, D, T)
+
+        # --- Post-encode diar fusion (always applied when diar is available) ---
+        if diar_preds is not None:
+            encoded = self.fuse_diar_preds(encoded, diar_preds)
 
         return encoded, encoded_len
 
@@ -1818,15 +1662,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
 
-        # Unpack batch: 4-element (legacy) or 6-element (with GT diar targets)
-        if isinstance(batch, DALIOutputs):
-            signal, signal_len, transcript, transcript_len = batch
-            gt_diar_preds = None
-        elif len(batch) == 6:
-            signal, signal_len, transcript, transcript_len, gt_diar_preds, gt_diar_len = batch
-        else:
-            signal, signal_len, transcript, transcript_len = batch
-            gt_diar_preds = None
+        signal, signal_len, transcript, transcript_len = batch
 
         # Choose between standard full-audio forward and simulated-streaming forward.
         # simulate_streaming=True trains the encoder+RNNT with the same chunk-by-chunk
@@ -1838,25 +1674,17 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
                 encoded, encoded_len = self.forward_simulated_streaming(
                     processed_signal=signal, processed_signal_length=signal_len,
-                    gt_diar_preds=gt_diar_preds,
                 )
             else:
                 encoded, encoded_len = self.forward_simulated_streaming(
                     input_signal=signal, input_signal_length=signal_len,
-                    gt_diar_preds=gt_diar_preds,
                 )
         else:
             # forward() only performs encoder forward (with diarization fusion if enabled)
             if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-                encoded, encoded_len = self.forward(
-                    processed_signal=signal, processed_signal_length=signal_len,
-                    gt_diar_preds=gt_diar_preds,
-                )
+                encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len)
             else:
-                encoded, encoded_len = self.forward(
-                    input_signal=signal, input_signal_length=signal_len,
-                    gt_diar_preds=gt_diar_preds,
-                )
+                encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len)
         del signal
 
         # During training, loss must be computed, so decoder forward is necessary
@@ -1961,62 +1789,29 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         return {'loss': loss_value}
 
     def validation_pass(self, batch, batch_idx, dataloader_idx=0):
-        # Unpack batch: 4-element (legacy) or 6-element (with GT diar targets)
-        if isinstance(batch, DALIOutputs):
-            signal, signal_len, transcript, transcript_len = batch
-            gt_diar_preds = None
-        elif len(batch) == 6:
-            signal, signal_len, transcript, transcript_len, gt_diar_preds, gt_diar_len = batch
-        else:
-            signal, signal_len, transcript, transcript_len = batch
-            gt_diar_preds = None
+        signal, signal_len, transcript, transcript_len = batch
 
-        # Optionally use GT diar preds during validation (matches training condition).
-        # When disabled (default), validation uses the diar model's own predictions
-        # (binarized) so that metrics reflect real inference conditions.
-        use_gt_diar_for_val = self.cfg.get('use_gt_diar_for_validation', True)
-        val_gt = gt_diar_preds if (use_gt_diar_for_val and gt_diar_preds is not None) else None
-
+        # Use the same forward path as training so val metrics reflect
+        # actual streaming performance (not inflated full-context scores).
         use_simulated_streaming = self.cfg.get('simulate_streaming', False)
 
         if use_simulated_streaming:
             if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
                 encoded, encoded_len = self.forward_simulated_streaming(
                     processed_signal=signal, processed_signal_length=signal_len,
-                    gt_diar_preds=val_gt,
                 )
             else:
                 encoded, encoded_len = self.forward_simulated_streaming(
                     input_signal=signal, input_signal_length=signal_len,
-                    gt_diar_preds=val_gt,
                 )
         else:
             if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-                encoded, encoded_len = self.forward(
-                    processed_signal=signal, processed_signal_length=signal_len,
-                    gt_diar_preds=val_gt,
-                )
+                encoded, encoded_len = self.forward(processed_signal=signal, processed_signal_length=signal_len)
             else:
-                encoded, encoded_len = self.forward(
-                    input_signal=signal, input_signal_length=signal_len,
-                    gt_diar_preds=val_gt,
-                )
+                encoded, encoded_len = self.forward(input_signal=signal, input_signal_length=signal_len)
+        del signal
 
         tensorboard_logs = {}
-
-        # ── Diarization F1: compare model diar preds against GT ───────
-        if self.diar and gt_diar_preds is not None and signal is not None:
-            diar_metrics = self.compute_diar_f1(signal, signal_len, gt_diar_preds, gt_diar_len)
-            tensorboard_logs['val_diar_f1'] = diar_metrics['f1']
-            tensorboard_logs['val_diar_precision'] = diar_metrics['precision']
-            tensorboard_logs['val_diar_recall'] = diar_metrics['recall']
-            if batch_idx == 0:
-                logging.info(
-                    f"[ VALIDATION STEP ]    Diar F1={diar_metrics['f1']:.4f} "
-                    f"(P={diar_metrics['precision']:.4f}, R={diar_metrics['recall']:.4f})"
-                )
-
-        del signal
 
         # If experimental fused Joint-Loss-WER is not used
         if not self.joint.fuse_loss_wer:
@@ -2093,6 +1888,19 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         self.log('global_step', torch.tensor(self.trainer.global_step, dtype=torch.float32))
 
         return tensorboard_logs
+
+    def on_validation_epoch_start(self) -> None:
+        """Disable CUDA graphs for validation in MSEncDecRNNTBPEModel.
+        The parent class force-enables CUDA graphs here, but CUDA graph
+        capture is incompatible with the dynamic diarization fusion path.
+        """
+        self.disable_cuda_graphs()
+
+    def on_test_epoch_start(self) -> None:
+        """Disable CUDA graphs for testing in MSEncDecRNNTBPEModel.
+        Same reason as on_validation_epoch_start.
+        """
+        self.disable_cuda_graphs()
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         metrics = self.validation_pass(batch, batch_idx, dataloader_idx)

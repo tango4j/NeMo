@@ -364,7 +364,7 @@ def perform_streaming(
 
     logging.info("Streaming with diarization fusion enabled")
     if use_pre_encode_diar_fusion:
-        logging.info("Pre-encode diar fusion enabled (back-projection)")
+        logging.info("Pre-encode diar fusion enabled (sinusoidal + merge)")
 
     cache_last_channel, cache_last_time, cache_last_channel_len = asr_model.encoder.get_initial_cache_state(
         batch_size=batch_size
