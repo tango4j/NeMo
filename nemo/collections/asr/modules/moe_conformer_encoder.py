@@ -337,12 +337,14 @@ class MoEConformerEncoder(ConformerEncoder):
             moe_ff_names.add('feed_forward2')
 
         # Pattern: prefix + layers.{layer_idx}.{ff_name}.{param_suffix}
-        # where {ff_name} is in moe_ff_names and there is no "experts." in the key
+        # where {ff_name} is in moe_ff_names and the param_suffix does NOT start
+        # with "experts." or "router." (those are MoE-specific submodules that
+        # already have the correct keys in a MoE checkpoint).
         # We remap to: prefix + layers.{layer_idx}.{ff_name}.experts.{j}.{param_suffix}
         pattern = re.compile(
             r'^(' + re.escape(prefix) + r'layers\.(\d+)\.(' +
             '|'.join(re.escape(n) for n in moe_ff_names) +
-            r'))\.((?!experts\.).+)$'
+            r'))\.((?!experts\.|router\.).+)$'
         )
 
         keys_to_add = {}
