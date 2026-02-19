@@ -131,6 +131,7 @@ class TranscriptionConfig:
     manifest_file: Optional[str] = None  # Path to dataset's JSON manifest
     output_path: Optional[str] = None  # Path to output file when manifest is used as input
     output_seglst_file: Optional[str] = None  # Directory for SegLST output; auto-named <manifest>_sot_mtasr.seglst.json
+    add_timestamps_to_uniq_ids: bool = False  # Append _<offset*100>_<duration*100> to session IDs
 
     # ── General configs ────────────────────────────────────────────────
     session_len_sec: float = -1  # End-to-end diarization session length in seconds
@@ -168,6 +169,7 @@ class TranscriptionConfig:
         "float32"  # "float32" (default), "bfloat16" or "float16"; if None: bfloat16 if available else float32
     )
     matmul_precision: str = "highest"  # Literal["highest", "high", "medium"]
+    strict_restore: bool = True  # If False, ignore unexpected keys in state_dict when restoring .nemo
 
     # ── Decoding configs ───────────────────────────────────────────────
     ctc_decoding: CTCDecodingConfig = field(default_factory=CTCDecodingConfig)
@@ -327,6 +329,34 @@ def sot_text_to_seglst(transcription: str, session_id: str, session_duration_sec
     return seglst_entries
 
 
+def merge_same_speaker_segments(seglst_list: list) -> list:
+    """Merge consecutive segments from the same speaker within each session.
+
+    Word-level SOT output produces one entry per word.  This function groups
+    neighbouring entries that share the same ``session_id`` and ``speaker``
+    into a single entry whose ``words`` are space-joined and whose timestamps
+    span from the first word's ``start_time`` to the last word's ``end_time``.
+    """
+    if not seglst_list:
+        return seglst_list
+
+    merged: list = []
+    current = dict(seglst_list[0])
+
+    for entry in seglst_list[1:]:
+        same_session = entry["session_id"] == current["session_id"]
+        same_speaker = entry["speaker"] == current["speaker"]
+        if same_session and same_speaker:
+            current["words"] += " " + entry["words"]
+            current["end_time"] = entry["end_time"]
+        else:
+            merged.append(current)
+            current = dict(entry)
+
+    merged.append(current)
+    return merged
+
+
 def write_seglst_file(seglst_list: list, output_path: str):
     """Write a list of SegLST dicts to a JSON file."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -335,12 +365,24 @@ def write_seglst_file(seglst_list: list, output_path: str):
     logging.info(f"Wrote SegLST file with {len(seglst_list)} entries to {output_path}")
 
 
-def get_session_id(sample: dict) -> str:
-    """Derive a session_id from a manifest sample."""
+def get_session_id(sample: dict, add_timestamps: bool = False) -> str:
+    """Derive a session_id from a manifest sample.
+
+    When *add_timestamps* is True, offset and duration from the sample are
+    encoded as ``_<int(offset*100)>_<int(duration*100)>`` and appended to
+    the base name (e.g. ``en_0638`` → ``en_0638_68_1135``).
+    """
     if "session_id" in sample:
-        return sample["session_id"]
-    # Fall back to audio filename stem
-    return os.path.splitext(os.path.basename(sample["audio_filepath"]))[0]
+        base = sample["session_id"]
+    else:
+        base = os.path.splitext(os.path.basename(sample["audio_filepath"]))[0]
+
+    if add_timestamps:
+        offset = float(sample.get("offset", 0))
+        duration = float(sample.get("duration", 0))
+        base = f"{base}_{int(offset * 100)}_{int(duration * 100)}"
+
+    return base
 
 
 def perform_streaming(
@@ -460,7 +502,7 @@ def perform_streaming(
             logging.info(f"Streaming transcriptions: {extract_transcriptions(transcribed_texts)}")
 
     final_streaming_tran = extract_transcriptions(transcribed_texts)
-    logging.info(f"Final streaming transcriptions: {final_streaming_tran}")
+    logging.info(f"Final streaming transcriptions: {final_streaming_tran[0]}")
 
     return final_streaming_tran
 
@@ -702,7 +744,7 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
                     # Convert each session's SOT transcription to SegLST
                     batch_samples = samples[batch_start_idx : sample_idx + 1]
                     for tran, samp in zip(streaming_tran, batch_samples):
-                        sid = get_session_id(samp)
+                        sid = get_session_id(samp, add_timestamps=cfg.add_timestamps_to_uniq_ids)
                         audio_dur = get_audio_duration_sec(
                             samp['audio_filepath'],
                             offset=float(samp.get("offset", 0)),
@@ -734,6 +776,10 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
                         "wer": round(word_error_rate(hypotheses=[hyp], references=[all_refs_text[i]]) * 100, 2),
                     }
                     out_f.write(json.dumps(record) + '\n')
+
+    # ── Merge consecutive same-speaker segments ─────────────────────────
+    if all_seglst_entries:
+        all_seglst_entries = merge_same_speaker_segments(all_seglst_entries)
 
     # ── Write SegLST output file ───────────────────────────────────────
     if all_seglst_entries:

@@ -359,6 +359,7 @@ def setup_model(cfg: DictConfig, map_location: torch.device) -> Tuple[ASRModel, 
             asr_model = imported_class.restore_from(
                 restore_path=cfg.model_path,
                 map_location=map_location,
+                strict=cfg.get('strict_restore', True),
             )  # type: ASRModel
     else:
         # restore model by name

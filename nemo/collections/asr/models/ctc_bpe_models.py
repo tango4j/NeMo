@@ -779,6 +779,44 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
             self.use_fc_layer_fusion = False
             self.use_pre_encode_diar_fusion = False
 
+    def _setup_dataloader_from_config(self, config: Optional[Dict]):
+        """
+        Override parent's dataloader setup to use the SOT dataset with
+        ground-truth RTTM speaker targets when lhotse is enabled.
+
+        Falls back to the parent implementation for non-lhotse configs.
+        """
+        if config.get("use_lhotse"):
+            from nemo.collections.asr.data.audio_to_sot_text_lhotse import (
+                LhotseSpeechToTextBpeDataset as LhotseSotDataset,
+            )
+
+            if hasattr(self, 'encoder') and self.encoder is not None:
+                subsampling_factor = getattr(self.encoder, 'subsampling_factor', 8)
+            else:
+                subsampling_factor = self.cfg.get('encoder', {}).get('subsampling_factor', 8)
+
+            dataset_cfg = {
+                'num_speakers': self.cfg.get('max_num_speakers', 4),
+                'sample_rate': self.cfg.get('sample_rate', 16000),
+                'window_stride': self.cfg.get('preprocessor', {}).get('window_stride', 0.01),
+                'subsampling_factor': subsampling_factor,
+            }
+
+            return get_lhotse_dataloader_from_config(
+                config,
+                global_rank=self.global_rank if not config.get("do_transcribe", False) else config.get("global_rank"),
+                world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
+                dataset=LhotseSotDataset(
+                    tokenizer=self.tokenizer,
+                    cfg=DictConfig(dataset_cfg),
+                    return_cuts=config.get("do_transcribe", False),
+                ),
+                tokenizer=self.tokenizer,
+            )
+
+        return super()._setup_dataloader_from_config(config)
+
     # ── Diarization model initialization ───────────────────────────────
 
     def _init_diar_model(self):
@@ -846,15 +884,16 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
 
         diar_total_history = sm.spkcache_len + sm.fifo_len
         asr_left_context = scfg.last_channel_cache_size
-        if self.cfg.get('simulate_streaming', False) and diar_total_history != asr_left_context:
-            raise ValueError(
-                f"[diar_streaming] Diar/ASR left-context mismatch! "
-                f"SPKCACHE_LEN({sm.spkcache_len}) + FIFO_LEN({sm.fifo_len}) "
-                f"= {diar_total_history} != ASR streaming_cfg.last_channel_cache_size"
-                f"({asr_left_context}).  These must be equal so that the "
-                f"diarizer's total history window matches the ASR encoder's "
-                f"left context."
-            )
+        if self.cfg.get('simulate_streaming', False):
+            if diar_total_history != asr_left_context:
+                raise ValueError(
+                    f"[diar_streaming] Diar/ASR left-context mismatch! "
+                    f"SPKCACHE_LEN({sm.spkcache_len}) + FIFO_LEN({sm.fifo_len}) "
+                    f"= {diar_total_history} != ASR streaming_cfg.last_channel_cache_size"
+                    f"({asr_left_context}).  These must be equal so that the "
+                    f"diarizer's total history window matches the ASR encoder's "
+                    f"left context."
+                )
             logging.info(
                 f"[diar_streaming] Left-context sync OK: "
                 f"spkcache({sm.spkcache_len}) + fifo({sm.fifo_len}) "
@@ -996,7 +1035,7 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
             f"projection={'Linear' if d_diar != d_asr else 'Identity'}"
         )
 
-    def _apply_pre_encode_diar_fusion(self, audio_chunk, chunk_lengths, chunk_diar_preds, drop_extra):
+    def _apply_pre_encode_diar_fusion(self, audio_chunk, chunk_lengths, chunk_diar_preds, drop_extra, gt_diar_preds=None):
         """
         Fuse diarization information at the pre-encode embedding level.
 
@@ -1005,6 +1044,10 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
             chunk_lengths: (B,) per-sample lengths in mel frames.
             chunk_diar_preds: (B, T_chunk, num_speakers) diar predictions.
             drop_extra: int, number of extra pre-encoded frames to drop.
+            gt_diar_preds: (B, T_chunk, num_speakers) ground-truth speaker
+                targets from RTTM, or None.  When provided (training), used
+                directly.  When None (inference), model predictions are
+                binarized to match the 0/1 training condition.
 
         Returns:
             fused_pre_encode: (B, T_valid, d_asr) fused pre-encode embeddings.
@@ -1022,8 +1065,11 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
             asr_pre_encode = asr_pre_encode[:, drop_extra:, :]
             pre_encode_lengths = (pre_encode_lengths - drop_extra).clamp(min=0)
 
-        # (1) Sinusoidal speaker embedding
-        dp = chunk_diar_preds
+        # Resolve diar preds: GT (training) or binarized model (inference)
+        if gt_diar_preds is not None:
+            dp = gt_diar_preds
+        else:
+            dp = (chunk_diar_preds > 0.5).float()
         if dp.shape[1] != asr_pre_encode.shape[1]:
             if dp.shape[1] < asr_pre_encode.shape[1]:
                 dp = self.fix_diar_output(dp, asr_pre_encode.shape[1])
@@ -1193,19 +1239,70 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
         position_encoding_tensor = torch.tensor(position_encoding, dtype=torch.float32)
         return position_encoding_tensor
 
-    def fuse_diar_preds(self, encoded, diar_preds):
+    def compute_diar_f1(self, signal, signal_len, gt_diar_preds, gt_diar_len=None):
+        """
+        Compute frame-level diarization F1, precision, and recall by comparing
+        the diar model's binarized sigmoid output against ground-truth RTTM
+        targets.
+
+        Args:
+            signal: [B, T] raw audio signal.
+            signal_len: [B] audio lengths.
+            gt_diar_preds: [B, T_gt, num_speakers] binary GT speaker targets.
+            gt_diar_len: [B] valid frame counts for GT targets, or None.
+
+        Returns:
+            dict with keys 'f1', 'precision', 'recall' (Python floats).
+        """
+        with torch.no_grad():
+            diar_preds = self.forward_diar(signal, signal_len)
+            diar_binary = (diar_preds > 0.5).float()
+
+            T_pred = diar_binary.shape[1]
+            T_gt = gt_diar_preds.shape[1]
+            T_min = min(T_pred, T_gt)
+            diar_binary = diar_binary[:, :T_min, :]
+            gt_aligned = gt_diar_preds[:, :T_min, :].float()
+
+            if gt_diar_len is not None:
+                frame_idx = torch.arange(T_min, device=diar_binary.device).unsqueeze(0)
+                valid_mask = (frame_idx < gt_diar_len.unsqueeze(1)).unsqueeze(-1)
+                diar_binary = diar_binary * valid_mask
+                gt_aligned = gt_aligned * valid_mask
+
+            tp = (diar_binary * gt_aligned).sum()
+            fp = (diar_binary * (1 - gt_aligned)).sum()
+            fn = ((1 - diar_binary) * gt_aligned).sum()
+
+        return {
+            'f1': (2 * tp / (2 * tp + fp + fn + 1e-8)).item(),
+            'precision': (tp / (tp + fp + 1e-8)).item(),
+            'recall': (tp / (tp + fn + 1e-8)).item(),
+        }
+
+    def fuse_diar_preds(self, encoded, diar_preds, gt_diar_preds=None):
         """
         Fuse diarization predictions with ASR encoder states.
 
         Args:
             encoded: [B, D, T] encoder output
             diar_preds: [B, T_diar, num_speakers] frame-level speaker predictions
+            gt_diar_preds: [B, T_gt, num_speakers] ground-truth speaker
+                targets from RTTM, or None.  When provided (training), used
+                directly.  When None (inference), model predictions are
+                binarized to match the 0/1 training condition.
 
         Returns:
             encoded: [B, D, T] fused encoder output
         """
         # Convert encoder output from (B, D, T) to (B, T, D) for fusion
         asr_enc_states = encoded.permute(0, 2, 1)  # (B, T, D)
+
+        # Resolve diar preds: GT (training) or binarized model (inference)
+        if gt_diar_preds is not None:
+            diar_preds = gt_diar_preds
+        else:
+            diar_preds = (diar_preds > 0.5).float()
 
         # Fix frame count mismatch between diar and ASR encoder
         if diar_preds.shape[1] != asr_enc_states.shape[1]:
@@ -1253,6 +1350,7 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
         input_signal_length=None,
         processed_signal=None,
         processed_signal_length=None,
+        gt_diar_preds=None,
     ):
         """
         Forward pass of the model. Adds diarization fusion after the encoder
@@ -1263,6 +1361,9 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
             input_signal_length: Vector [B] of audio lengths.
             processed_signal: Tensor [B, D, T] of preprocessed audio (e.g. from DALI).
             processed_signal_length: Vector [B] of processed audio lengths.
+            gt_diar_preds: Tensor [B, T_target, num_speakers] ground-truth
+                speaker targets from RTTM, or None.  When provided (training),
+                used in place of model diar predictions.
 
         Returns:
             A tuple of 3 elements:
@@ -1301,6 +1402,7 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
             with torch.set_grad_enabled(not self.cfg.get('freeze_asr', False)):
                 fused_pre_encode, pre_encode_lengths = self._apply_pre_encode_diar_fusion(
                     processed_signal, processed_signal_length, diar_preds, drop_extra=0,
+                    gt_diar_preds=gt_diar_preds,
                 )
                 encoded, encoded_len = self.encoder(
                     audio_signal=fused_pre_encode,
@@ -1315,7 +1417,7 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
 
         # --- Post-encode diar fusion (always applied when diar is available) ---
         if diar_preds is not None:
-            encoded = self.fuse_diar_preds(encoded, diar_preds)
+            encoded = self.fuse_diar_preds(encoded, diar_preds, gt_diar_preds=gt_diar_preds)
 
         # --- CTC decoder ---
         log_probs = self.decoder(encoder_output=encoded)
@@ -1333,14 +1435,25 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, transcript, transcript_len = batch
+        # Unpack batch: 4-element (legacy) or 6-element (with GT diar targets)
+        if isinstance(batch, DALIOutputs):
+            signal, signal_len, transcript, transcript_len = batch
+            gt_diar_preds = None
+        elif len(batch) == 6:
+            signal, signal_len, transcript, transcript_len, gt_diar_preds, gt_diar_len = batch
+        else:
+            signal, signal_len, transcript, transcript_len = batch
+            gt_diar_preds = None
+
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
             log_probs, encoded_len, predictions = self.forward(
-                processed_signal=signal, processed_signal_length=signal_len
+                processed_signal=signal, processed_signal_length=signal_len,
+                gt_diar_preds=gt_diar_preds,
             )
         else:
             log_probs, encoded_len, predictions = self.forward(
-                input_signal=signal, input_signal_length=signal_len
+                input_signal=signal, input_signal_length=signal_len,
+                gt_diar_preds=gt_diar_preds,
             )
 
         if hasattr(self, '_trainer') and self._trainer is not None:
@@ -1388,19 +1501,35 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, transcript, transcript_len = batch
+        # Unpack batch: 4-element (legacy) or 6-element (with GT diar targets)
+        if isinstance(batch, DALIOutputs):
+            signal, signal_len, transcript, transcript_len = batch
+            gt_diar_preds = None
+        elif len(batch) == 6:
+            signal, signal_len, transcript, transcript_len, gt_diar_preds, gt_diar_len = batch
+        else:
+            signal, signal_len, transcript, transcript_len = batch
+            gt_diar_preds = None
+
+        # Use GT diar preds during validation (matches training condition).
+        use_gt_diar_for_val = self.cfg.get('use_gt_diar_for_validation', True)
+        val_gt = gt_diar_preds if (use_gt_diar_for_val and gt_diar_preds is not None) else None
+
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
             log_probs, encoded_len, predictions = self.forward(
-                processed_signal=signal, processed_signal_length=signal_len
+                processed_signal=signal, processed_signal_length=signal_len,
+                gt_diar_preds=val_gt,
             )
         else:
             log_probs, encoded_len, predictions = self.forward(
-                input_signal=signal, input_signal_length=signal_len
+                input_signal=signal, input_signal_length=signal_len,
+                gt_diar_preds=val_gt,
             )
 
         loss_value = self.loss(
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
+
         loss_value, metrics = self.add_interctc_losses(
             loss_value,
             transcript,
@@ -1419,6 +1548,18 @@ class MSEncDecCTCModelBPE(EncDecCTCModelBPE):
         wer, wer_num, wer_denom = self.wer.compute()
         self.wer.reset()
         metrics.update({'val_loss': loss_value, 'val_wer_num': wer_num, 'val_wer_denom': wer_denom, 'val_wer': wer})
+
+        # Diarization F1: compare model diar preds against GT
+        if self.diar and gt_diar_preds is not None and signal is not None:
+            diar_metrics = self.compute_diar_f1(signal, signal_len, gt_diar_preds, gt_diar_len)
+            metrics['val_diar_f1'] = diar_metrics['f1']
+            metrics['val_diar_precision'] = diar_metrics['precision']
+            metrics['val_diar_recall'] = diar_metrics['recall']
+            if batch_idx == 0:
+                logging.info(
+                    f"[ VALIDATION STEP ]    Diar F1={diar_metrics['f1']:.4f} "
+                    f"(P={diar_metrics['precision']:.4f}, R={diar_metrics['recall']:.4f})"
+                )
 
         self.log('global_step', torch.tensor(self.trainer.global_step, dtype=torch.float32))
 
