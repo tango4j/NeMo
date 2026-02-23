@@ -252,7 +252,7 @@ def sot_text_to_seglst(transcription: str, session_id: str, session_duration_sec
     Convert a SOT (Serialized Output Training) transcription string with
     speaker tokens into a list of SegLST-format dictionaries.
 
-    Speaker tokens ``<|spltoken0|>``, ``<|spltoken1|>``, ... delimit speaker
+    Speaker tokens ``[s0]``, ``[s1]``, ... delimit speaker
     turns.  Each contiguous run of text after a speaker token becomes one
     SegLST entry attributed to that speaker.
 
@@ -266,7 +266,7 @@ def sot_text_to_seglst(transcription: str, session_id: str, session_duration_sec
 
     Args:
         transcription: SOT transcription, e.g.
-            ``"<|spltoken0|> right <|spltoken1|> and i got ..."``
+            ``"[s0] right [s1] and i got ..."``
         session_id: Session identifier for this audio file.
         session_duration_sec: Total duration of the audio session in seconds.
             Used to proportionally estimate segment timestamps.  Pass ``-1``
@@ -287,8 +287,8 @@ def sot_text_to_seglst(transcription: str, session_id: str, session_duration_sec
         ]
     """
     seglst_entries = []
-    # Matches <|spltoken0|>, <|spltoken1|>, etc. and captures the digit(s)
-    spk_token_pattern = re.compile(r'<\|spltoken(\d+)\|>')
+    # Matches [s0], [s1], etc. and captures the digit(s)
+    spk_token_pattern = re.compile(r'\[s(\d+)\]')
 
     # re.split with a capturing group returns interleaved:
     #   [text_before, spk_id, text, spk_id, text, ...]
@@ -376,6 +376,8 @@ def get_session_id(sample: dict, add_timestamps: bool = False) -> str:
         base = sample["session_id"]
     else:
         base = os.path.splitext(os.path.basename(sample["audio_filepath"]))[0]
+
+    base = base.split(".")[0]
 
     if add_timestamps:
         offset = float(sample.get("offset", 0))
@@ -761,21 +763,6 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
 
         end_time = time.time()
         logging.info(f"The whole streaming process took: {round(end_time - start_time, 2)}s")
-
-        # Store results including the transcriptions of streaming inference
-        if cfg.output_path is not None and len(all_refs_text) == len(all_streaming_tran):
-            fname = "streaming_out_" + os.path.splitext(os.path.basename(model_name))[0] + f"_{dataset_title}.json"
-
-            hyp_json = os.path.join(cfg.output_path, fname)
-            os.makedirs(cfg.output_path, exist_ok=True)
-            with open(hyp_json, "w") as out_f:
-                for i, hyp in enumerate(all_streaming_tran):
-                    record = {
-                        "pred_text": hyp,
-                        "text": all_refs_text[i],
-                        "wer": round(word_error_rate(hypotheses=[hyp], references=[all_refs_text[i]]) * 100, 2),
-                    }
-                    out_f.write(json.dumps(record) + '\n')
 
     # ── Merge consecutive same-speaker segments ─────────────────────────
     if all_seglst_entries:

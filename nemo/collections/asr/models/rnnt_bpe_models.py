@@ -644,7 +644,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 self.cfg.lss_loss.is_rnnt = True
                 if self.cfg.lss_loss.get('speaker_token_ids', None) is None:
                     self.cfg.lss_loss.speaker_token_ids = [
-                        self.tokenizer.token_to_id(f"<|spltoken{i}|>")
+                        self.tokenizer.token_to_id(f"[s{i}]")
                         for i in range(self.cfg.get('max_num_speakers', 4))
                     ]
             self.lss_loss = MSEncDecRNNTBPEModel.from_config_dict(self.cfg.lss_loss)
@@ -770,6 +770,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 'sample_rate': self.cfg.get('sample_rate', 16000),
                 'window_stride': self.cfg.get('preprocessor', {}).get('window_stride', 0.01),
                 'subsampling_factor': subsampling_factor,
+                'convert_to_wl': config.get('convert_to_wl', False),
             }
 
             return get_lhotse_dataloader_from_config(

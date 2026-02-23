@@ -54,7 +54,7 @@ class LatentSpeakerSupervisionLoss(Loss):
 
     Args:
         speaker_token_ids: List of token IDs for speaker tokens
-            (e.g., IDs for ``<|spltoken0|>``, ``<|spltoken1|>``, ``<|spltoken2|>``, ``<|spltoken3|>``).
+            (e.g., IDs for ``[s0]``, ``[s1]``, ``[s2]``, ``[s3]``).
         speaker_loss_weight: Weight for the auxiliary speaker supervision loss.
         include_ce_loss: If True (default), the forward pass returns standard CE + speaker loss.
             If False, returns **only** the auxiliary speaker loss (useful when a separate

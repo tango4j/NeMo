@@ -644,7 +644,7 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                 self.cfg.lss_loss.is_rnnt = True
                 if self.cfg.lss_loss.get('speaker_token_ids', None) is None:
                     self.cfg.lss_loss.speaker_token_ids = [
-                        self.tokenizer.token_to_id(f"<|spltoken{i}|>")
+                        self.tokenizer.token_to_id(f"[s{i}]")
                         for i in range(self.cfg.get('max_num_speakers', 4))
                     ]
             self.lss_loss = MSEncDecRNNTBPEModel.from_config_dict(self.cfg.lss_loss)

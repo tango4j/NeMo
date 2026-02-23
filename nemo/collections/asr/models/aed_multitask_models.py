@@ -231,7 +231,7 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
                 self.cfg.lss_loss.pad_id = self.tokenizer.pad_id
                 if self.cfg.lss_loss.get('speaker_token_ids', None) is None:
                     self.cfg.lss_loss.speaker_token_ids = [
-                        self.tokenizer.special_tokens[f"<|spltoken{i}|>"]
+                        self.tokenizer.special_tokens[f"[s{i}]"]
                         for i in range(self.cfg.get('max_num_speakers', 4))
                     ]
             self.lss_loss = EncDecMultiTaskModel.from_config_dict(self.cfg.lss_loss)
