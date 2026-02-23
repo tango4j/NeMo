@@ -302,6 +302,7 @@ class ConvSubsampling(nn.Module):
         x = self.conv3(x)
         x = self.gelu(x)
         length = length // 2
+        x = x.transpose(1, 2)  # (B, d_model, T) -> (B, T, d_model)
         return x, length
 
 class NGPTStackingSubsampling(torch.nn.Module):
