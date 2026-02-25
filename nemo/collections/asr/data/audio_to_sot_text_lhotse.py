@@ -128,110 +128,233 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
         return spk_seq
 
     @staticmethod
+    def _get_text_speaker_char_counts(text: str, num_spk: int) -> np.ndarray:
+        """Estimate speaking time per speaker from char counts of words.
+
+        Returns (num_spk,) array of char counts per text speaker, normalised.
+        """
+        parts = re.split(r'(\[s\d+\])', text)
+        char_counts = np.zeros(num_spk, dtype=np.float32)
+        current_spk = -1
+        for part in parts:
+            match = re.fullmatch(r'\[s(\d+)\]', part)
+            if match:
+                current_spk = int(match.group(1))
+                continue
+            if current_spk < 0 or current_spk >= num_spk:
+                continue
+            for word in part.split():
+                char_counts[current_spk] += len(word)
+        total = char_counts.sum()
+        if total > 0:
+            char_counts /= total
+        return char_counts
+
+    @staticmethod
+    def _dtw_cost_batch(
+        activity: np.ndarray,
+        spk_seq_arr: np.ndarray,
+        perm_batch: np.ndarray,
+        num_spk: int,
+        token_weights: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Compute DTW costs for a batch of permutations in one vectorized pass.
+
+        Cost is one-hot based: each speaker token is a one-hot vector [0,0,1,0];
+        cost at (k,t) = 1 - dot(text_one_hot, activity_permuted_at_t).
+        Optional token_weights give less frequent speakers equal importance.
+
+        Args:
+            activity: ``(T, num_spk)`` RTTM speaker activity (0/1 per frame).
+            spk_seq_arr: ``(K,)`` int array of speaker indices per word.
+            perm_batch: ``(P, num_spk)`` array of permutations; each row maps
+                text_spk → RTTM column.
+            num_spk: number of speaker columns.
+            token_weights: ``(K,)`` optional; weight[k] = K / count(spk_seq[k]).
+
+        Returns:
+            ``(P,)`` array of total DTW path costs, each normalised by ``K + T``.
+        """
+        K = spk_seq_arr.shape[0]
+        T = activity.shape[0]
+        P = perm_batch.shape[0]
+        if K == 0 or T == 0:
+            return np.full(P, np.float32(np.inf))
+
+        # One-hot based cost: text token k has speaker s = spk_seq[k] (one-hot at s).
+        # Activity at t in text space: activity[t, perm[i]] for each text speaker i.
+        # Cost = 1 - activity[t, perm[s]] / total_activity[t]; normalized so overlap
+        # (multiple speakers active) yields higher cost than single-speaker match.
+        valid = spk_seq_arr < num_spk
+        # activity_permuted[p, t, i] = activity[t, perm_batch[p, i]]
+        activity_permuted = activity[:, perm_batch].transpose(1, 0, 2)  # (P, T, num_spk)
+        activity_sum = np.maximum(activity.sum(axis=1), 1.0).astype(np.float32)  # (T,)
+        # local[p, k, t] = 1 - activity_permuted[p, t, spk_seq[k]] / activity_sum[t]
+        cols = np.where(valid, spk_seq_arr, 0)  # placeholder for invalid
+        local = 1.0 - activity_permuted[:, :, cols].transpose(0, 2, 1) / activity_sum
+        local[:, ~valid, :] = 1.0  # invalid speakers: max cost
+
+        # Speaker token count normalization: less frequent speakers get higher weight
+        if token_weights is not None:
+            local = local * token_weights[np.newaxis, :, np.newaxis]
+
+        INF = np.float32(np.inf)
+        # First row: cumsum along T
+        prev_row = np.cumsum(local[:, 0, :], axis=1).astype(np.float32)
+
+        # DP: O(K * T) iterations, vectorized over P
+        for k in range(1, K):
+            cur_row = np.full((P, T), INF, dtype=np.float32)
+            cur_row[:, 0] = prev_row[:, 0] + local[:, k, 0]
+            for t in range(1, T):
+                cur_row[:, t] = (
+                    np.minimum(
+                        np.minimum(prev_row[:, t], prev_row[:, t - 1]),
+                        cur_row[:, t - 1],
+                    )
+                    + local[:, k, t]
+                )
+            prev_row = cur_row
+
+        return prev_row[:, T - 1] / (K + T)
+
+    @staticmethod
+    def _speaker_freq_cost_batch(
+        text_freq: np.ndarray,
+        rttm_freq: np.ndarray,
+        perm_batch: np.ndarray,
+    ) -> np.ndarray:
+        """L1 mismatch between text and RTTM speaker frequency under each permutation.
+
+        text_freq[i], rttm_freq[j]: normalised speaking-time ratios.
+        Under perm p: text speaker i maps to RTTM column perm[p,i].
+        Cost = sum_i |text_freq[i] - rttm_freq[perm[p,i]]|.
+
+        Returns:
+            ``(P,)`` array of L1 costs per permutation.
+        """
+        # rttm_freq_perm[p, i] = rttm_freq[perm_batch[p, i]]
+        rttm_freq_perm = rttm_freq[perm_batch]  # (P, num_spk)
+        return np.abs(text_freq - rttm_freq_perm).sum(axis=1).astype(np.float32)
+
+    @staticmethod
     def _dtw_cost(
-        cost_matrix: np.ndarray,
+        activity: np.ndarray,
         spk_seq_arr: np.ndarray,
         perm: List[int],
         num_spk: int,
+        token_weights: Optional[np.ndarray] = None,
     ) -> float:
-        """Compute the minimum-cost DTW alignment on a ``K × T`` grid.
+        """Compute DTW cost for a single permutation (delegates to batch)."""
+        perm_batch = np.array([perm], dtype=np.intp)
+        costs = LhotseSpeechToTextBpeDataset._dtw_cost_batch(
+            activity, spk_seq_arr, perm_batch, num_spk, token_weights
+        )
+        return float(costs[0])
+
+    def _fix_speaker_activity_hungarian(
+        self, cut, speaker_activity: torch.Tensor,
+    ) -> Tuple[torch.Tensor, List[List[int]]]:
+        """Align speaker_activity columns with SOT speaker token ordering
+        using speaking-time ratio matching and the Hungarian algorithm.
+
+        Instead of building a pseudo frame-level activity matrix, we compare
+        compact speaking-time ratio vectors from both the text and the RTTM
+        activity, then run ``linear_sum_assignment`` on the L1-distance cost
+        matrix to find the best column permutation.
+
+        We return the top-N permutation candidates (N = number of distinct
+        speakers in the text), ranked from best (lowest cost) to worst.
 
         Args:
-            cost_matrix: ``(num_spk, T)`` precomputed mismatch costs where
-                ``cost_matrix[col, t] = 1 - activity[t, col]``.
-            spk_seq_arr: ``(K,)`` int array of speaker indices per word.
-            perm: column permutation — ``perm[text_spk]`` → RTTM column.
-            num_spk: number of speaker columns.
+            cut: A Lhotse Cut whose ``.text`` contains SOT transcript with
+                ``[sN]`` speaker tokens.
+            speaker_activity: ``(T, num_spk)`` binary matrix from RTTM.
 
         Returns:
-            Total DTW path cost normalised by ``K + T``.
+            fixed: ``(T, num_spk)`` matrix with columns reordered by the best
+                permutation, absent-speaker columns zeroed.
+            perm_candidates: List of N permutations (each a list of length
+                ``num_spk``), sorted best-to-worst by cost.  ``perm[i]``
+                gives the RTTM column that maps to text speaker ``i``.
         """
-        K = spk_seq_arr.shape[0]
-        T = cost_matrix.shape[1]
-        if K == 0 or T == 0:
-            return float('inf')
-
-        # Map each word to its RTTM column under this permutation
-        mapped = np.array([perm[s] if s < num_spk else -1 for s in spk_seq_arr], dtype=np.intp)
-
-        # Build the K × T local-cost matrix by indexing into precomputed costs
-        # For invalid mappings (col == -1), cost is 1.0 everywhere.
-        local = np.ones((K, T), dtype=np.float32)
-        valid = mapped >= 0
-        local[valid] = cost_matrix[mapped[valid]]
-
-        INF = np.float32(np.inf)
-        prev_row = np.full(T, INF, dtype=np.float32)
-        prev_row[0] = local[0, 0]
-        np.cumsum(local[0], out=prev_row)
-
-        for k in range(1, K):
-            cur_row = np.full(T, INF, dtype=np.float32)
-            cur_row[0] = prev_row[0] + local[k, 0]
-            lk = local[k]
-            for t in range(1, T):
-                cur_row[t] = min(prev_row[t], prev_row[t - 1], cur_row[t - 1]) + lk[t]
-            prev_row = cur_row
-
-        return float(prev_row[T - 1]) / (K + T)
-
-    def _fix_speaker_activity_hungarian(self, cut, speaker_activity: torch.Tensor) -> torch.Tensor:
         text = cut.text or ''
         if not text:
-            return speaker_activity
+            return speaker_activity, [list(range(speaker_activity.shape[1]))]
 
         T, num_spk = speaker_activity.shape
+        identity_perm = list(range(num_spk))
 
-        # 1. Parse SOT text into (speaker_idx, word_text) segments
-        parts = re.split(r'<\|spltoken(\d+)\|>', text)
-        segments = []
-        for i in range(1, len(parts), 2):
-            spk_idx = int(parts[i])
-            word_text = parts[i + 1].strip() if i + 1 < len(parts) else ''
-            if word_text:
-                segments.append((spk_idx, word_text))
+        # ── 1. Parse SOT text to get per-word speaker sequence ────────────
+        # Uses [s0], [s1], ... convention via _parse_speaker_tokens.
+        spk_seq = self._parse_speaker_tokens(text)
+        if not spk_seq:
+            return speaker_activity, [identity_perm]
 
-        if not segments:
-            return speaker_activity
+        speakers_in_text = sorted(set(spk_seq))
+        num_distinct = len(speakers_in_text)
 
-        total_chars = sum(len(w) for _, w in segments)
-        if total_chars == 0:
-            return speaker_activity
+        # ── 2. Speaking-time ratio from text (token count ratio) ──────────
+        # Count how many word tokens each speaker has, then normalise.
+        spk_arr = np.array(spk_seq, dtype=np.intp)
+        token_counts = np.bincount(spk_arr[spk_arr < num_spk], minlength=num_spk).astype(np.float64)
+        total_tokens = token_counts.sum()
+        if total_tokens == 0:
+            return speaker_activity, [identity_perm]
+        text_ratio = torch.from_numpy(
+            (token_counts / total_tokens).astype(np.float32)
+        ).to(dtype=speaker_activity.dtype, device=speaker_activity.device)
 
-        speakers_in_text = set(spk for spk, _ in segments)
+        # ── 3. Speaking-time ratio from RTTM activity ─────────────────────
+        # Sum active frames per column, then normalise.
+        active_frames = speaker_activity.sum(dim=0)  # (num_spk,)
+        total_active = active_frames.sum()
+        if total_active == 0:
+            return speaker_activity, [identity_perm]
+        rttm_ratio = active_frames / total_active
 
-        # 2. Build pseudo speaker-activity from text (proportional to char length)
-        pseudo = torch.zeros(T, num_spk, dtype=speaker_activity.dtype,
-                            device=speaker_activity.device)
-        cum = 0
-        for spk_idx, word_text in segments:
-            start_frame = int(cum / total_chars * T)
-            cum += len(word_text)
-            end_frame = min(int(cum / total_chars * T), T)
-            if spk_idx < num_spk:
-                pseudo[start_frame:end_frame, spk_idx] = 1.0
+        # ── 4. Cost matrix: L1 distance between text_ratio[row] and rttm_ratio[col]
+        cost = torch.abs(text_ratio.unsqueeze(1) - rttm_ratio.unsqueeze(0))
 
-        # 3. Cost matrix: negative dot-product (maximize overlap)
-        cost = torch.zeros(num_spk, num_spk, dtype=speaker_activity.dtype,
-                        device=speaker_activity.device)
-        for i in range(num_spk):
-            for j in range(num_spk):
-                cost[i, j] = -torch.dot(pseudo[:, i], speaker_activity[:, j])
-
-        # 4. Hungarian algorithm
+        # ── 5. Hungarian algorithm for best permutation ───────────────────
         row_ind, col_ind = linear_sum_assignment(cost)
+        best_perm = identity_perm[:]
+        for row, col in zip(row_ind.tolist(), col_ind.tolist()):
+            best_perm[row] = col
+        best_cost = cost[range(num_spk), best_perm].sum().item()
 
-        # 5. Reorder columns
-        fixed = torch.zeros_like(speaker_activity)
-        for r, c in zip(row_ind.tolist(), col_ind.tolist()):
-            fixed[:, r] = speaker_activity[:, c]
+        # ── 6. Collect top-N permutation candidates from cost matrix ──────
+        # Re-run linear_sum_assignment with each assignment pair masked
+        # (cost set to large value) to discover next-best permutations.
+        candidates: List[Tuple[float, List[int]]] = [(best_cost, best_perm)]
+        seen_perms = {tuple(best_perm)}
 
-        # 6. Zero out columns for speakers absent from the text
-        for col in range(num_spk):
-            if col not in speakers_in_text:
-                fixed[:, col] = 0.0
+        for mask_row, mask_col in zip(row_ind.tolist(), col_ind.tolist()):
+            masked_cost = cost.clone()
+            masked_cost[mask_row, mask_col] = 1e9
+            alt_row_ind, alt_col_ind = linear_sum_assignment(masked_cost)
+            alt_perm = identity_perm[:]
+            for row, col in zip(alt_row_ind.tolist(), alt_col_ind.tolist()):
+                alt_perm[row] = col
+            perm_key = tuple(alt_perm)
+            if perm_key not in seen_perms:
+                seen_perms.add(perm_key)
+                alt_cost = cost[range(num_spk), alt_perm].sum().item()
+                candidates.append((alt_cost, alt_perm))
 
-        return fixed
+        candidates.sort(key=lambda x: x[0])
+        perm_candidates = [perm for _, perm in candidates[:num_distinct]]
+
+        # ── 7. Apply best permutation ─────────────────────────────────────
+        fixed = speaker_activity[:, best_perm].clone()
+
+        # ── 8. Zero out columns for speakers absent from the text ─────────
+        speakers_set = set(speakers_in_text)
+        cols_to_zero = [c for c in range(num_spk) if c not in speakers_set]
+        if cols_to_zero:
+            fixed[:, cols_to_zero] = 0.0
+
+        return fixed, perm_candidates
 
     def _fix_speaker_activity(self, cut, speaker_activity: torch.Tensor) -> torch.Tensor:
         """Align speaker_activity columns (from RTTM) with the SOT speaker
@@ -272,49 +395,96 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
 
         T, num_spk = speaker_activity.shape
 
+        # Count non-zero speaker columns to limit permutation space
+        active_frames = speaker_activity.sum(dim=0)
+        num_active = int((active_frames > 0).sum().item())
+        num_active = min(num_active, num_spk)
+
         spk_seq = self._parse_speaker_tokens(text)
         if not spk_seq:
             return speaker_activity
 
         speakers_in_text = sorted(set(spk_seq))
-        num_distinct = len(speakers_in_text)
         spk_seq_arr = np.array(spk_seq, dtype=np.intp)
+        K = len(spk_seq_arr)
 
-        # Precompute mismatch cost: cost_matrix[col, t] = 1 - activity[t, col]
-        activity_np = speaker_activity.detach().cpu().numpy().astype(np.float32)
-        cost_matrix = 1.0 - activity_np.T  # (num_spk, T)
+        activity_np = speaker_activity.detach().cpu().numpy().astype(np.float32)  # (T, num_spk)
+
+        # (1) Speaker token count weight: less frequent speakers get equal importance
+        token_counts = np.bincount(spk_seq_arr, minlength=num_spk).astype(np.float32)
+        token_counts = np.maximum(token_counts, 1.0)  # avoid div by zero
+        token_weights = (K / token_counts)[spk_seq_arr]  # (K,)
+
+        # (2) Speaker frequency: text (char-based) and RTTM (frame-based), both normalised
+        text_freq = self._get_text_speaker_char_counts(text, num_spk)  # (num_spk,)
+        rttm_freq = activity_np.sum(axis=0).astype(np.float32)
+        rttm_total = rttm_freq.sum()
+        if rttm_total > 0:
+            rttm_freq /= rttm_total
 
         identity_perm = list(range(num_spk))
 
+        # Only permute active columns; inactive columns stay identity-mapped
         max_permutable = self.num_speakers + 1
-        if num_spk <= max_permutable:
-            best_cost = float('inf')
-            best_perm = identity_perm
+        if num_active > 0 and num_active <= max_permutable:
+            perm_active = np.array(list(permutations(range(num_active))), dtype=np.intp)
+            # Extend to full (num_spk,) perms: active cols permuted, rest identity
+            perm_batch = np.zeros((perm_active.shape[0], num_spk), dtype=np.intp)
+            perm_batch[:, :num_active] = perm_active
+            perm_batch[:, num_active:] = np.arange(num_active, num_spk)
 
-            for full_perm in permutations(range(num_spk)):
-                perm = list(full_perm)
-                cost = self._dtw_cost(cost_matrix, spk_seq_arr, perm, num_spk)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_perm = perm
+            # (3) Combined cost: DTW (with token weights) + speaker frequency mismatch
+            dtw_costs = self._dtw_cost_batch(
+                activity_np, spk_seq_arr, perm_batch, num_spk, token_weights
+            )
+            freq_costs = self._speaker_freq_cost_batch(text_freq, rttm_freq, perm_batch)
+            total_costs = dtw_costs + freq_costs
+
+            best_idx = int(np.argmin(total_costs))
+            best_perm = perm_batch[best_idx].tolist()
+            best_cost = float(total_costs[best_idx])
         else:
             best_perm = identity_perm
+            best_cost = float('inf')
 
         # ── Reorder columns using best permutation ─────────────────────
-        fixed = torch.zeros_like(speaker_activity)
-        for text_col, rttm_col in enumerate(best_perm):
-            if text_col < num_spk and rttm_col < num_spk:
-                fixed[:, text_col] = speaker_activity[:, rttm_col]
+        fixed = speaker_activity[:, best_perm].clone()
 
         # ── Zero out columns for speakers absent from the text ─────────
         speakers_set = set(speakers_in_text)
-        for col in range(num_spk):
-            if col not in speakers_set:
-                fixed[:, col] = 0.0
+        cols_to_zero = [c for c in range(num_spk) if c not in speakers_set]
+        if cols_to_zero:
+            fixed[:, cols_to_zero] = 0.0
 
-        if best_perm != identity_perm:
-            identity_cost = self._dtw_cost(cost_matrix, spk_seq_arr, identity_perm, num_spk)
+        if False and best_perm != identity_perm:
+            identity_dtw = self._dtw_cost(
+                activity_np, spk_seq_arr, identity_perm, num_spk, token_weights
+            )
+            identity_freq = self._speaker_freq_cost_batch(
+                text_freq, rttm_freq, np.array([identity_perm], dtype=np.intp)
+            )[0]
+            identity_cost = float(identity_dtw) + float(identity_freq)
             logging.info("SPK_FIX %s | cost %.4f→%.4f | perm %s→%s", cut.id.split('/')[-1], identity_cost, best_cost, identity_perm, best_perm)
+            # if "fe" in cut.id:
+            #     import os; _id = cut.id.split('/')[-1].replace(' ', '_'); _dir = os.path.expanduser(f'~/projects/sot_mt_asr_rt/SOT_DP_fix_example/{_id}'); os.makedirs(_dir, exist_ok=True)
+            #     np.save(f'{_dir}/activity_np.npy', activity_np)
+            #     np.save(f'{_dir}/spk_seq_arr.npy', spk_seq_arr)
+            #     np.save(f'{_dir}/token_weights.npy', token_weights)
+            #     np.save(f'{_dir}/text_freq.npy', text_freq)
+            #     np.save(f'{_dir}/rttm_freq.npy', rttm_freq)
+            #     np.save(f'{_dir}/perm_batch.npy', perm_batch)
+            #     np.save(f'{_dir}/dtw_costs.npy', dtw_costs)
+            #     np.save(f'{_dir}/freq_costs.npy', freq_costs)
+            #     np.save(f'{_dir}/total_costs.npy', total_costs)
+            #     np.save(f'{_dir}/best_perm.npy', np.array(best_perm))
+            #     np.save(f'{_dir}/identity_perm.npy', np.array(identity_perm))
+            #     np.save(f'{_dir}/fixed.npy', fixed.detach().cpu().numpy())
+            #     np.save(f'{_dir}/speaker_activity_orig.npy', speaker_activity.detach().cpu().numpy())
+            #     with open(f'{_dir}/text.txt', 'w') as _f: _f.write(text)
+            #     with open(f'{_dir}/meta.txt', 'w') as _f: _f.write(f'cut_id: {cut.id}\nT: {T}\nK: {K}\nnum_spk: {num_spk}\nnum_active: {num_active}\nbest_perm: {best_perm}\nidentity_perm: {identity_perm}\nbest_cost: {best_cost}\nidentity_cost: {identity_cost}\nspeakers_in_text: {speakers_in_text}\n')
+            #     print(f'Saved to {_dir}/')
+            #     import ipdb; ipdb.set_trace()
+
         return fixed
 
     def _tokenize_cuts(self, cuts) -> Tuple[torch.Tensor, torch.Tensor]:

@@ -21,28 +21,12 @@ model:
   train_ds:
     input_cfg:
       - type: nemo
-        manifest_filepath: /disk_a/datasets/above4spk_finetune_datasets/SOT_SL_brkt/train/mscanary_above4spk_v3_train_combined_ami_icsi_dipco_fisher30k_SL_shuf_with_rttm.json
-        weight: 0.4
-
-      - type: nemo
-        manifest_filepath: /gpfs/fs1/projects/ent_aiapps/datasets/data/MultiSpeakerASR/sot_nemo_manifests/manifest_jsons/fisher_SL_p98_cover.json
-        weight: 0.3
+        manifest_filepath: /disk_a/datasets/above4spk_finetune_datasets/SOT_SL_brkt/train/nemo_SOT_train_316K_shuf.json
+        weight: 0.7
 
       - type: nemo
         manifest_filepath: /gpfs/fs1/projects/ent_aiapps/datasets/data/MultiSpeakerASR/sot_nemo_manifests/manifest_jsons/libri_train_SL_ovl0.08.json
-        weight: 0.05
-
-      - type: nemo
-        manifest_filepath: /gpfs/fs1/projects/ent_aiapps/datasets/data/MultiSpeakerASR/sot_nemo_manifests/manifest_jsons/libri_train_SL_ovl0.15.json
-        weight: 0.05
-
-      - type: nemo
-        manifest_filepath: /gpfs/fs1/projects/ent_aiapps/datasets/data/MultiSpeakerASR/sot_nemo_manifests/manifest_jsons/ami_train_SL.json
-        weight: 0.1
-
-      - type: nemo
-        manifest_filepath: /gpfs/fs1/projects/ent_aiapps/datasets/data/MultiSpeakerASR/sot_nemo_manifests/manifest_jsons/icsi_total_SL.json
-        weight: 0.1
+        weight: 0.3
 
     manifest_filepath: null  # ignored when input_cfg is used
     sample_rate: ${model.sample_rate}
