@@ -154,8 +154,8 @@ class MultiHeadAttentionWithSDPA(nn.Module):
         self.causal_mask = causal_mask
         self.out_proj = nn.Linear(self.d_out, self.d_out)
 
-    def forward(self, x, use_cache=False):
-        
+    def forward(self, x, attn_mask=None, use_cache=False):
+
         B, num_tokens, d_in  = x.shape
         H = self.num_heads
 
@@ -167,9 +167,9 @@ class MultiHeadAttentionWithSDPA(nn.Module):
         queries = queries.transpose(1,2)
         values = values.transpose(1,2)
 
-        
+
         dropout = 0 if self.training == False else self.dropout
-        output = scaled_dot_product_attention(queries,keys,values, is_causal=self.causal_mask, dropout_p=dropout)
+        output = scaled_dot_product_attention(queries,keys,values, attn_mask=attn_mask, is_causal=self.causal_mask, dropout_p=dropout)
 
          # B xH x num_tokens x head_dim
 
@@ -274,10 +274,10 @@ class TransformerBlock(nn.Module):
         self.post_norm = LayerNorm(self.cfg.d_model)
         self.ffn = FeedForward(self.cfg.d_model)
 
-    def forward(self, x, use_cache=False):
+    def forward(self, x, attn_mask=None, use_cache=False):
         pre_norm = self.pre_norm(x)
 
-        attn_output = self.mha(pre_norm, use_cache=use_cache)
+        attn_output = self.mha(pre_norm, attn_mask=attn_mask, use_cache=use_cache)
         attn_output = x + self.dropout(attn_output)
 
         post_norm = self.post_norm(attn_output)
@@ -372,7 +372,7 @@ class TransformerEncoder(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
         self.layer_norm = nn.LayerNorm(d_model)
 
-    def forward(self, audio_signal, length): 
+    def forward(self, audio_signal, length):
         """
         Args:
             audio_signal (torch.Tensor): (B, C, T)
@@ -383,9 +383,18 @@ class TransformerEncoder(nn.Module):
         """
         x = audio_signal
         x, length = self.pre_encode(x, length)
+        x = x * (self.d_model ** 0.5)
         x = self.layer_norm(x)
+
+        # Create padding mask: True for valid positions, False for padding
+        max_len = x.shape[1]
+        pad_mask = torch.arange(max_len, device=x.device).unsqueeze(0) < length.unsqueeze(1)
+        # Convert to attention mask for SDPA: (B, 1, 1, T) broadcastable to (B, H, T, T)
+        # SDPA treats True as "attend" for boolean masks
+        attn_mask = pad_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T) - masks key positions
+
         for idx, layer in enumerate(self.layers):
-            x = layer(x)
+            x = layer(x, attn_mask=attn_mask)
         x = x.transpose(1, 2) # BxT'xD_model -> BxD_modelxT'
         return x, length
     
