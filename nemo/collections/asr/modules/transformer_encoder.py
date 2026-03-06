@@ -305,6 +305,36 @@ class ConvSubsampling(nn.Module):
         x = x.transpose(1, 2)  # (B, d_model, T) -> (B, T, d_model)
         return x, length
 
+class DepthwiseConvSubsampling(nn.Module):
+    """Depthwise separable conv subsampling: reduces params by replacing standard Conv1d
+    with depthwise (groups=channels) + pointwise (1x1) convolutions for the strided layers.
+    """
+    def __init__(self, n_mels: int = 80, d_model: int = 512):
+        super().__init__()
+        # Standard conv to project from n_mels to d_model
+        self.conv1 = Conv1d(n_mels, d_model, kernel_size=3, padding=1)
+        # Depthwise separable conv block 1 (stride=2)
+        self.dw_conv2 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1, groups=d_model)
+        self.pw_conv2 = Conv1d(d_model, d_model, kernel_size=1)
+        # Depthwise separable conv block 2 (stride=2)
+        self.dw_conv3 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1, groups=d_model)
+        self.pw_conv3 = Conv1d(d_model, d_model, kernel_size=1)
+        self.gelu = TorchGELU()
+
+    def forward(self, x, length):
+        x = self.conv1(x)
+        x = self.gelu(x)
+        x = self.dw_conv2(x)
+        x = self.pw_conv2(x)
+        x = self.gelu(x)
+        length = length // 2
+        x = self.dw_conv3(x)
+        x = self.pw_conv3(x)
+        x = self.gelu(x)
+        length = length // 2
+        x = x.transpose(1, 2)  # (B, d_model, T) -> (B, T, d_model)
+        return x, length
+
 class NGPTStackingSubsampling(torch.nn.Module):
     """Stacking subsampling which simply stacks consecutive frames to reduce the sampling rate
     Args:
@@ -363,10 +393,12 @@ class TransformerEncoder(nn.Module):
         self.d_model = d_model
         if pre_encode == "conv":
             self.pre_encode = ConvSubsampling(n_mels, d_model)
+        elif pre_encode == "depth_conv":
+            self.pre_encode = DepthwiseConvSubsampling(n_mels, d_model)
         elif pre_encode == "stacking":
             self.pre_encode = NGPTStackingSubsampling(subsampling_factor=4, feat_in=n_mels, feat_out=d_model)
         else:
-            raise ValueError(f"Invalid pre_encode: {pre_encode}")
+            raise ValueError(f"Invalid pre_encode: {pre_encode}. Choose from: conv, depth_conv, stacking")
 
         cfg = TransformerEncoderConfig(d_model=d_model, n_heads=n_heads, n_layers=n_layers, drop_rate=drop_rate, qkv_bias=qkv_bias, causal_mask=causal_mask)
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
