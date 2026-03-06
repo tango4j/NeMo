@@ -388,9 +388,11 @@ class TransformerEncoder(nn.Module):
                 qkv_bias: bool = False,
                 causal_mask: bool = False,
                 pre_encode: str = "conv", # "conv" or "stacking"
+                nan_debug: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
+        self.nan_debug = nan_debug
         if pre_encode == "conv":
             self.pre_encode = ConvSubsampling(n_mels, d_model)
         elif pre_encode == "depth_conv":
@@ -403,6 +405,7 @@ class TransformerEncoder(nn.Module):
         cfg = TransformerEncoderConfig(d_model=d_model, n_heads=n_heads, n_layers=n_layers, drop_rate=drop_rate, qkv_bias=qkv_bias, causal_mask=causal_mask)
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
         self.layer_norm = nn.LayerNorm(d_model)
+        self.final_norm = nn.LayerNorm(d_model)
 
     def forward(self, audio_signal, length):
         """
@@ -415,8 +418,14 @@ class TransformerEncoder(nn.Module):
         """
         x = audio_signal
         x, length = self.pre_encode(x, length)
+        if self.nan_debug:
+            self._check_nan(x, "pre_encode")
         x = x * (self.d_model ** 0.5)
+        if self.nan_debug:
+            self._check_nan(x, "embedding_scale")
         x = self.layer_norm(x)
+        if self.nan_debug:
+            self._check_nan(x, "layer_norm")
 
         # Create padding mask: True for valid positions, False for padding
         max_len = x.shape[1]
@@ -427,8 +436,24 @@ class TransformerEncoder(nn.Module):
 
         for idx, layer in enumerate(self.layers):
             x = layer(x, attn_mask=attn_mask)
+            if self.nan_debug:
+                self._check_nan(x, f"layer_{idx}")
+        x = self.final_norm(x)
+        if self.nan_debug:
+            self._check_nan(x, "final_norm")
         x = x.transpose(1, 2) # BxT'xD_model -> BxD_modelxT'
         return x, length
+
+    def _check_nan(self, x, name):
+        has_nan = torch.isnan(x).any().item()
+        has_inf = torch.isinf(x).any().item()
+        if has_nan or has_inf:
+            nan_count = torch.isnan(x).sum().item()
+            inf_count = torch.isinf(x).sum().item()
+            valid = x[~(torch.isnan(x) | torch.isinf(x))]
+            abs_max = valid.abs().max().item() if valid.numel() > 0 else float('nan')
+            print(f"[NaN DEBUG] {name}: NaN={nan_count}, Inf={inf_count}, abs_max={abs_max:.6f}, shape={list(x.shape)}", flush=True)
+            raise RuntimeError(f"[NaN DEBUG] NaN/Inf detected at '{name}'. Stopping training.")
     
     def freeze(self):
         for param in self.parameters():
