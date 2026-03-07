@@ -125,6 +125,7 @@ model:
     drop_rate: 0.1
     qkv_bias: False
     causal_mask: False
+    pre_encode: "depth_conv"  # Options: conv, depth_conv, stacking
 
   decoder:
     _target_: nemo.collections.asr.modules.RNNTDecoder
@@ -223,6 +224,7 @@ trainer:
   max_epochs: 500
   max_steps: -1 # computed at runtime if not set
   val_check_interval: 1.0 # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
+  limit_val_batches: 10
   accelerator: auto
   strategy:
     _target_: lightning.pytorch.strategies.DDPStrategy
@@ -244,7 +246,7 @@ exp_manager:
   exp_dir: null
   name: ${name}
   create_tensorboard_logger: False
-  create_checkpoint_callback: true
+  create_checkpoint_callback: False
   checkpoint_callback_params:
     # in case of multiple validation sets, first one is used
     monitor: "val_wer"
