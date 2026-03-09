@@ -32,6 +32,9 @@ from nemo.collections.asr.models.k2_sequence_models import (
     EncDecK2SeqModelBPE,
 )
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
+from nemo.collections.asr.models.moe_ctc_bpe_models import EncDecMoECTCModelBPE
+from nemo.collections.asr.models.moe_hybrid_rnnt_ctc_bpe_models import EncDecMoEHybridRNNTCTCBPEModel
+from nemo.collections.asr.models.moe_rnnt_bpe_models import EncDecMoERNNTBPEModel
 from nemo.collections.asr.models.msdd_models import EncDecDiarLabelModel, NeuralDiarizer
 from nemo.collections.asr.models.multitalker_asr_models import EncDecMultiTalkerRNNTBPEModel
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel, MSEncDecRNNTBPEModel
@@ -62,6 +65,9 @@ __all__ = [
     'EncDecK2SeqModel',
     'EncDecK2SeqModelBPE',
     'EncDecMaskedTokenPredModel',
+    'EncDecMoECTCModelBPE',
+    'EncDecMoEHybridRNNTCTCBPEModel',
+    'EncDecMoERNNTBPEModel',
     'EncDecMultiTaskModel',
     'EncDecMultiTalkerRNNTBPEModel',
     'EncDecRNNTBPEModel',
