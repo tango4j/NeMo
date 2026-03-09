@@ -1160,13 +1160,33 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
         if self.cfg.freeze_asr:
             self.encoder.eval()
 
+    def _restore_nemo_model(self, model_path, map_location='cpu', strict=True):
+        """Restore a .nemo checkpoint, trying MSEncDecRNNTBPEModel first, then
+        falling back to EncDecRNNTBPEModel for single-speaker pretrained models."""
+        try:
+            restored = MSEncDecRNNTBPEModel.restore_from(
+                model_path, map_location=map_location, strict=strict,
+            )
+            logging.info(f"Restored as MSEncDecRNNTBPEModel from `{model_path}`")
+            return restored
+        except Exception:
+            logging.info(
+                f"Could not restore as MSEncDecRNNTBPEModel, "
+                f"falling back to EncDecRNNTBPEModel for `{model_path}`"
+            )
+            restored = EncDecRNNTBPEModel.restore_from(
+                model_path, map_location=map_location, strict=strict,
+            )
+            logging.info(f"Restored as EncDecRNNTBPEModel from `{model_path}`")
+            return restored
+
     def maybe_init_from_pretrained_checkpoint(self, cfg, map_location='cpu'):
         """
         Override to handle init_from_nemo_model for MSEncDecRNNTBPEModel.
 
-        The pretrained ASR model is an EncDecRNNTBPEModel, not an MSEncDecRNNTBPEModel,
-        so we must use EncDecRNNTBPEModel.restore_from() instead of self.restore_from()
-        to avoid a class/config mismatch when restoring the checkpoint.
+        Automatically detects whether the .nemo checkpoint is an
+        MSEncDecRNNTBPEModel (multi-speaker, for fine-tuning) or an
+        EncDecRNNTBPEModel (single-speaker, for weight initialization).
 
         Supports both string and dict forms of init_from_nemo_model:
             # String: load all matching weights
@@ -1180,8 +1200,9 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
             with open_dict(cfg):
                 if isinstance(cfg.init_from_nemo_model, str):
                     model_path = cfg.init_from_nemo_model
-                    restored_model = EncDecRNNTBPEModel.restore_from(
-                        model_path, map_location=map_location, strict=cfg.get("init_strict", True)
+                    restored_model = self._restore_nemo_model(
+                        model_path, map_location=map_location,
+                        strict=cfg.get("init_strict", True),
                     )
                     self.load_state_dict(restored_model.state_dict(), strict=False)
                     logging.info(f'Model checkpoint restored from nemo file with path : `{model_path}`')
@@ -1191,8 +1212,9 @@ class MSEncDecRNNTBPEModel(EncDecRNNTBPEModel):
                     model_load_dict = cfg.init_from_nemo_model
                     for model_load_cfg in model_load_dict.values():
                         model_path = model_load_cfg.path
-                        restored_model = EncDecRNNTBPEModel.restore_from(
-                            model_path, map_location=map_location, strict=cfg.get("init_strict", True)
+                        restored_model = self._restore_nemo_model(
+                            model_path, map_location=map_location,
+                            strict=cfg.get("init_strict", True),
                         )
 
                         include = model_load_cfg.pop('include', [""])

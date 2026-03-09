@@ -74,6 +74,7 @@ python speech_to_text_cache_aware_streaming_sot_mtasr_infer.py \
 
 import glob
 import json
+import math
 import os
 import re
 import time
@@ -85,8 +86,11 @@ import librosa
 import lightning.pytorch as pl
 import soundfile as sf
 import torch
+from lhotse.dataset.collation import collate_matrices
 from omegaconf import OmegaConf, open_dict
+from tqdm import tqdm
 
+from nemo.collections.asr.data.audio_to_diar_label import extract_frame_info_from_rttm, get_frame_targets_from_rttm
 from nemo.collections.asr.metrics.wer import word_error_rate
 from nemo.collections.asr.models.rnnt_bpe_models import MSEncDecRNNTBPEModel
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecodingConfig
@@ -175,6 +179,9 @@ class TranscriptionConfig:
     ctc_decoding: CTCDecodingConfig = field(default_factory=CTCDecodingConfig)
     rnnt_decoding: RNNTDecodingConfig = field(default_factory=lambda: RNNTDecodingConfig(fused_batch_size=-1))
     set_decoder: Optional[str] = None  # Literal["ctc", "rnnt"]
+
+    # ── Speaker supervision configs ──────────────────────────────────────
+    spk_supervision: str = "diar"  # "diar" = run diar model live, "rttm" = use ground-truth RTTM files from manifest
 
     # ── Real-time / display configs (for future merge) ─────────────────
     generate_realtime_scripts: bool = True  # Whether to generate real-time demo scripts
@@ -387,12 +394,96 @@ def get_session_id(sample: dict, add_timestamps: bool = False) -> str:
     return base
 
 
+def _estimate_streaming_steps(streaming_buffer):
+    """Estimate the total number of streaming chunks from the buffer state.
+
+    Mirrors the iteration logic in CacheAwareStreamingAudioBuffer.__iter__
+    so that we can feed a ``total`` to tqdm for a meaningful progress bar.
+    """
+    buffer_len = streaming_buffer.buffer.size(-1)
+    cfg = streaming_buffer.streaming_cfg
+
+    if isinstance(cfg.shift_size, list):
+        if streaming_buffer.pad_and_drop_preencoded:
+            first_shift = cfg.shift_size[1]
+        else:
+            first_shift = cfg.shift_size[0]
+        subsequent_shift = cfg.shift_size[1]
+    else:
+        first_shift = cfg.shift_size
+        subsequent_shift = cfg.shift_size
+
+    if buffer_len <= 0:
+        return 0
+    if buffer_len <= first_shift:
+        return 1
+    return 1 + math.ceil((buffer_len - first_shift) / subsequent_shift)
+
+
+def load_rttm_masks_for_samples(
+    samples: list,
+    feat_per_sec: float,
+    max_spks: int,
+) -> Optional[torch.Tensor]:
+    """
+    Load RTTM files referenced in manifest samples and convert them into
+    frame-level speaker activity matrices (same format as diar model output).
+
+    Each sample must have a ``rttm_filepath`` key pointing to an existing
+    RTTM file.  The per-sample matrices are collated (padded) into a single
+    ``(B, T_max, max_spks)`` tensor.
+
+    Args:
+        samples: List of manifest sample dicts.
+        feat_per_sec: Frame resolution in seconds (e.g. 0.08).
+        max_spks: Maximum number of speaker channels.
+
+    Returns:
+        Collated tensor ``(B, T_max, max_spks)`` or ``None`` when *samples*
+        is empty.
+    """
+    rttm_mats = []
+    for idx, sample in enumerate(samples):
+        rttm_path = sample.get('rttm_filepath')
+        if not rttm_path:
+            raise ValueError(
+                f"Sample {idx}: 'rttm_filepath' required when spk_supervision='rttm'"
+            )
+        if not os.path.exists(rttm_path):
+            raise FileNotFoundError(f"Sample {idx}: RTTM file not found: {rttm_path}")
+
+        duration = get_audio_duration_sec(
+            sample['audio_filepath'],
+            offset=float(sample.get('offset', 0)),
+            duration=float(sample.get('duration', 0)),
+        )
+
+        with open(rttm_path, 'r', encoding='utf-8') as f:
+            rttm_lines = f.readlines()
+
+        rttm_timestamps, _ = extract_frame_info_from_rttm(0, duration, rttm_lines)
+        rttm_mat = get_frame_targets_from_rttm(
+            rttm_timestamps=rttm_timestamps,
+            offset=0,
+            duration=duration,
+            round_digits=3,
+            feat_per_sec=round(float(1 / feat_per_sec), 2),
+            max_spks=max_spks,
+        )
+        rttm_mats.append(rttm_mat)
+
+    if len(rttm_mats) > 0:
+        return collate_matrices(rttm_mats)
+    return None
+
+
 def perform_streaming(
     asr_model,
     streaming_buffer,
     compute_dtype: torch.dtype,
     debug_mode=False,
     pad_and_drop_preencoded=False,
+    rttm_masks: Optional[torch.Tensor] = None,
 ):
     """
     Perform cache-aware streaming inference with diarization fusion.
@@ -402,11 +493,19 @@ def perform_streaming(
     chunk.  This adds speaker_infusion_asr to the encoder output, which is
     critical for multi-talker ASR in streaming mode where cache context is
     limited (~5 s).
+
+    When *rttm_masks* is provided (shape ``(B, T_total, N)``), ground-truth
+    RTTM-derived speaker masks are sliced per chunk instead of running the
+    diarization model live.
     """
     batch_size = len(streaming_buffer.streams_length)
     use_pre_encode_diar_fusion = getattr(asr_model, 'use_pre_encode_diar_fusion', False)
+    use_rttm = rttm_masks is not None
 
-    logging.info("Streaming with diarization fusion enabled")
+    if use_rttm:
+        logging.info("Streaming with RTTM ground-truth speaker supervision")
+    else:
+        logging.info("Streaming with diarization fusion enabled")
     if use_pre_encode_diar_fusion:
         logging.info("Pre-encode diar fusion enabled (back-projection)")
 
@@ -414,46 +513,69 @@ def perform_streaming(
         batch_size=batch_size
     )
 
-    # ── Initialize diar streaming state ────────────────────────────────
     model_device = next(asr_model.parameters()).device
-    diar_streaming_state = asr_model.diarization_model.sortformer_modules.init_streaming_state(
-        batch_size=batch_size, device=model_device,
-    )
+
+    if not use_rttm:
+        diar_streaming_state = asr_model.diarization_model.sortformer_modules.init_streaming_state(
+            batch_size=batch_size, device=model_device,
+        )
     diar_pred_out_stream = torch.zeros(
         (batch_size, 0, asr_model.max_num_speakers),
         device=model_device,
     )
 
+    if use_rttm:
+        rttm_masks = rttm_masks.to(model_device)
+        nframes_per_chunk = asr_model.encoder.streaming_cfg.valid_out_len
+        logging.info(f"RTTM mode: nframes_per_chunk={nframes_per_chunk}, "
+                     f"rttm_masks shape={rttm_masks.shape}")
+
     previous_hypotheses = None
     streaming_buffer_iter = iter(streaming_buffer)
+    total_steps = _estimate_streaming_steps(streaming_buffer)
     pred_out_stream = None
-    for step_num, (chunk_audio, chunk_lengths) in enumerate(streaming_buffer_iter):
+    for step_num, (chunk_audio, chunk_lengths) in enumerate(
+        tqdm(streaming_buffer_iter, total=total_steps, desc="Streaming WL-SOT")
+    ):
         with torch.inference_mode():
             chunk_audio = chunk_audio.to(compute_dtype)
             drop_extra = calc_drop_extra_pre_encoded(asr_model, step_num, pad_and_drop_preencoded)
 
-            # ── Diarization streaming step ─────────────────────────────
+            # ── Diarization: live model vs. RTTM masks ─────────────────
             with torch.no_grad():
-                prev_diar_len = diar_pred_out_stream.shape[1]
-                diar_streaming_state, diar_pred_out_stream = (
-                    asr_model.diarization_model.forward_streaming_step(
-                        processed_signal=chunk_audio.transpose(1, 2),
-                        processed_signal_length=chunk_lengths,
-                        streaming_state=diar_streaming_state,
-                        total_preds=diar_pred_out_stream,
-                        drop_extra_pre_encoded=drop_extra,
+                if use_rttm:
+                    start_frame = step_num * nframes_per_chunk
+                    end_frame = start_frame + nframes_per_chunk
+
+                    if end_frame <= rttm_masks.shape[1]:
+                        chunk_diar_preds = rttm_masks[:, start_frame:end_frame, :]
+                    else:
+                        chunk_diar_preds = rttm_masks[:, start_frame:, :]
+                        pad_len = nframes_per_chunk - chunk_diar_preds.shape[1]
+                        if pad_len > 0:
+                            chunk_diar_preds = torch.nn.functional.pad(
+                                chunk_diar_preds, (0, 0, 0, pad_len), value=0.0,
+                            )
+
+                    diar_pred_out_stream = torch.cat(
+                        [diar_pred_out_stream, chunk_diar_preds], dim=1,
                     )
-                )
-                # Per-chunk diar predictions (matches training flow)
-                chunk_diar_preds = diar_pred_out_stream[:, prev_diar_len:, :]
+                else:
+                    prev_diar_len = diar_pred_out_stream.shape[1]
+                    diar_streaming_state, diar_pred_out_stream = (
+                        asr_model.diarization_model.forward_streaming_step(
+                            processed_signal=chunk_audio.transpose(1, 2),
+                            processed_signal_length=chunk_lengths,
+                            streaming_state=diar_streaming_state,
+                            total_preds=diar_pred_out_stream,
+                            drop_extra_pre_encoded=drop_extra,
+                        )
+                    )
+                    chunk_diar_preds = diar_pred_out_stream[:, prev_diar_len:, :]
 
             # ── ASR streaming step (with diar fusion) ──────────────────
             with torch.no_grad():
                 if use_pre_encode_diar_fusion:
-                    # Pre-encode level fusion: run ASR pre_encode,
-                    # fuse speaker info, then feed to encoder with
-                    # bypass_pre_encode=True — exactly matching the
-                    # training flow in forward_simulated_streaming().
                     fused_pre_encode, fused_lengths = asr_model._apply_pre_encode_diar_fusion(
                         chunk_audio, chunk_lengths, chunk_diar_preds, drop_extra,
                     )
@@ -548,6 +670,11 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
     # ── Input validation ───────────────────────────────────────────────
     if sum((cfg.audio_file is not None, cfg.manifest_file is not None, cfg.audio_dir is not None)) != 1:
         raise ValueError("Exactly one of `audio_file`, `manifest_file` or `audio_dir` should be non-empty!")
+
+    if cfg.spk_supervision not in ("diar", "rttm"):
+        raise ValueError(f"spk_supervision must be 'diar' or 'rttm', got '{cfg.spk_supervision}'")
+    if cfg.spk_supervision == "rttm" and cfg.manifest_file is None:
+        raise ValueError("spk_supervision='rttm' requires manifest_file with rttm_filepath entries")
 
     # ── Load ASR model ─────────────────────────────────────────────────
     # setup_model reads cfg.model_path, so map asr_model → model_path
@@ -663,6 +790,16 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
         pad_and_drop_preencoded=cfg.pad_and_drop_preencoded,
     )
 
+    # ── Compute feat_per_sec for RTTM mask loading ───────────────────────
+    feat_per_sec = round(
+        asr_model.cfg.preprocessor.window_stride * asr_model.cfg.encoder.subsampling_factor, 2
+    )
+    use_rttm = cfg.spk_supervision == "rttm"
+    if use_rttm:
+        logging.info(f"Speaker supervision: RTTM (feat_per_sec={feat_per_sec})")
+    else:
+        logging.info("Speaker supervision: diar model (live)")
+
     # ── Collect all SegLST entries across sessions ──────────────────────
     all_seglst_entries = []
 
@@ -734,12 +871,28 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig]:
                     logging.info(
                         f"Starting to stream samples {sample_idx - len(streaming_buffer) + 1} to {sample_idx}..."
                     )
+
+                    # Load RTTM masks for the current batch if using RTTM supervision
+                    batch_rttm_masks = None
+                    if use_rttm:
+                        batch_samples_for_rttm = samples[batch_start_idx : sample_idx + 1]
+                        batch_rttm_masks = load_rttm_masks_for_samples(
+                            samples=batch_samples_for_rttm,
+                            feat_per_sec=feat_per_sec,
+                            max_spks=cfg.max_num_of_spks,
+                        )
+                        logging.info(
+                            f"Loaded RTTM masks for batch [{batch_start_idx}:{sample_idx + 1}], "
+                            f"shape={batch_rttm_masks.shape if batch_rttm_masks is not None else 'None'}"
+                        )
+
                     streaming_tran = perform_streaming(
                         asr_model=asr_model,
                         streaming_buffer=streaming_buffer,
                         compute_dtype=compute_dtype,
                         debug_mode=cfg.debug_mode,
                         pad_and_drop_preencoded=cfg.pad_and_drop_preencoded,
+                        rttm_masks=batch_rttm_masks,
                     )
                     all_streaming_tran.extend(streaming_tran)
 

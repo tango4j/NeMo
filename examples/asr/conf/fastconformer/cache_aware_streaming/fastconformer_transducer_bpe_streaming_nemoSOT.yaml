@@ -19,15 +19,6 @@ model:
     joint_hidden: 640
 
   train_ds:
-    input_cfg:
-      - type: nemo
-        manifest_filepath: /disk_a/datasets/above4spk_finetune_datasets/SOT_SL_brkt/train/nemo_SOT_train_316K_shuf.json
-        weight: 0.7
-
-      - type: nemo
-        manifest_filepath: /gpfs/fs1/projects/ent_aiapps/datasets/data/MultiSpeakerASR/sot_nemo_manifests/manifest_jsons/libri_train_SL_ovl0.08.json
-        weight: 0.3
-
     manifest_filepath: null  # ignored when input_cfg is used
     sample_rate: ${model.sample_rate}
     batch_size: 16 # you may increase batch_size if your memory allows

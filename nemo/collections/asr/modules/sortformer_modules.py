@@ -600,11 +600,11 @@ class SortformerModules(NeuralModule, Exportable):
                     )
                 )
 
-        if self.log:
-            logging.info(
-                f"spkcache: {streaming_state.spkcache.shape}, fifo: {streaming_state.fifo.shape}, "
-                f"chunk: {chunk.shape}, chunk_preds: {chunk_preds.shape}"
-            )
+        # if self.log:
+        #     logging.info(
+        #         f"spkcache: {streaming_state.spkcache.shape}, fifo: {streaming_state.fifo.shape}, "
+        #         f"chunk: {chunk.shape}, chunk_preds: {chunk_preds.shape}"
+        #     )
 
         return streaming_state, chunk_preds
 
