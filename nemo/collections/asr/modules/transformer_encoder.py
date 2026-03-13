@@ -26,6 +26,7 @@ class TransformerEncoderConfig():
     causal_mask: bool = False
     theta_base: int = 10_000
     context_length: int = 4096
+    qk_norm: bool = False
 
 class FeedForward(nn.Module):
     def __init__(self, dim):
@@ -142,7 +143,7 @@ class MultiHeadAttentionWithFA(nn.Module):
 
         return output
 class MultiHeadAttentionWithSDPA(nn.Module):
-    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
+    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False, qk_norm=False):
         super().__init__()
         self.d_out = dim_out
         self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
@@ -153,6 +154,10 @@ class MultiHeadAttentionWithSDPA(nn.Module):
         self.dropout = dropout
         self.causal_mask = causal_mask
         self.out_proj = nn.Linear(self.d_out, self.d_out)
+        self.qk_norm = qk_norm
+        if self.qk_norm:
+            self.q_norm = nn.LayerNorm(self.head_dim)
+            self.k_norm = nn.LayerNorm(self.head_dim)
 
     def forward(self, x, attn_mask=None, use_cache=False):
 
@@ -167,6 +172,9 @@ class MultiHeadAttentionWithSDPA(nn.Module):
         queries = queries.transpose(1,2)
         values = values.transpose(1,2)
 
+        if self.qk_norm:
+            queries = self.q_norm(queries)
+            keys = self.k_norm(keys)
 
         dropout = 0 if self.training == False else self.dropout
         output = scaled_dot_product_attention(queries,keys,values, attn_mask=attn_mask, is_causal=self.causal_mask, dropout_p=dropout)
@@ -263,12 +271,13 @@ class TransformerBlock(nn.Module):
         self.cfg = cfg
         self.pre_norm = LayerNorm(self.cfg.d_model)
         self.mha = MultiHeadAttentionWithSDPA(
-            dim_in=self.cfg.d_model, 
-            dim_out=self.cfg.d_model, 
-            dropout=self.cfg.drop_rate, 
-            qkv_bias=self.cfg.qkv_bias, 
+            dim_in=self.cfg.d_model,
+            dim_out=self.cfg.d_model,
+            dropout=self.cfg.drop_rate,
+            qkv_bias=self.cfg.qkv_bias,
             num_heads=self.cfg.n_heads,
-            causal_mask=self.cfg.causal_mask
+            causal_mask=self.cfg.causal_mask,
+            qk_norm=self.cfg.qk_norm
             )
         self.dropout = nn.Dropout(self.cfg.drop_rate)
         self.post_norm = LayerNorm(self.cfg.d_model)
@@ -379,7 +388,7 @@ class NGPTStackingSubsampling(torch.nn.Module):
 
         return x, length
 class TransformerEncoder(nn.Module):
-    def __init__(self, 
+    def __init__(self,
                 n_mels: int = 80,
                 d_model: int = 512,
                 n_heads: int = 8,
@@ -388,7 +397,8 @@ class TransformerEncoder(nn.Module):
                 qkv_bias: bool = False,
                 causal_mask: bool = False,
                 pre_encode: str = "conv", # "conv" or "stacking"
-                nan_debug: bool = False,
+                nan_debug: bool = True,
+                qk_norm: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
@@ -402,7 +412,7 @@ class TransformerEncoder(nn.Module):
         else:
             raise ValueError(f"Invalid pre_encode: {pre_encode}. Choose from: conv, depth_conv, stacking")
 
-        cfg = TransformerEncoderConfig(d_model=d_model, n_heads=n_heads, n_layers=n_layers, drop_rate=drop_rate, qkv_bias=qkv_bias, causal_mask=causal_mask)
+        cfg = TransformerEncoderConfig(d_model=d_model, n_heads=n_heads, n_layers=n_layers, drop_rate=drop_rate, qkv_bias=qkv_bias, causal_mask=causal_mask, qk_norm=qk_norm)
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
         self.layer_norm = nn.LayerNorm(d_model)
         self.final_norm = nn.LayerNorm(d_model)
