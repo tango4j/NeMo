@@ -57,9 +57,23 @@ model:
     num_mel_frame_per_asr_frame: 8 # subsampling_factor
 
   train_ds:
+    input_cfg:
+      - type: nemo
+        manifest_filepath: /disk_a/datasets/above4spk_finetune_datasets/SOT_SL_brkt/train/nemo_SOT_dev_short_v2_ami_icsi_dipco_116K_shuf.json
+        weight: 0.4
+
+      - type: nemo # Fisher HQfiltered 
+        manifest_filepath: /disk_a/datasets/above4spk_finetune_datasets/SOT_SL_brkt/train/fisher_HQfiltered_180K_shuf.json
+        weight: 0.3
+
+      - type: nemo # LSAM 
+        manifest_filepath: /disk_a/datasets/above4spk_finetune_datasets/SOT_SL_brkt/train/libri_train_short_10-20_184K_shuf.json
+        weight: 0.3
+
+
     use_lhotse: true
     tarred_audio_filepaths: null
-    manifest_filepath: ???
+    manifest_filepath: null 
     sample_rate: ${model.sample_rate}
     shuffle: true
     num_workers: 8

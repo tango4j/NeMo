@@ -33,8 +33,9 @@ model:
   freeze_diar: true
   spk_supervision_strategy: "mix" # Options: "rttm", "diar" and "mix"
   rttm_mix_prob: 0.9 # The sampling probability when mixing RTTMs
-  shuffle_spk_mapping: True # Shuffle the speaker mapping in both transcript and RTTM/diar_preds
   max_num_speakers: 4 # Maximum number of speakers in the dataset
+  no_rttm_to_ones: true
+  randomize_single_speaker_index: false
 
   model_defaults:
     # asr
@@ -57,9 +58,10 @@ model:
     num_mel_frame_per_asr_frame: 8 # subsampling_factor
 
   train_ds:
+    input_cfg: /disk_a_nvd/datasets/nemo_asr_input_cfg/input_cfg_RTASR_En_local_v1.yaml
     use_lhotse: true
     tarred_audio_filepaths: null
-    manifest_filepath: ???
+    manifest_filepath: null 
     sample_rate: ${model.sample_rate}
     shuffle: true
     num_workers: 8
@@ -77,8 +79,9 @@ model:
     spk_tar_all_zero: ${model.model_defaults.spk_tar_all_zero}
     num_sample_per_mel_frame: ${model.model_defaults.num_sample_per_mel_frame}
     num_mel_frame_per_asr_frame: ${model.model_defaults.num_mel_frame_per_asr_frame}
-    shuffle_spk_mapping: ${model.shuffle_spk_mapping}
     spk_supervision_strategy: ${model.spk_supervision_strategy}
+    no_rttm_to_ones: ${model.no_rttm_to_ones}
+    randomize_single_speaker_index: ${model.randomize_single_speaker_index}
 
   validation_ds:
     use_lhotse: true
@@ -93,8 +96,9 @@ model:
     spk_tar_all_zero: ${model.model_defaults.spk_tar_all_zero}
     num_sample_per_mel_frame: ${model.model_defaults.num_sample_per_mel_frame}
     num_mel_frame_per_asr_frame: ${model.model_defaults.num_mel_frame_per_asr_frame}
-    shuffle_spk_mapping: False
     spk_supervision_strategy: diar
+    no_rttm_to_ones: true
+    randomize_single_speaker_index: false
 
   test_ds:
     use_lhotse: true
@@ -109,8 +113,9 @@ model:
     spk_tar_all_zero: ${model.model_defaults.spk_tar_all_zero}
     num_sample_per_mel_frame: ${model.model_defaults.num_sample_per_mel_frame}
     num_mel_frame_per_asr_frame: ${model.model_defaults.num_mel_frame_per_asr_frame}
-    shuffle_spk_mapping: False
     spk_supervision_strategy: diar
+    no_rttm_to_ones: true
+    randomize_single_speaker_index: false
 
   # recommend small vocab size of 128 or 256 when using 4x sub-sampling
   # you may find more detail on how to train a tokenizer at: /scripts/tokenizers/process_asr_text_tokenizer.py

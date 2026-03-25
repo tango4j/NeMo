@@ -48,8 +48,9 @@ class CanaryTokenizer(AggregateTokenizer):
         # for easy access of special tokens
         self.special_tokens = {}
         for special in tokenizers[CANARY_SPECIAL_TOKENIZER].vocab:
-            # Search for special prompting tokens
-            if (special.startswith("<|") and special.endswith("|>")) or special == CANARY_PAD:
+            is_canary_special = (special.startswith("<|") and special.endswith("|>"))
+            is_speaker_bracket = bool(re.fullmatch(r'\[s\d+\]', special))
+            if is_canary_special or is_speaker_bracket or special == CANARY_PAD:
                 self.special_tokens[special] = self.token_to_id(special, lang_id=CANARY_SPECIAL_TOKENIZER)
 
     @cached_property
@@ -236,22 +237,23 @@ class MSCanaryTokenizer(CanaryTokenizer):
         super().__init__(tokenizers)
 
     def text_to_ids(self, text, lang_id):
-        tokenizer = self.tokenizers_dict[lang_id]
-        split_text = re.split(r"(<\|.*?\|>)", text)
+        split_text = re.split(r"(<\|.*?\|>|\[s\d+\])", text)
         spl_tokens = [split_text[i] for i in range(1, len(split_text), 2)]
         transcripts = [split_text[i] for i in range(2, len(split_text), 2)]
         assert len(spl_tokens) == len(transcripts)
         ids = []
-        
+
+        spl_tokenizer = self.tokenizers_dict['spl_tokens']
+        spl_offset = self.token_id_offset['spl_tokens']
+        lang_tokenizer = self.tokenizers_dict[lang_id]
+        lang_offset = self.token_id_offset[lang_id]
+
         for i in range(len(spl_tokens)):
-            assert spl_tokens[i] in self.special_tokens
-            # special tokens 
-            tokenizer = self.tokenizers_dict['spl_tokens']
-            offset = self.token_id_offset['spl_tokens']
-            ids += [n + offset for n in tokenizer.text_to_ids(spl_tokens[i])]
-            # segmented transcripts
-            tokenizer = self.tokenizers_dict[lang_id]
-            offset = self.token_id_offset[lang_id]
-            ids += [n + offset for n in tokenizer.text_to_ids(transcripts[i])]
+            assert spl_tokens[i] in self.special_tokens, (
+                f"Speaker token {spl_tokens[i]!r} not found in special_tokens. "
+                f"Available: {list(self.special_tokens.keys())}"
+            )
+            ids += [n + spl_offset for n in spl_tokenizer.text_to_ids(spl_tokens[i])]
+            ids += [n + lang_offset for n in lang_tokenizer.text_to_ids(transcripts[i])]
 
         return ids

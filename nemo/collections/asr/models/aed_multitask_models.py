@@ -25,7 +25,7 @@ from lightning.pytorch import Trainer
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from nemo.collections.asr.data.audio_to_text_lhotse_prompted import (
+from nemo.collections.asr.data.audio_to_sot_text_lhotse_prompted import (
     PromptedAudioToTextLhotseDataset,
     PromptedAudioToTextMiniBatch,
 )
@@ -637,6 +637,24 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             # Adding this to support processing audio files of arbitrary length by chunking them into hour-long segments.
             config.cut_into_windows_duration = 3600
             config.cut_into_windows_hop = 3600
+
+        # Build SOT config when the model is configured for multi-speaker
+        sot_cfg = None
+        if self.cfg.get('max_num_speakers', 0) > 0:
+            if hasattr(self, 'encoder') and self.encoder is not None:
+                subsampling_factor = getattr(self.encoder, 'subsampling_factor', 8)
+            else:
+                subsampling_factor = self.cfg.get('encoder', {}).get('subsampling_factor', 8)
+            sot_cfg = {
+                'num_speakers': self.cfg.get('max_num_speakers', 4),
+                'sample_rate': self.cfg.get('sample_rate', 16000),
+                'window_stride': self.cfg.get('preprocessor', {}).get('window_stride', 0.01),
+                'subsampling_factor': subsampling_factor,
+                'convert_to_wl': config.get('convert_to_wl', False),
+                'no_rttm_to_ones': config.get('no_rttm_to_ones', True),
+                'randomize_single_speaker_index': config.get('randomize_single_speaker_index', False),
+            }
+
         return get_lhotse_dataloader_from_config(
             config,
             global_rank=global_rank,
@@ -644,7 +662,8 @@ class EncDecMultiTaskModel(ASRModel, ExportableEncDecModel, ASRBPEMixin, ASRModu
             dataset=PromptedAudioToTextLhotseDataset(
                 tokenizer=self.tokenizer,
                 prompt=self.prompt,
-                enable_chunking=enable_chunking,  # <-- enables chunking
+                enable_chunking=enable_chunking,
+                sot_cfg=sot_cfg,
             ),
             tokenizer=self.tokenizer,
         )

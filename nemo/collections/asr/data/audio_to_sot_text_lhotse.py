@@ -455,36 +455,7 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
         cols_to_zero = [c for c in range(num_spk) if c not in speakers_set]
         if cols_to_zero:
             fixed[:, cols_to_zero] = 0.0
-
-        if False and best_perm != identity_perm:
-            identity_dtw = self._dtw_cost(
-                activity_np, spk_seq_arr, identity_perm, num_spk, token_weights
-            )
-            identity_freq = self._speaker_freq_cost_batch(
-                text_freq, rttm_freq, np.array([identity_perm], dtype=np.intp)
-            )[0]
-            identity_cost = float(identity_dtw) + float(identity_freq)
-            logging.info("SPK_FIX %s | cost %.4f→%.4f | perm %s→%s", cut.id.split('/')[-1], identity_cost, best_cost, identity_perm, best_perm)
-            # if "fe" in cut.id:
-            #     import os; _id = cut.id.split('/')[-1].replace(' ', '_'); _dir = os.path.expanduser(f'~/projects/sot_mt_asr_rt/SOT_DP_fix_example/{_id}'); os.makedirs(_dir, exist_ok=True)
-            #     np.save(f'{_dir}/activity_np.npy', activity_np)
-            #     np.save(f'{_dir}/spk_seq_arr.npy', spk_seq_arr)
-            #     np.save(f'{_dir}/token_weights.npy', token_weights)
-            #     np.save(f'{_dir}/text_freq.npy', text_freq)
-            #     np.save(f'{_dir}/rttm_freq.npy', rttm_freq)
-            #     np.save(f'{_dir}/perm_batch.npy', perm_batch)
-            #     np.save(f'{_dir}/dtw_costs.npy', dtw_costs)
-            #     np.save(f'{_dir}/freq_costs.npy', freq_costs)
-            #     np.save(f'{_dir}/total_costs.npy', total_costs)
-            #     np.save(f'{_dir}/best_perm.npy', np.array(best_perm))
-            #     np.save(f'{_dir}/identity_perm.npy', np.array(identity_perm))
-            #     np.save(f'{_dir}/fixed.npy', fixed.detach().cpu().numpy())
-            #     np.save(f'{_dir}/speaker_activity_orig.npy', speaker_activity.detach().cpu().numpy())
-            #     with open(f'{_dir}/text.txt', 'w') as _f: _f.write(text)
-            #     with open(f'{_dir}/meta.txt', 'w') as _f: _f.write(f'cut_id: {cut.id}\nT: {T}\nK: {K}\nnum_spk: {num_spk}\nnum_active: {num_active}\nbest_perm: {best_perm}\nidentity_perm: {identity_perm}\nbest_cost: {best_cost}\nidentity_cost: {identity_cost}\nspeakers_in_text: {speakers_in_text}\n')
-            #     print(f'Saved to {_dir}/')
-            #     import ipdb; ipdb.set_trace()
-
+        import ipdb; ipdb.set_trace()
         return fixed
 
     def _tokenize_cuts(self, cuts) -> Tuple[torch.Tensor, torch.Tensor]:

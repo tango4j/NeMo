@@ -323,6 +323,7 @@ def speaker_to_target(
     soft_label: bool = False,
     soft_thres: float = 0.5,
     return_text: bool = False,
+    no_rttm_to_ones: bool = True,
 ):
     '''
     Get rttm samples corresponding to one cut, generate speaker mask numpy.ndarray with shape (num_speaker, hidden_length)
@@ -359,8 +360,17 @@ def speaker_to_target(
         elif cut.supervisions:
             rttms = SupervisionSet(cut.supervisions)
         else:
-            logging.warning(f"No rttm or supervisions found for cut {cut.id}")
-            continue
+            if no_rttm_to_ones:
+                rttms = SupervisionSet([SupervisionSegment(
+                    id=cut.id,
+                    recording_id=cut.recording_id,
+                    start=0,
+                    duration=cut.duration,
+                    speaker=getattr(cut, 'speaker', 'speaker_0'),
+                )])
+            else:
+                logging.warning(f"No rttm or supervisions found for cut {cut.id}")
+                continue
 
         start = cut.offset if hasattr(cut, 'offset') else cut.start
         end = start + cut.duration
