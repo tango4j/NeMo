@@ -76,6 +76,7 @@ model:
     num_buckets: 20
     bucket_buffer_size: 20000
     shuffle_buffer_size: 10000
+    skip_missing_manifest_entries: true
     spk_tar_all_zero: ${model.model_defaults.spk_tar_all_zero}
     num_sample_per_mel_frame: ${model.model_defaults.num_sample_per_mel_frame}
     num_mel_frame_per_asr_frame: ${model.model_defaults.num_mel_frame_per_asr_frame}
