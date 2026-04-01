@@ -18,7 +18,6 @@ from typing import Dict, List, Optional, Tuple
 import editdistance
 import numpy as np
 import pandas as pd
-import torch
 from pyannote.core import Segment, Timeline
 from pyannote.metrics.diarization import DiarizationErrorRate
 from scipy.optimize import linear_sum_assignment as scipy_linear_sum_assignment
@@ -118,7 +117,7 @@ def uem_timeline_from_file(uem_file, uniq_name=''):
      UNIQ_SPEAKER_ID CHANNEL START_TIME END_TIME
     """
     timeline = Timeline(uri=uniq_name)
-    with open(uem_file, 'r') as f:
+    with open(uem_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
         for line in lines:
             line = line.strip()
@@ -303,8 +302,14 @@ def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference:
     num_ref = len(spk_reference)
     num_speakers_padded = max(num_hyp, num_ref)
 
-    ref_word_lists = [spk_reference[ref_idx].split() if ref_idx < num_ref else [] for ref_idx in range(num_speakers_padded)]
-    hyp_word_lists = [spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else [] for hyp_idx in range(num_speakers_padded)]
+    ref_word_lists = [
+        spk_reference[ref_idx].split() if ref_idx < num_ref else []
+        for ref_idx in range(num_speakers_padded)
+    ]
+    hyp_word_lists = [
+        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else []
+        for hyp_idx in range(num_speakers_padded)
+    ]
 
     best_total_errors = float('inf')
     best_hyp_trans = ""
@@ -326,7 +331,7 @@ def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference:
 
 
 def calculate_session_cpWER(
-    spk_hypothesis: List[str], spk_reference: List[str] 
+    spk_hypothesis: List[str], spk_reference: List[str]
 ) -> Tuple[float, str, str]:
     """
     Calculate a session-level concatenated minimum-permutation word error rate (cpWER) value,
@@ -354,10 +359,6 @@ def calculate_session_cpWER(
             Example:
             >>> spk_reference = ["hi how are you well that's nice", "i'm good yeah how is your sister"]
 
-        use_lsa_only (bool):
-            Kept for API compatibility. Has no effect since the square cost matrix with
-            Hungarian algorithm handles all speaker count combinations.
-
     Returns:
         cpWER (float):
             cpWER value for the given session.
@@ -374,8 +375,14 @@ def calculate_session_cpWER(
 
     num_speakers_padded = max(num_hyp, num_ref)
 
-    ref_word_lists = [spk_reference[ref_idx].split() if ref_idx < num_ref else [] for ref_idx in range(num_speakers_padded)]
-    hyp_word_lists = [spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else [] for hyp_idx in range(num_speakers_padded)]
+    ref_word_lists = [
+        spk_reference[ref_idx].split() if ref_idx < num_ref else []
+        for ref_idx in range(num_speakers_padded)
+    ]
+    hyp_word_lists = [
+        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else []
+        for hyp_idx in range(num_speakers_padded)
+    ]
 
     cost_matrix = np.zeros((num_speakers_padded, num_speakers_padded), dtype=np.float64)
     for ref_idx in range(num_speakers_padded):
