@@ -12,41 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nemo.collections.asr.models.aed_multitask_models import EncDecMultiTaskModel, MSEncDecMultiTaskModel
-from nemo.collections.asr.models.asr_model import ASRModel
-from nemo.collections.asr.models.classification_models import (
+from nemo.collections.asr.models.aed_multitask_models import EncDecMultiTaskModel, MSEncDecMultiTaskModel  # noqa: F401
+from nemo.collections.asr.models.asr_model import ASRModel  # noqa: F401
+from nemo.collections.asr.models.classification_models import (  # noqa: F401
     ClassificationInferConfig,
     EncDecClassificationModel,
     EncDecFrameClassificationModel,
 )
-from nemo.collections.asr.models.clustering_diarizer import ClusteringDiarizer
-from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE, MSEncDecCTCModelBPE
-from nemo.collections.asr.models.ctc_models import EncDecCTCModel
-from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models import EncDecHybridRNNTCTCBPEModel
-from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import EncDecHybridRNNTCTCBPEModelWithPrompt
-from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel
-from nemo.collections.asr.models.k2_sequence_models import (
+from nemo.collections.asr.models.clustering_diarizer import ClusteringDiarizer  # noqa: F401
+from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE, MSEncDecCTCModelBPE  # noqa: F401
+from nemo.collections.asr.models.ctc_models import EncDecCTCModel  # noqa: F401
+from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models import EncDecHybridRNNTCTCBPEModel  # noqa: F401
+from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import EncDecHybridRNNTCTCBPEModelWithPrompt  # noqa: F401
+from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel  # noqa: F401
+from nemo.collections.asr.models.k2_sequence_models import (  # noqa: F401
     EncDecK2RnntSeqModel,
     EncDecK2RnntSeqModelBPE,
     EncDecK2SeqModel,
     EncDecK2SeqModelBPE,
 )
-from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel
-from nemo.collections.asr.models.moe_ctc_bpe_models import EncDecMoECTCModelBPE
-from nemo.collections.asr.models.moe_hybrid_rnnt_ctc_bpe_models import EncDecMoEHybridRNNTCTCBPEModel
-from nemo.collections.asr.models.moe_rnnt_bpe_models import EncDecMoERNNTBPEModel
-from nemo.collections.asr.models.msdd_models import EncDecDiarLabelModel, NeuralDiarizer
-from nemo.collections.asr.models.multitalker_asr_models import EncDecMultiTalkerRNNTBPEModel
-from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel, MSEncDecRNNTBPEModel
-from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel
-from nemo.collections.asr.models.slu_models import SLUIntentSlotBPEModel
-from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel
-from nemo.collections.asr.models.ssl_models import (
+from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel  # noqa: F401
+from nemo.collections.asr.models.moe_ctc_bpe_models import EncDecMoECTCModelBPE  # noqa: F401
+from nemo.collections.asr.models.moe_hybrid_rnnt_ctc_bpe_models import EncDecMoEHybridRNNTCTCBPEModel  # noqa: F401
+from nemo.collections.asr.models.moe_rnnt_bpe_models import EncDecMoERNNTBPEModel  # noqa: F401
+from nemo.collections.asr.models.msdd_models import EncDecDiarLabelModel, NeuralDiarizer  # noqa: F401
+from nemo.collections.asr.models.multitalker_asr_models import EncDecMultiTalkerRNNTBPEModel  # noqa: F401
+from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel, MSEncDecRNNTBPEModel  # noqa: F401
+from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel  # noqa: F401
+from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel  # noqa: F401
+from nemo.collections.asr.models.ssl_models import (  # noqa: F401
     EncDecDenoiseMaskedTokenPredModel,
     EncDecMaskedTokenPredModel,
     SpeechEncDecSelfSupervisedModel,
 )
-from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE
+from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE  # noqa: F401
 
 __all__ = [
     'ASRModel',
@@ -56,14 +55,10 @@ __all__ = [
     'EncDecCTCModelBPE',
     'EncDecClassificationModel',
     'EncDecDenoiseMaskedTokenPredModel',
-    'EncDecDiarLabelModel',
     'EncDecFrameClassificationModel',
     'EncDecHybridRNNTCTCBPEModel',
+    'EncDecHybridRNNTCTCBPEModelWithPrompt',
     'EncDecHybridRNNTCTCModel',
-    'EncDecK2RnntSeqModel',
-    'EncDecK2RnntSeqModelBPE',
-    'EncDecK2SeqModel',
-    'EncDecK2SeqModelBPE',
     'EncDecMaskedTokenPredModel',
     'EncDecMoECTCModelBPE',
     'EncDecMoEHybridRNNTCTCBPEModel',
@@ -76,8 +71,6 @@ __all__ = [
     'MSEncDecRNNTBPEModel',
     'EncDecSpeakerLabelModel',
     'EncDecTransfModelBPE',
-    'NeuralDiarizer',
-    'SLUIntentSlotBPEModel',
     'SortformerEncLabelModel',
     'SpeechEncDecSelfSupervisedModel',
 ]
