@@ -303,12 +303,10 @@ def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference:
     num_speakers_padded = max(num_hyp, num_ref)
 
     ref_word_lists = [
-        spk_reference[ref_idx].split() if ref_idx < num_ref else []
-        for ref_idx in range(num_speakers_padded)
+        spk_reference[ref_idx].split() if ref_idx < num_ref else [] for ref_idx in range(num_speakers_padded)
     ]
     hyp_word_lists = [
-        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else []
-        for hyp_idx in range(num_speakers_padded)
+        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else [] for hyp_idx in range(num_speakers_padded)
     ]
 
     best_total_errors = float('inf')
@@ -330,9 +328,7 @@ def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference:
     return cpWER, best_hyp_trans, ref_trans
 
 
-def calculate_session_cpWER(
-    spk_hypothesis: List[str], spk_reference: List[str]
-) -> Tuple[float, str, str]:
+def calculate_session_cpWER(spk_hypothesis: List[str], spk_reference: List[str]) -> Tuple[float, str, str]:
     """
     Calculate a session-level concatenated minimum-permutation word error rate (cpWER) value,
     matching MeetEval's cpWER algorithm (https://github.com/fgnt/meeteval).
@@ -376,12 +372,10 @@ def calculate_session_cpWER(
     num_speakers_padded = max(num_hyp, num_ref)
 
     ref_word_lists = [
-        spk_reference[ref_idx].split() if ref_idx < num_ref else []
-        for ref_idx in range(num_speakers_padded)
+        spk_reference[ref_idx].split() if ref_idx < num_ref else [] for ref_idx in range(num_speakers_padded)
     ]
     hyp_word_lists = [
-        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else []
-        for hyp_idx in range(num_speakers_padded)
+        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else [] for hyp_idx in range(num_speakers_padded)
     ]
 
     cost_matrix = np.zeros((num_speakers_padded, num_speakers_padded), dtype=np.float64)

@@ -14,10 +14,7 @@
 
 import pytest
 
-from nemo.collections.asr.metrics.der import (
-    get_online_DER_stats,
-    get_partial_ref_labels,
-)
+from nemo.collections.asr.metrics.der import get_online_DER_stats, get_partial_ref_labels
 
 
 class TestDiarMetrics:
