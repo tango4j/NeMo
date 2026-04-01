@@ -18,7 +18,6 @@ All expected values are pre-verified against MeetEval (https://github.com/fgnt/m
 """
 
 from itertools import permutations
-
 import pytest
 import torch
 
