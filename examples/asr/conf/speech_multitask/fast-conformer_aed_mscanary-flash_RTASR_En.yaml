@@ -58,7 +58,7 @@ model:
     num_mel_frame_per_asr_frame: 8 # subsampling_factor
 
   train_ds:
-    input_cfg: /disk_a_nvd/datasets/nemo_asr_input_cfg/input_cfg_RTASR_En_local_v1.yaml
+    input_cfg: / disk_a_nvd/datasets/nemo_asr_input_cfg/input_cfg_RTASR_En_local_v1.yaml
     use_lhotse: true
     tarred_audio_filepaths: null
     manifest_filepath: null 
