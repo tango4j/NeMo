@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import itertools
 from itertools import permutations
 from typing import Dict, List, Optional, Tuple
 
 import editdistance
 import numpy as np
 import pandas as pd
-import torch
 from pyannote.core import Segment, Timeline
 from pyannote.metrics.diarization import DiarizationErrorRate
 from scipy.optimize import linear_sum_assignment as scipy_linear_sum_assignment
@@ -119,7 +117,7 @@ def uem_timeline_from_file(uem_file, uniq_name=''):
      UNIQ_SPEAKER_ID CHANNEL START_TIME END_TIME
     """
     timeline = Timeline(uri=uniq_name)
-    with open(uem_file, 'r') as f:
+    with open(uem_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
         for line in lines:
             line = line.strip()
@@ -302,21 +300,25 @@ def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference:
     """
     num_hyp = len(spk_hypothesis)
     num_ref = len(spk_reference)
-    N = max(num_hyp, num_ref)
+    num_speakers_padded = max(num_hyp, num_ref)
 
-    ref_word_lists = [spk_reference[i].split() if i < num_ref else [] for i in range(N)]
-    hyp_word_lists = [spk_hypothesis[j].split() if j < num_hyp else [] for j in range(N)]
+    ref_word_lists = [
+        spk_reference[ref_idx].split() if ref_idx < num_ref else [] for ref_idx in range(num_speakers_padded)
+    ]
+    hyp_word_lists = [
+        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else [] for hyp_idx in range(num_speakers_padded)
+    ]
 
     best_total_errors = float('inf')
     best_hyp_trans = ""
-    total_ref_length = sum(len(wl) for wl in ref_word_lists)
+    total_ref_length = sum(len(word_list) for word_list in ref_word_lists)
 
-    for perm in permutations(range(N)):
+    for perm in permutations(range(num_speakers_padded)):
         total_errors = 0
         hyp_texts = []
-        for r_idx, h_idx in enumerate(perm):
-            total_errors += editdistance.eval(ref_word_lists[r_idx], hyp_word_lists[h_idx])
-            hyp_texts.append(spk_hypothesis[h_idx] if h_idx < num_hyp else "")
+        for ref_idx, hyp_idx in enumerate(perm):
+            total_errors += editdistance.eval(ref_word_lists[ref_idx], hyp_word_lists[hyp_idx])
+            hyp_texts.append(spk_hypothesis[hyp_idx] if hyp_idx < num_hyp else "")
         if total_errors < best_total_errors:
             best_total_errors = total_errors
             best_hyp_trans = " ".join(hyp_texts)
@@ -326,9 +328,7 @@ def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference:
     return cpWER, best_hyp_trans, ref_trans
 
 
-def calculate_session_cpWER(
-    spk_hypothesis: List[str], spk_reference: List[str], use_lsa_only: bool = False
-) -> Tuple[float, str, str]:
+def calculate_session_cpWER(spk_hypothesis: List[str], spk_reference: List[str]) -> Tuple[float, str, str]:
     """
     Calculate a session-level concatenated minimum-permutation word error rate (cpWER) value,
     matching MeetEval's cpWER algorithm (https://github.com/fgnt/meeteval).
@@ -355,10 +355,6 @@ def calculate_session_cpWER(
             Example:
             >>> spk_reference = ["hi how are you well that's nice", "i'm good yeah how is your sister"]
 
-        use_lsa_only (bool):
-            Kept for API compatibility. Has no effect since the square cost matrix with
-            Hungarian algorithm handles all speaker count combinations.
-
     Returns:
         cpWER (float):
             cpWER value for the given session.
@@ -373,25 +369,29 @@ def calculate_session_cpWER(
     if num_hyp == 0 and num_ref == 0:
         return 0.0, "", ""
 
-    N = max(num_hyp, num_ref)
+    num_speakers_padded = max(num_hyp, num_ref)
 
-    ref_word_lists = [spk_reference[i].split() if i < num_ref else [] for i in range(N)]
-    hyp_word_lists = [spk_hypothesis[j].split() if j < num_hyp else [] for j in range(N)]
+    ref_word_lists = [
+        spk_reference[ref_idx].split() if ref_idx < num_ref else [] for ref_idx in range(num_speakers_padded)
+    ]
+    hyp_word_lists = [
+        spk_hypothesis[hyp_idx].split() if hyp_idx < num_hyp else [] for hyp_idx in range(num_speakers_padded)
+    ]
 
-    cost_matrix = np.zeros((N, N), dtype=np.float64)
-    for i in range(N):
-        for j in range(N):
-            cost_matrix[i, j] = editdistance.eval(ref_word_lists[i], hyp_word_lists[j])
+    cost_matrix = np.zeros((num_speakers_padded, num_speakers_padded), dtype=np.float64)
+    for ref_idx in range(num_speakers_padded):
+        for hyp_idx in range(num_speakers_padded):
+            cost_matrix[ref_idx, hyp_idx] = editdistance.eval(ref_word_lists[ref_idx], hyp_word_lists[hyp_idx])
 
     row_ind, col_ind = scipy_linear_sum_assignment(cost_matrix)
 
     total_errors = 0
     total_ref_length = 0
     hyp_texts = []
-    for r_idx, h_idx in zip(row_ind, col_ind):
-        total_errors += int(cost_matrix[r_idx, h_idx])
-        total_ref_length += len(ref_word_lists[r_idx])
-        hyp_texts.append(spk_hypothesis[h_idx] if h_idx < num_hyp else "")
+    for ref_idx, hyp_idx in zip(row_ind, col_ind):
+        total_errors += int(cost_matrix[ref_idx, hyp_idx])
+        total_ref_length += len(ref_word_lists[ref_idx])
+        hyp_texts.append(spk_hypothesis[hyp_idx] if hyp_idx < num_hyp else "")
 
     cpWER = total_errors / total_ref_length if total_ref_length > 0 else float('inf')
 
