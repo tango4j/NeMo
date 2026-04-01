@@ -207,14 +207,16 @@ class LazyNeMoIterator:
                 channel_ids=[0],
             )
         elif is_datastore_path(audio_path):
-            sr = 16000
+            with open_best(audio_path, mode="rb") as f:
+                raw_audio = f.read()
+            meta = soundfile.info(BytesIO(raw_audio))
             return Recording(
                 id=audio_path,
-                sources=[AudioSource(type="url", channels=[0], source=audio_path)],
-                sampling_rate=sr,
-                num_samples=compute_num_samples(duration, sr),
-                duration=duration,
-                channel_ids=[0],
+                sources=[AudioSource(type="memory", channels=list(range(meta.channels)), source=raw_audio)],
+                sampling_rate=int(meta.samplerate),
+                num_samples=meta.frames,
+                duration=meta.duration,
+                channel_ids=list(range(meta.channels)),
             )
         else:
             return Recording.from_file(audio_path)
