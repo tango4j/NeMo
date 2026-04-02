@@ -25,17 +25,10 @@ from nemo.collections.asr.models.ctc_models import EncDecCTCModel  # noqa: F401
 from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models import EncDecHybridRNNTCTCBPEModel  # noqa: F401
 from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import EncDecHybridRNNTCTCBPEModelWithPrompt  # noqa: F401
 from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel  # noqa: F401
-from nemo.collections.asr.models.k2_sequence_models import (  # noqa: F401
-    EncDecK2RnntSeqModel,
-    EncDecK2RnntSeqModelBPE,
-    EncDecK2SeqModel,
-    EncDecK2SeqModelBPE,
-)
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel  # noqa: F401
 from nemo.collections.asr.models.moe_ctc_bpe_models import EncDecMoECTCModelBPE  # noqa: F401
 from nemo.collections.asr.models.moe_hybrid_rnnt_ctc_bpe_models import EncDecMoEHybridRNNTCTCBPEModel  # noqa: F401
 from nemo.collections.asr.models.moe_rnnt_bpe_models import EncDecMoERNNTBPEModel  # noqa: F401
-from nemo.collections.asr.models.msdd_models import EncDecDiarLabelModel, NeuralDiarizer  # noqa: F401
 from nemo.collections.asr.models.multitalker_asr_models import EncDecMultiTalkerRNNTBPEModel  # noqa: F401
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel, MSEncDecRNNTBPEModel  # noqa: F401
 from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel  # noqa: F401

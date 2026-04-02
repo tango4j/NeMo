@@ -13,11 +13,13 @@
 # limitations under the License.
 
 from nemo.collections.asr.metrics.bleu import BLEU
+from nemo.collections.asr.metrics.cpwer import CpWER
 from nemo.collections.asr.metrics.multitask import MultiTaskMetric
 from nemo.collections.asr.metrics.wer import WER
 
 __all__ = [
     "MultiTaskMetric",
     "WER",
+    "CpWER",
     "BLEU",
 ]

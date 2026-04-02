@@ -25,6 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
 from nemo.collections.asr.data.audio_to_text_lhotse_prompted import PromptedAudioToTextMiniBatch
+from nemo.collections.asr.metrics.cpwer import CpWER
 from nemo.collections.asr.metrics.wer import WER
 from nemo.core.classes import Serialization
 
@@ -361,9 +362,6 @@ class MultiTaskMetric(Serialization):
         output_dict = {}
 
         for name, metric in self._metric_dict.items():
-            # Handle WER metric's special return format
-            # Custom name of metric used as suffix to allow custom naming.
-            # TODO: Standardize WER to return dict like other metrics
             if type(metric) is WER:
                 wer, wer_num, wer_denom = metric.compute()
                 if return_all_metrics:
@@ -378,6 +376,22 @@ class MultiTaskMetric(Serialization):
                     output_dict.update(
                         {
                             f"{prefix}wer": wer,
+                        }
+                    )
+            elif type(metric) is CpWER:
+                cpwer, cpwer_num, cpwer_denom = metric.compute()
+                if return_all_metrics:
+                    output_dict.update(
+                        {
+                            f"{prefix}cpwer": cpwer,
+                            f"{prefix}cpwer_num": cpwer_num,
+                            f"{prefix}cpwer_denom": cpwer_denom,
+                        }
+                    )
+                else:
+                    output_dict.update(
+                        {
+                            f"{prefix}cpwer": cpwer,
                         }
                     )
             else:
