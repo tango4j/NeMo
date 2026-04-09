@@ -285,14 +285,18 @@ class MoETransformerEncoder(TransformerEncoder):
         )
 
     def get_moe_auxiliary_loss(self) -> Optional[torch.Tensor]:
-        """Collect and return the weighted sum of auxiliary load-balancing losses
+        """Collect and return the weighted mean of auxiliary load-balancing losses
         from all MoE feed-forward modules.
+
+        The raw per-layer losses are averaged (not summed) so that
+        ``moe_load_balance_loss_weight`` is independent of the number of MoE layers.
 
         Returns:
             torch.Tensor or None: Weighted scalar auxiliary loss, or None if
                 no MoE layers have computed a loss yet.
         """
         total_loss = None
+        n_losses = 0
 
         for layer_idx in self.moe_layer_indices:
             layer = self.layers[layer_idx]
@@ -303,9 +307,10 @@ class MoETransformerEncoder(TransformerEncoder):
                     total_loss = ff_module._aux_loss
                 else:
                     total_loss = total_loss + ff_module._aux_loss
+                n_losses += 1
 
-        if total_loss is not None:
-            total_loss = self.moe_load_balance_loss_weight * total_loss
+        if total_loss is not None and n_losses > 0:
+            total_loss = self.moe_load_balance_loss_weight * (total_loss / n_losses)
 
         return total_loss
 
