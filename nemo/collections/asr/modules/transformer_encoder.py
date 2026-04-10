@@ -380,7 +380,7 @@ class NGPTStackingSubsampling(torch.nn.Module):
 
         # Pad and fill padding frames (all-zero) with a learnable padding 'embedding'
         x = torch.nn.functional.pad(x, (0, 0, 0, pad_size))
-        x[(x == 0).all(dim=-1)] = self.pad_frame
+        x[(x == 0).all(dim=-1)] = self.pad_frame.to(x.dtype)
 
         _, t, _ = x.size()
         x = torch.reshape(x, (b, t // self.subsampling_factor, h * self.subsampling_factor))
