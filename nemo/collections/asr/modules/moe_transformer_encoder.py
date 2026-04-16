@@ -203,6 +203,7 @@ class MoETransformerEncoder(TransformerEncoder):
         pre_encode: str = "conv",
         nan_debug: bool = True,
         qk_norm: bool = False,
+        subsampling_factor: int = 4,
         # MoE parameters
         moe_num_experts: int = 8,
         moe_top_k: int = 1,
@@ -223,6 +224,7 @@ class MoETransformerEncoder(TransformerEncoder):
             pre_encode=pre_encode,
             nan_debug=nan_debug,
             qk_norm=qk_norm,
+            subsampling_factor=subsampling_factor,
         )
 
         self.moe_num_experts = moe_num_experts
