@@ -35,6 +35,10 @@ from lhotse.serialization import load_yaml
 from lhotse.utils import fastcopy
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
+from nemo.collections.common.data.lhotse.speaker_aliases import (
+    SpeakerAliasTable,
+    build_alias_table,
+)
 from nemo.collections.common.data.lhotse.nemo_adapters import (
     LazyNeMoIterator,
     LazyNeMoTarredIterator,
@@ -754,6 +758,27 @@ def read_parquet_manifest(config: DictConfig) -> tuple[CutSet, bool]:
     return cuts, True
 
 
+def _resolve_speaker_aliases(cut: Cut) -> SpeakerAliasTable:
+    """Build a SpeakerAliasTable from ``cut.speaker_aliases`` if present.
+
+    The dict is expected to have been attached via the YAML ``tags:`` mechanism
+    in the data blend, e.g.::
+
+        - type: lhotse_as_conversation
+          input_cfg: /path/to/blend.yaml
+          tags:
+            speaker_aliases:
+              enable: true
+              max_speakers: 8
+              base_special_id: 100
+
+    Returns an inactive (empty) table when no config is attached, so callers
+    can unconditionally call ``table.apply(text)``.
+    """
+    cfg = getattr(cut, "speaker_aliases", None)
+    return build_alias_table(cfg)
+
+
 def cut_to_conversation(
     cut: Cut, audio_locator_tag: str, token_equivalent_duration: float
 ) -> NeMoMultimodalConversation:
@@ -762,17 +787,24 @@ def cut_to_conversation(
     and assistant turn contains text response from ``cut.supervisions[0].text``.
 
     If ``cut`` has a custom field ``context``, it's pre-pended as an extra user text turn before the user's audio turn.
+    If ``cut`` has a custom field ``speaker_aliases`` (typically attached via the
+    YAML ``tags:`` mechanism), user-facing speaker tags like ``[s0]`` in the
+    assistant text / context / system_prompt are rewritten to the underlying
+    reserved tokenizer tokens (e.g. ``<SPECIAL_100>``) so that the LLM tokenizer
+    encodes them as single ids without any vocab-size growth.
     """
     if isinstance(cut, NeMoMultimodalConversation):
         return cut
+    spk = _resolve_speaker_aliases(cut)
+    assistant_text = spk.apply(cut.supervisions[0].text)
     turns = [
-        AudioTurn(cut=cut, role="user", audio_locator_tag=audio_locator_tag, text=cut.supervisions[0].text),
-        TextTurn(value=cut.supervisions[0].text, role="assistant"),
+        AudioTurn(cut=cut, role="user", audio_locator_tag=audio_locator_tag, text=assistant_text),
+        TextTurn(value=assistant_text, role="assistant"),
     ]
     if hasattr(cut, "context"):
-        turns = [TextTurn(value=cut.context, role="user")] + turns
+        turns = [TextTurn(value=spk.apply(cut.context), role="user")] + turns
     if hasattr(cut, "system_prompt"):
-        turns = [TextTurn(value=cut.system_prompt, role="system")] + turns
+        turns = [TextTurn(value=spk.apply(cut.system_prompt), role="system")] + turns
     return NeMoMultimodalConversation(
         id=cut.id,
         turns=turns,

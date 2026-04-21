@@ -16,14 +16,19 @@ from collections import defaultdict
 from typing import Any
 
 import torch
+from hydra.utils import instantiate
 from lightning import LightningModule
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 from torch import Tensor
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.parallel import loss_parallel
 from transformers import GenerationConfig
 
+from nemo.collections.common.data.lhotse.speaker_aliases import (
+    SpeakerAliasTable,
+    build_alias_table,
+)
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
@@ -55,6 +60,20 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             self.cfg.pretrained_llm, use_fast=True, trust_remote_code=self.cfg.get("trust_remote_code", False)
         )
         self.tokenizer.add_special_tokens({"additional_special_tokens": [self.audio_locator_tag]})
+        # Multi-speaker alias setup. Maps user-facing speaker tags (e.g. "[s0]") onto
+        # ids that already exist in the LLM tokenizer's reserved-token pool, so we
+        # avoid resize_token_embeddings() and stay shape-compatible with the base HF
+        # checkpoint and FSDP2/EP sharding. Disabled if `speaker_aliases` is absent.
+        self.speaker_alias_table: SpeakerAliasTable = build_alias_table(self.cfg.get("speaker_aliases", None))
+        self.speaker_token_ids: list[int] = []
+        self._init_speaker_aliases()
+        # Optional auxiliary Latent Speaker Supervision (LSS) loss. Mirrors the
+        # AED Canary recipe in nemo/collections/asr/models/aed_multitask_models.py
+        # (cf. EncDecMultiTaskModel.__init__ around L229-239): instantiated via
+        # Hydra `_target_` from a `lss_loss:` YAML block, with `speaker_token_ids`
+        # auto-injected when absent. Disabled when the YAML block is absent.
+        self.lss_loss = None
+        self._init_lss_loss()
         self.llm = None  # populated by configure_model
         self.perception = None  # populated by configure_model
 
@@ -130,6 +149,85 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     @property
     def audio_locator_tag_id(self) -> int:
         return self.tokenizer.token_to_id(self.audio_locator_tag)
+
+    def _init_speaker_aliases(self) -> None:
+        """Register the alias-table's underlying tokens with the LLM tokenizer
+        and resolve their ids.
+
+        For implementation details (alias semantics, no-vocab-growth assertion,
+        regex precedence for ``[s10]`` vs ``[s1]``, etc.) see
+        :class:`nemo.collections.common.data.lhotse.speaker_aliases.SpeakerAliasTable`.
+
+        After this call:
+            * ``self.speaker_alias_table`` : alias <-> underlying mapping (also
+              consumed by the dataloader workers via the YAML ``tags:`` mechanism).
+            * ``self.speaker_token_ids``   : ``list[int]`` of the underlying
+              token ids in alias order. Empty list when aliasing is disabled.
+        """
+        if not self.speaker_alias_table.is_active:
+            return
+        underlying = list(self.speaker_alias_table.underlying_strings)
+        before = len(self.tokenizer)
+        self.tokenizer.add_special_tokens({"additional_special_tokens": underlying})
+        after = len(self.tokenizer)
+        assert before == after, (
+            "Speaker alias underlying tokens introduced new ids "
+            f"(vocab grew {before} -> {after}); aliasing requires pre-existing "
+            "reserved tokens. Pick strings already present in the LLM tokenizer "
+            "(e.g. <SPECIAL_*>) or switch to an explicit resize-and-finetune flow."
+        )
+        speaker_token_ids: list[int] = []
+        for underlying_str in underlying:
+            tid = self.tokenizer.token_to_id(underlying_str)
+            assert tid is not None, f"Could not resolve id for {underlying_str!r}"
+            speaker_token_ids.append(tid)
+        self.speaker_token_ids = speaker_token_ids
+
+    def _init_lss_loss(self) -> None:
+        """Optionally build the auxiliary Latent Speaker Supervision (LSS) loss.
+
+        Mirrors the AED Canary recipe at
+        ``nemo/collections/asr/models/aed_multitask_models.py`` (search for
+        ``self.lss_loss``):
+
+        * The loss is instantiated from ``cfg.lss_loss`` via Hydra ``_target_``,
+          identical to ``EncDecMultiTaskModel.from_config_dict(self.cfg.lss_loss)``.
+        * ``speaker_token_ids`` is auto-injected from this model's alias table
+          when absent in YAML, mirroring AED's auto-injection from
+          ``self.tokenizer.special_tokens[f"[s{i}]"]``.
+        * Enable/disable is controlled purely by the *presence* of the
+          ``lss_loss:`` block (no ``enable:`` flag) — same as AED.
+
+        SALM uses ``-100`` as the ignore index in ``target_ids`` (HF convention),
+        not a tokenizer ``pad_id``. Setting ``pad_id=-100`` lets the loss build
+        ``output_mask = (labels != -100)`` internally, again mirroring AED.
+        """
+        loss_cfg = self.cfg.get("lss_loss", None)
+        if loss_cfg is None:
+            return
+        with open_dict(loss_cfg):
+            loss_cfg.setdefault("pad_id", -100)
+            if loss_cfg.get("speaker_token_ids", None) is None:
+                if not self.speaker_token_ids:
+                    raise ValueError(
+                        "model.lss_loss is configured but no speaker_token_ids are available. "
+                        "Either set model.speaker_aliases (so ids are derived from the alias table) "
+                        "or pass an explicit model.lss_loss.speaker_token_ids list."
+                    )
+                loss_cfg.speaker_token_ids = list(self.speaker_token_ids)
+        self.lss_loss = instantiate(loss_cfg)
+
+    def apply_speaker_aliases(self, text: str) -> str:
+        """Convenience proxy: alias [sN] -> underlying tokenizer strings.
+
+        See :meth:`SpeakerAliasTable.apply` for behavior. No-op when aliases
+        are disabled.
+        """
+        return self.speaker_alias_table.apply(text)
+
+    def undo_speaker_aliases(self, text: str) -> str:
+        """Convenience proxy: inverse of :meth:`apply_speaker_aliases`."""
+        return self.speaker_alias_table.undo(text)
 
     @property
     def token_equivalent_duration(self) -> float:
@@ -242,6 +340,18 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 )
                 / num_frames
             )
+
+        # Latent speaker supervision loss (auxiliary, optional).
+        # Mirrors aed_multitask_models.py: `transf_loss = transf_loss + lss_loss(...)`.
+        # Computed *outside* loss_parallel() because LSS indexes the vocab
+        # dimension at specific speaker token ids — not safe on a TP-sharded
+        # vocab DTensor; we materialize via .full_tensor() for that path.
+        if self.lss_loss is not None and num_frames > 0:
+            logits = forward_outputs["logits"]
+            if isinstance(logits, DTensor):
+                logits = logits.full_tensor()
+            log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+            loss = loss + self.lss_loss(log_probs=log_probs, labels=inputs["target_ids"])
 
         B, T = inputs["input_embeds"].shape[:2]
         ans = {
