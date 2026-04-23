@@ -674,9 +674,6 @@ class ASRModuleMixin(ASRAdapterModelMixin):
             log_probs = decoder(encoder_output=encoded)
             predictions_tensor = log_probs.argmax(dim=-1, keepdim=False)
 
-            # Concatenate the previous predictions with the current one to have the full predictions.
-            # We drop the extra predictions for each sample by using the lengths returned by the encoder (encoded_len)
-            # Then create a list of the predictions for the batch. The predictions can have different lengths because of the paddings.
             greedy_predictions = []
             if return_transcription:
                 all_hyp_or_transcribed_texts = []
@@ -694,7 +691,6 @@ class ASRModuleMixin(ASRAdapterModelMixin):
                     greedy_predictions_concat = preds_cur
                 greedy_predictions.append(greedy_predictions_concat)
 
-                # TODO: make decoding more efficient by avoiding the decoding process from the beginning
                 if return_transcription:
                     decoded_out = decoding.ctc_decoder_predictions_tensor(
                         decoder_outputs=greedy_predictions_concat.unsqueeze(0),

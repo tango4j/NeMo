@@ -88,10 +88,29 @@ def audio_rttm_map(manifest, attach_dur=False):
     with open(manifest, 'r') as inp_file:
         lines = inp_file.readlines()
         logging.info("Number of files to diarize: {}".format(len(lines)))
+
+        parsed_lines = []
         for line in lines:
             line = line.strip()
-            dic = json.loads(line)
+            if not line:
+                continue
+            parsed_lines.append(json.loads(line))
 
+        has_uniq_id = any('uniq_id' in dic for dic in parsed_lines)
+        dedup_with_uniqname = False
+        if not has_uniq_id:
+            basename_counts = {}
+            for dic in parsed_lines:
+                bname = os.path.splitext(os.path.basename(dic['audio_filepath']))[0]
+                basename_counts[bname] = basename_counts.get(bname, 0) + 1
+            if any(cnt > 1 for cnt in basename_counts.values()):
+                dedup_with_uniqname = True
+                logging.info(
+                    "Detected multiple manifest entries sharing the same audio file without 'uniq_id'. "
+                    "Auto-generating uniq_id as <basename>#<offset>#<duration> for deduplication."
+                )
+
+        for dic in parsed_lines:
             meta = {
                 'audio_filepath': dic['audio_filepath'],
                 'rttm_filepath': dic.get('rttm_filepath', None),
@@ -104,6 +123,11 @@ def audio_rttm_map(manifest, attach_dur=False):
             }
             if attach_dur:
                 uniqname = get_uniq_id_with_dur(meta)
+            elif dedup_with_uniqname:
+                bname = os.path.splitext(os.path.basename(dic['audio_filepath']))[0]
+                offset_str = round(dic.get('offset', 0) or 0, 2)
+                dur_str = round(dic.get('duration', 0) or 0, 2)
+                uniqname = f"{bname}#{offset_str:.2f}#{dur_str:.2f}"
             else:
                 if "uniq_id" in dic.keys():
                     uniqname = dic['uniq_id']
@@ -115,7 +139,7 @@ def audio_rttm_map(manifest, attach_dur=False):
             else:
                 raise KeyError(
                     f"file {meta['audio_filepath']} is already part of AUDIO_RTTM_MAP, it might be duplicated, "
-                    "Note: file basename must be unique"
+                    f"uniqname='{uniqname}'. Note: file basename must be unique"
                 )
 
     return AUDIO_RTTM_MAP

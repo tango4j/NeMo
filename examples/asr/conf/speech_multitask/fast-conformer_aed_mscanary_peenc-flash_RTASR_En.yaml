@@ -33,6 +33,9 @@ model:
 
   diar_model_path: null  # Path to external diar model (.nemo/.ckpt) for inference; null to use ASR diar head
   freeze_diar: true
+  # Parallel-expert encoder bundle (ParallelExpertEncoderPT .nemo). When set, replaces ``model.encoder``
+  # after the normal EncDecMultiTaskModel build and optional ``asr_model_path`` weight copy.
+  pe_encoder_path: null
   spk_supervision_strategy: "mix" # Options: "rttm", "diar" and "mix"
   rttm_mix_prob: 0.9 # The sampling probability when mixing RTTMs
   max_num_speakers: 4 # Maximum number of speakers in the dataset

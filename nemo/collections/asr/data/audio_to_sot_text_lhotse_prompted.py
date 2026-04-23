@@ -361,11 +361,12 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
                 + self._speaker_freq_cost_batch(text_freq, rttm_freq, np.array([identity_perm], dtype=np.intp))[0]
             )
             best_cost = float(total_costs[best_idx])
-            logging.info(
-                "fix_speaker_activity [%s]: perm %s → %s | cost %.4f → %.4f (Δ=%.4f)",
-                cut.id, identity_perm[:num_active], best_perm[:num_active],
-                identity_cost, best_cost, identity_cost - best_cost,
-            )
+            if False: # TODO: Remove this. It's for debugging fix_speaker_activity.
+                logging.info(
+                    "fix_speaker_activity [%s]: perm %s → %s | cost %.4f → %.4f (Δ=%.4f)",
+                    cut.id, identity_perm[:num_active], best_perm[:num_active],
+                    identity_cost, best_cost, identity_cost - best_cost,
+                )
 
         return fixed
 
@@ -392,14 +393,18 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
         if self.sot_enabled:
             mono_cuts = []
             for cut in cuts:
-                if cut.num_channels is not None and cut.num_channels > 1:
+                if isinstance(cut, MixedCut):
+                    mono_cut = cut
+                elif cut.num_channels is not None and cut.num_channels > 1:
                     logging.warning(
                         "Multiple channels detected in cut '%s' (%d channels). "
                         "Only the first channel will be used; remaining channels are ignored.",
                         cut.id,
                         cut.num_channels,
                     )
-                mono_cut = cut.with_channels(channels=[0])
+                    mono_cut = cut.with_channels(channels=[0])
+                else:
+                    mono_cut = cut
 
                 speaker_activity = speaker_to_target(
                     a_cut=mono_cut,

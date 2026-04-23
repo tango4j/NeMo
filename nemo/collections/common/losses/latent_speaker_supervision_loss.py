@@ -69,6 +69,11 @@ class LatentSpeakerSupervisionLoss(Loss):
             target/length arguments instead of AED-style 3D ``(B, T, V)`` log-probs.
             The 4D joint is marginalized over the encoder time dimension via logsumexp
             before the speaker loss is computed. Default: False (AED mode).
+        per_speaker_normalization: If True, the speaker supervision loss is computed as the
+            mean of per-speaker average losses, giving equal importance to each speaker
+            regardless of how many words they have. For example, if speaker 0 has 2 words
+            and speaker 1 has 20 words, each speaker still contributes 50% of the loss.
+            Default: True.
     """
 
     @property
@@ -103,6 +108,7 @@ class LatentSpeakerSupervisionLoss(Loss):
         eps: float = 1e-6,
         per_token_reduction: bool = True,
         is_rnnt: bool = False,
+        per_speaker_normalization: bool = True,
     ):
         super().__init__()
         self.register_buffer("speaker_token_ids", torch.tensor(speaker_token_ids, dtype=torch.long))
@@ -115,6 +121,7 @@ class LatentSpeakerSupervisionLoss(Loss):
         self._eps = eps
         self._per_token_reduction = per_token_reduction
         self._is_rnnt = is_rnnt
+        self._per_speaker_normalization = per_speaker_normalization
 
     def _compute_standard_ce(self, log_probs, labels, output_mask):
         """
@@ -203,6 +210,10 @@ class LatentSpeakerSupervisionLoss(Loss):
         from the full vocabulary logits, renormalized (conditional probability among
         speakers only), and cross-entropy is computed against the active speaker.
 
+        When ``per_speaker_normalization`` is enabled, the loss for each speaker is
+        averaged independently, then the per-speaker losses are averaged together.
+        This prevents speakers with many words from dominating the gradient.
+
         Args:
             log_probs: (B, T, V) log-probabilities over vocabulary.
             active_speaker: (B, T) 0-based speaker index at each position.
@@ -215,8 +226,6 @@ class LatentSpeakerSupervisionLoss(Loss):
         speaker_log_probs = log_probs[:, :, self.speaker_token_ids]
 
         # Renormalize over speaker tokens (conditional probability given speaker-token subset).
-        # Original log_probs are log p(token | context) over full vocab.
-        # We want log p(spk_i | spk_tokens, context) = log_probs[spk_i] - logsumexp(log_probs[spk_tokens]).
         speaker_log_probs = speaker_log_probs - torch.logsumexp(speaker_log_probs, dim=-1, keepdim=True)
 
         # Clamp active_speaker to valid range for gather (invalid positions are masked out anyway).
@@ -231,7 +240,26 @@ class LatentSpeakerSupervisionLoss(Loss):
             speaker_nll = speaker_log_probs.gather(2, active_speaker_clamped).squeeze(2)
 
         word_mask_float = word_mask.to(log_probs.dtype)
-        speaker_loss = -torch.sum(speaker_nll * word_mask_float) / (word_mask_float.sum() + self._eps)
+
+        if self._per_speaker_normalization:
+            # Average loss per speaker, then average across speakers.
+            # This gives equal weight to each speaker regardless of word count.
+            per_speaker_losses = []
+            speakers_present = active_speaker[word_mask].unique()
+            for spk_id in speakers_present:
+                spk_mask = word_mask & (active_speaker == spk_id)
+                spk_mask_float = spk_mask.to(log_probs.dtype)
+                spk_count = spk_mask_float.sum()
+                if spk_count > 0:
+                    spk_loss = -torch.sum(speaker_nll * spk_mask_float) / (spk_count + self._eps)
+                    per_speaker_losses.append(spk_loss)
+            if per_speaker_losses:
+                speaker_loss = torch.stack(per_speaker_losses).mean()
+            else:
+                speaker_loss = torch.tensor(0.0, device=log_probs.device, dtype=log_probs.dtype)
+        else:
+            speaker_loss = -torch.sum(speaker_nll * word_mask_float) / (word_mask_float.sum() + self._eps)
+
         return speaker_loss
 
     def _forward_rnnt(self, log_probs, targets, input_lengths, target_lengths):

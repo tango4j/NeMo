@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 from dataclasses import dataclass, field, is_dataclass
 from typing import List, Optional, Union
 
@@ -466,6 +467,14 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
         else:
             # extract just best hypothesis
             transcriptions = transcriptions[0]
+
+    _spk_tok_re = re.compile(r'\[s\d+\]')
+    if isinstance(transcriptions, list) and transcriptions:
+        for i, t in enumerate(transcriptions):
+            if isinstance(t, str):
+                transcriptions[i] = re.sub(r'\s+', ' ', _spk_tok_re.sub('', t)).strip()
+            elif hasattr(t, 'text') and isinstance(t.text, str):
+                t.text = re.sub(r'\s+', ' ', _spk_tok_re.sub('', t.text)).strip()
 
     if cfg.return_transcriptions:
         return transcriptions

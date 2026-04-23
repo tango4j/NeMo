@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field, is_dataclass
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import pytorch_lightning as pl
 import torch
 from omegaconf import OmegaConf
 
 import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.metrics.cpwer import remove_pnc_text, split_text_by_speaker_tags
+from nemo.collections.asr.metrics.der import calculate_session_cpWER
 from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel
 from nemo.collections.asr.parts.utils.multispk_transcribe_utils import (
     SpeakerTaggedASR,
@@ -28,6 +33,7 @@ from nemo.collections.asr.parts.utils.multispk_transcribe_utils import (
     get_multi_talker_samples_from_manifest,
     write_seglst_file,
 )
+from nemo.collections.asr.parts.preprocessing.segment import get_samples
 from nemo.collections.asr.parts.utils.streaming_utils import CacheAwareStreamingAudioBuffer
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
@@ -90,6 +96,11 @@ class MultitalkerTranscriptionConfig:
     generate_realtime_scripts: bool = False
     spk_supervision: str = "diar"  # ["diar", "rttm"]
     binary_diar_preds: bool = False
+
+    # cpWER evaluation
+    calculate_cpwer: bool = True
+    remove_pnc_for_cpwer: bool = True
+    gt_text_attr_name: str = "text"
 
     # Multitalker transcription configs
     verbose: bool = False
@@ -203,6 +214,74 @@ def launch_parallel_streaming(
     return multispk_asr_streamer
 
 
+def calculate_cpwer_from_seglst(
+    seglst_dict_list: List[Dict[str, Any]],
+    samples: List[Dict[str, Any]],
+    gt_text_key: str = "text",
+    remove_pnc: bool = True,
+) -> float:
+    """Compute corpus-level cpWER by comparing predicted seglst segments against GT SOT text.
+
+    For each session the ground-truth ``text`` field (SOT format with ``[s*]`` tags) is split
+    into per-speaker transcripts.  Predicted seglst segments are grouped by ``session_id`` and
+    ``speaker``, concatenated per speaker, and compared via Hungarian-optimal cpWER.
+
+    Args:
+        seglst_dict_list: Predicted segments from streaming inference.
+        samples: Original manifest dicts (must contain ``audio_filepath`` and ``text``).
+        gt_text_key: Key in sample dicts for the ground-truth SOT text.
+        remove_pnc: If True, lowercase and strip all punctuation before comparison.
+
+    Returns:
+        Corpus-level cpWER as a float (0.0 – 1.0+).
+    """
+    pred_by_session: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for seg in seglst_dict_list:
+        pred_by_session[seg['session_id']].append(seg)
+
+    gt_by_session: Dict[str, str] = {}
+    for sample in samples:
+        session_id = sample.get('uniq_id', os.path.basename(sample['audio_filepath']).split('.')[0])
+        gt_text = sample.get(gt_text_key, "")
+        if gt_text:
+            if session_id in gt_by_session:
+                gt_by_session[session_id] += " " + gt_text
+            else:
+                gt_by_session[session_id] = gt_text
+
+    total_errors = 0
+    total_ref_words = 0
+
+    for session_id, gt_text in gt_by_session.items():
+        spk_ref = split_text_by_speaker_tags(gt_text, remove_pnc=remove_pnc)
+        if not spk_ref:
+            continue
+        ref_word_count = sum(len(t.split()) for t in spk_ref)
+        if ref_word_count == 0:
+            continue
+
+        pred_segs = pred_by_session.get(session_id, [])
+        spk_texts: Dict[str, List[str]] = defaultdict(list)
+        for seg in sorted(pred_segs, key=lambda x: x['start_time']):
+            words = seg.get('words', '').strip()
+            if words:
+                spk_texts[seg['speaker']].append(words)
+        spk_hyp = [' '.join(spk_texts[spk]) for spk in sorted(spk_texts.keys())]
+        if not spk_hyp:
+            spk_hyp = [""]
+        if remove_pnc:
+            spk_hyp = [remove_pnc_text(t) for t in spk_hyp]
+            spk_hyp = [t for t in spk_hyp if t] or [""]
+
+        cpwer_rate, _, _ = calculate_session_cpWER(spk_hyp, spk_ref)
+        total_errors += round(cpwer_rate * ref_word_count)
+        total_ref_words += ref_word_count
+
+    if total_ref_words == 0:
+        return 0.0
+    return total_errors / total_ref_words
+
+
 @hydra_runner(config_name="MultitalkerTranscriptionConfig", schema=MultitalkerTranscriptionConfig)
 def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionConfig]:
     for key in cfg:
@@ -312,6 +391,7 @@ def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionC
         )
 
     seglst_dict_list = []
+    all_samples = []
     if cfg.audio_file is not None:
         # Stream a single audio file
         samples = [
@@ -319,6 +399,7 @@ def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionC
                 'audio_filepath': cfg.audio_file,
             }
         ]
+        all_samples = samples
         streaming_buffer = CacheAwareStreamingAudioBuffer(
             model=asr_model,
             online_normalization=cfg.online_normalization,
@@ -355,6 +436,7 @@ def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionC
         if cfg.spk_supervision == "rttm":
             diar_model.add_rttms_mask_mats(rttms_mask_mats, device=asr_model.device)
 
+        all_samples = samples
         logging.info(f"Loaded {len(samples)} from the manifest at {cfg.manifest_file}.")
 
         streaming_buffer = CacheAwareStreamingAudioBuffer(
@@ -363,11 +445,25 @@ def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionC
             pad_and_drop_preencoded=cfg.pad_and_drop_preencoded,
         )
 
+        target_sr = asr_model.cfg.get('sample_rate', 16000)
         batch_samples = []
         for sample_idx, sample in enumerate(samples):
             batch_samples.append(sample)
-            streaming_buffer.append_audio_file(sample['audio_filepath'], stream_id=-1)
-            logging.info(f'Added this sample to the buffer: {sample["audio_filepath"]}')
+            audio = get_samples(sample['audio_filepath'], target_sr=target_sr)
+            offset_sec = sample.get('offset', 0) or 0
+            orig_dur = sample.get('_orig_duration', None)
+            if offset_sec > 0 or orig_dur is not None:
+                start_idx = int(offset_sec * target_sr)
+                if orig_dur is not None:
+                    end_idx = start_idx + int(orig_dur * target_sr)
+                    audio = audio[start_idx:end_idx]
+                else:
+                    audio = audio[start_idx:]
+            streaming_buffer.append_audio(audio, stream_id=-1)
+            logging.info(
+                f'Added sample to buffer: {sample["audio_filepath"]} '
+                f'(offset={offset_sec:.2f}s, dur={orig_dur}s, samples={len(audio)})'
+            )
 
             if (sample_idx + 1) % cfg.batch_size == 0 or sample_idx == len(samples) - 1:
                 logging.info(f"Starting to stream samples {sample_idx - len(streaming_buffer) + 1} to {sample_idx}...")
@@ -405,6 +501,22 @@ def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionC
             write_seglst_file(seglst_dict_list=seglst_dict_list, output_path=cfg.output_path)
         else:
             write_seglst_file(seglst_dict_list=seglst_dict_list, output_path=cfg.output_path)
+
+    if cfg.calculate_cpwer and all_samples:
+        has_gt = any(s.get(cfg.gt_text_attr_name, "") for s in all_samples)
+        if has_gt:
+            cpwer = calculate_cpwer_from_seglst(
+                seglst_dict_list=seglst_dict_list,
+                samples=all_samples,
+                gt_text_key=cfg.gt_text_attr_name,
+                remove_pnc=cfg.remove_pnc_for_cpwer,
+            )
+            pnc_label = " (no-PnC)" if cfg.remove_pnc_for_cpwer else " (with-PnC)"
+            logging.info("=" * 70)
+            logging.info(f"  cpWER{pnc_label}: {cpwer * 100:.2f}%")
+            logging.info("=" * 70)
+        else:
+            logging.info("Skipping cpWER: no ground-truth text found in manifest.")
 
 
 if __name__ == '__main__':

@@ -25,12 +25,21 @@ from nemo.collections.asr.parts.submodules.multitask_decoding import AbstractMul
 from nemo.collections.asr.parts.submodules.rnnt_decoding import AbstractRNNTDecoding
 from nemo.utils import logging
 
-__all__ = ['CpWER', 'split_text_by_speaker_tags']
+__all__ = ['CpWER', 'split_text_by_speaker_tags', 'remove_pnc_text']
 
 DEFAULT_SPEAKER_TAG_PATTERN = re.compile(r'\[s\d+\]')
+_PNC_PATTERN = re.compile(r'[^\w\s]', re.UNICODE)
+_MULTI_SPACE = re.compile(r'\s+')
 
 
-def split_text_by_speaker_tags(text: str, speaker_tag_pattern: re.Pattern = None) -> List[str]:
+def remove_pnc_text(text: str) -> str:
+    """Lowercase and strip all punctuation from text, collapsing whitespace."""
+    text = text.lower()
+    text = _PNC_PATTERN.sub(' ', text)
+    return _MULTI_SPACE.sub(' ', text).strip()
+
+
+def split_text_by_speaker_tags(text: str, speaker_tag_pattern: re.Pattern = None, remove_pnc: bool = False) -> List[str]:
     """
     Split SOT-formatted text by bracket speaker tags ([s0], [s1], ...) and
     return a list of per-speaker transcripts.
@@ -64,7 +73,11 @@ def split_text_by_speaker_tags(text: str, speaker_tag_pattern: re.Pattern = None
         if segment_text:
             speaker_segments[speaker_tag].append(segment_text)
 
-    return [' '.join(speaker_segments[tag]) for tag in sorted(speaker_segments)]
+    result = [' '.join(speaker_segments[tag]) for tag in sorted(speaker_segments)]
+    if remove_pnc:
+        result = [remove_pnc_text(t) for t in result]
+        result = [t for t in result if t]
+    return result
 
 
 class CpWER(Metric):

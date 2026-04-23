@@ -151,6 +151,9 @@ def get_multi_talker_samples_from_manifest(cfg, manifest_file: str, feat_per_sec
         rttms_mask_mats (list): The list of rttm mask matrices.
     """
     samples, rttms_mask_mats = [], []
+
+    # First pass: parse all lines and detect duplicate basenames
+    parsed_items = []
     with open(manifest_file, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f):
             item = json.loads(line)
@@ -158,29 +161,54 @@ def get_multi_talker_samples_from_manifest(cfg, manifest_file: str, feat_per_sec
                 raise KeyError(f"Line {line_num}: 'audio_filepath' missing")
             if 'duration' not in item:
                 raise KeyError(f"Line {line_num}: 'duration' missing")
-            samples.append(item)
-            if cfg.get("spk_supervision", "diar") == "rttm":
-                rttm_path = samples[-1]['rttm_filepath']
-                if not rttm_path:
-                    raise ValueError(f"Line {line_num}: rttm_filepath required when spk_supervision='rttm'")
-                if not os.path.exists(rttm_path):
-                    raise FileNotFoundError(f"Line {line_num}: RTTM file not found: {rttm_path}")
+            parsed_items.append(item)
 
-                with open(rttm_path, 'r', encoding='utf-8') as f:
-                    rttm_lines = f.readlines()
-                rttm_timestamps, _ = extract_frame_info_from_rttm(0, samples[-1]['duration'], rttm_lines)
-                rttm_mat = get_frame_targets_from_rttm(
-                    rttm_timestamps=rttm_timestamps,
-                    offset=0,
-                    duration=samples[-1]['duration'],
-                    round_digits=3,
-                    feat_per_sec=round(float(1 / feat_per_sec), 2),
-                    max_spks=max_spks,
-                )
-                rttms_mask_mats.append(rttm_mat)
-            samples[-1]['duration'] = None
-            if 'offset' not in item:
-                samples[-1]['offset'] = 0
+    has_uniq_id = any('uniq_id' in it for it in parsed_items)
+    needs_dedup = False
+    if not has_uniq_id:
+        basename_counts: Dict[str, int] = {}
+        for it in parsed_items:
+            bname = os.path.basename(it['audio_filepath']).split('.')[0]
+            basename_counts[bname] = basename_counts.get(bname, 0) + 1
+        if any(cnt > 1 for cnt in basename_counts.values()):
+            needs_dedup = True
+            logging.info(
+                "Detected duplicate audio basenames without 'uniq_id'. "
+                "Auto-generating uniq_id as <basename>#<offset>#<duration>."
+            )
+
+    # Second pass: build samples with uniq_id, RTTM matrices, etc.
+    for item in parsed_items:
+        if needs_dedup and 'uniq_id' not in item:
+            bname = os.path.basename(item['audio_filepath']).split('.')[0]
+            offset_val = round(item.get('offset', 0) or 0, 2)
+            dur_val = round(item.get('duration', 0) or 0, 2)
+            item['uniq_id'] = f"{bname}#{offset_val:.2f}#{dur_val:.2f}"
+
+        samples.append(item)
+        if cfg.get("spk_supervision", "diar") == "rttm":
+            rttm_path = samples[-1]['rttm_filepath']
+            if not rttm_path:
+                raise ValueError(f"'rttm_filepath' required when spk_supervision='rttm'")
+            if not os.path.exists(rttm_path):
+                raise FileNotFoundError(f"RTTM file not found: {rttm_path}")
+
+            with open(rttm_path, 'r', encoding='utf-8') as rf:
+                rttm_lines = rf.readlines()
+            rttm_timestamps, _ = extract_frame_info_from_rttm(0, samples[-1]['duration'], rttm_lines)
+            rttm_mat = get_frame_targets_from_rttm(
+                rttm_timestamps=rttm_timestamps,
+                offset=0,
+                duration=samples[-1]['duration'],
+                round_digits=3,
+                feat_per_sec=round(float(1 / feat_per_sec), 2),
+                max_spks=max_spks,
+            )
+            rttms_mask_mats.append(rttm_mat)
+        samples[-1]['_orig_duration'] = samples[-1]['duration']
+        samples[-1]['duration'] = None
+        if 'offset' not in item:
+            samples[-1]['offset'] = 0
 
     if len(rttms_mask_mats) > 0:
         rttms_mask_mats = collate_matrices(rttms_mask_mats)
@@ -913,10 +941,10 @@ class SpeakerTaggedASR:
             samples (List[Dict[str, Any]]): List of samples.
         """
         for sample in samples:
-            uniq_id = get_uniqname_from_filepath(sample['audio_filepath']).split('.')[0]
-            word_ts_and_seq_dict = self._word_and_ts_seq[uniq_id]
+            lookup_id = get_uniqname_from_filepath(sample['audio_filepath']).split('.')[0]
+            word_ts_and_seq_dict = self._word_and_ts_seq[lookup_id]
+            session_id = sample.get('uniq_id', word_ts_and_seq_dict['uniq_id'].split('.')[0])
             for sentence_dict in word_ts_and_seq_dict['sentences']:
-                session_id = word_ts_and_seq_dict['uniq_id'].split('.')[0]
                 seglst_dict = get_new_sentence_dict(
                     speaker=sentence_dict['speaker'],
                     start_time=float(sentence_dict['start_time']),
@@ -939,8 +967,7 @@ class SpeakerTaggedASR:
         """
         self.instance_manager.previous_asr_states.extend(self.instance_manager.batch_asr_states)
         for sample, asr_state in zip(samples, self.instance_manager.previous_asr_states):
-            audio_filepath = sample["audio_filepath"]
-            uniq_id = os.path.basename(audio_filepath).split('.')[0]
+            uniq_id = sample.get('uniq_id', os.path.basename(sample["audio_filepath"]).split('.')[0])
             seglsts = []
             for seg in asr_state.seglsts:
                 a_seg_dict = get_new_sentence_dict(

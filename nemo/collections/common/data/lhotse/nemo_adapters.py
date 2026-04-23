@@ -330,6 +330,7 @@ class LazyNeMoTarredIterator:
                 )
                 shard_ids.append(int(m.group(1)))
             self.shard_id_to_manifest = {sid: LazyJsonlIterator(p) for sid, p in zip(shard_ids, self.paths)}
+            self.shard_id_to_path = dict(zip(shard_ids, self.paths))
             self.source = LazyIteratorChain(*self.shard_id_to_manifest.values())
 
         self.tar_paths = expand_sharded_filepaths(tar_paths)
@@ -524,7 +525,7 @@ class LazyNeMoTarredIterator:
         offset_pattern = re.compile(r'^(?P<stem>.+)(?P<sub>-sub\d+)(?P<ext>\.\w+)?$')
 
         for sid in shard_ids:
-            manifest_path = self.paths[sid] if len(self.paths) > 1 else self.paths[0]
+            manifest_path = self.shard_id_to_path[sid] if hasattr(self, 'shard_id_to_path') else self.paths[0]
 
             def basename(d: dict) -> str:
                 return (
