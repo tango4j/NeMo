@@ -13,6 +13,14 @@
 # limitations under the License.
 
 from nemo.collections.asr.modules.transformer.bridge_encoders import BridgeEncoder
+from nemo.collections.asr.modules.transformer.parallel_transformer_encoders import (
+    PackedFFNBank,
+    PackedFusedQKVBank,
+    PackedLayerNormBank,
+    PackedLinearBank,
+    ParallelExpertTransformerEncoder,
+    ParallelExpertTransformerEncoderBlock,
+)
 from nemo.collections.asr.modules.transformer.perceiver_encoders import PerceiverEncoder
 from nemo.collections.asr.modules.transformer.transformer_bottleneck import (
     NeMoTransformerBottleneckConfig,
@@ -35,6 +43,12 @@ from nemo.collections.asr.modules.transformer.transformer_utils import get_nemo_
 
 __all__ = [
     "BridgeEncoder",
+    "PackedFFNBank",
+    "PackedFusedQKVBank",
+    "PackedLayerNormBank",
+    "PackedLinearBank",
+    "ParallelExpertTransformerEncoder",
+    "ParallelExpertTransformerEncoderBlock",
     "PerceiverEncoder",
     "NeMoTransformerBottleneckConfig",
     "NeMoTransformerBottleneckDecoderConfig",
