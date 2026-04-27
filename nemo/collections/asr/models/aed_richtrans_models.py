@@ -25,7 +25,7 @@ from typing import Dict, Optional
 
 import torch
 from lightning.pytorch import Trainer
-from omegaconf import DictConfig, open_dict
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from nemo.collections.asr.data.audio_to_sot_text_lhotse_prompted import (
     PromptedAudioToTextLhotseDataset,
@@ -40,6 +40,7 @@ from nemo.collections.common.data.lhotse.dataloader import get_lhotse_dataloader
 from nemo.core.classes.common import typecheck
 from nemo.core.neural_types import NeuralType, ProbsType
 from nemo.utils import logging
+from nemo.collections.asr.modules.parallel_expert_encoder import import_parallel_expert_encoder_from_nemo
 
 __all__ = ['MSEncDecMultiTaskModel']
 
@@ -64,21 +65,53 @@ class MSEncDecMultiTaskModel(EncDecMultiTaskModel):
 
     VAL_LOSS_DATALOADER_INDICES = {0, 5}
 
+    @staticmethod
+    def _is_parallel_expert_encoder(module) -> bool:
+        from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
+
+        return isinstance(module, ParallelExpertEncoder)
+
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         super().__init__(cfg=cfg, trainer=trainer)
 
         self._setup_lss_loss()
 
-        if cfg.get('asr_model_path', None) is not None:
-            self._init_asr_model()
+        is_restoring = self._is_model_being_restored()
+        has_self_contained_encoder = self._is_parallel_expert_encoder(self.encoder)
 
-        if cfg.get('pe_encoder_path', None) is not None:
+        if cfg.get('asr_model_path', None) is not None and not is_restoring:
+            self._init_asr_model()
+        elif cfg.get('asr_model_path', None) is not None and is_restoring:
+            logging.info("Skipping `asr_model_path` warm-start during restore; checkpoint weights will be loaded next.")
+
+        if cfg.get('pe_encoder_path', None) is not None and not has_self_contained_encoder:
             self._init_pe_encoder()
 
         self._rttms_mask_mats = None
         self._rttm_batch_offset = 0
 
         self._setup_cpwer_metric()
+
+    def to_config_dict(self) -> DictConfig:
+        """Save a deployment config that can rebuild the mounted PE encoder directly."""
+        cfg = OmegaConf.create(OmegaConf.to_container(super().to_config_dict(), resolve=False))
+        if self._is_parallel_expert_encoder(self.encoder):
+            with open_dict(cfg):
+                cfg.asr_model_path = None
+                cfg.pe_encoder_path = None
+                cfg.encoder = self.encoder.to_config_dict()
+        return cfg
+
+    def on_save_checkpoint(self, checkpoint):
+        """Keep Lightning `.ckpt` hyperparameters aligned with the self-contained `.nemo` config."""
+        checkpoint.setdefault('hyper_parameters', {})
+        checkpoint['hyper_parameters']['cfg'] = self.to_config_dict()
+
+    def to_config_file(self, path2yaml_file: str):
+        """Serialize the deployment config instead of the live training bootstrap config."""
+        cfg = self.to_config_dict()
+        with open(path2yaml_file, 'w', encoding='utf-8') as fout:
+            OmegaConf.save(config=cfg, f=fout, resolve=True)
 
     # ------------------------------------------------------------------
     # Optional latent-speaker-supervision (LSS) auxiliary loss
@@ -142,9 +175,7 @@ class MSEncDecMultiTaskModel(EncDecMultiTaskModel):
         diarizer, and exposes the same I/O contract as :class:`ConformerEncoder`
         (plus an optional ``diar_preds`` kwarg for RTTM injection).
         """
-        from nemo.collections.asr.modules.parallel_expert_encoder import (
-            import_parallel_expert_encoder_from_nemo,
-        )
+
 
         model_path = self.cfg.pe_encoder_path
         if not isinstance(model_path, str) or not model_path.endswith('.nemo'):

@@ -1462,3 +1462,18 @@ def parse_multitask_prompt(prompt: dict | None) -> list[dict]:
     # )
     role = prompt.pop("role", "user")
     return [dict(role=role, slots=prompt)]
+
+
+def __getattr__(name: str):
+    """Backward-compat alias for ``MSEncDecMultiTaskModel`` after the move to ``aed_richtrans_models``.
+
+    Older Lightning ``.ckpt`` files store
+    ``hyper_parameters.cfg.target = "nemo.collections.asr.models.aed_multitask_models.MSEncDecMultiTaskModel"``.
+    Without this shim, ``import_class_by_path`` / Lightning's class resolution fails on
+    those checkpoints because the class no longer lives in this module.
+    """
+    if name == "MSEncDecMultiTaskModel":
+        from nemo.collections.asr.models.aed_richtrans_models import MSEncDecMultiTaskModel
+
+        return MSEncDecMultiTaskModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

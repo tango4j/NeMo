@@ -322,7 +322,7 @@ def setup_model(cfg: DictConfig, map_location: torch.device) -> Tuple[ASRModel, 
                     model_classes_to_try = [MSEncDecMultiTaskModel, EncDecMultiTaskModel, ASRModel]
                 except ImportError:
                     model_classes_to_try = [EncDecMultiTaskModel, ASRModel]
-                
+
                 # Try each model class until one works
                 for cls in model_classes_to_try:
                     try:
@@ -337,7 +337,7 @@ def setup_model(cfg: DictConfig, map_location: torch.device) -> Tuple[ASRModel, 
                     except Exception as e:
                         logging.debug(f"Failed to load with {cls.__name__}: {e}")
                         continue
-                
+
                 if model_class is None:
                     raise RuntimeError(
                         f"Could not load .ckpt file with any known model class. "

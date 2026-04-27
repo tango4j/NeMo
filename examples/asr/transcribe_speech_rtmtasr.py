@@ -17,7 +17,8 @@ import os
 import re
 import types
 from dataclasses import dataclass, field, is_dataclass
-from typing import List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import lightning.pytorch as pl
 import numpy as np
@@ -124,10 +125,7 @@ def _build_sot_dataset(asr_model) -> PromptedAudioToTextLhotseDataset:
     """Instantiate a PromptedAudioToTextLhotseDataset from the ASR model,
     mirroring the sot_cfg construction in EncDecMultiTaskModel._setup_dataloader_from_config.
     """
-    if hasattr(asr_model, 'encoder') and asr_model.encoder is not None:
-        subsampling_factor = getattr(asr_model.encoder, 'subsampling_factor', 8)
-    else:
-        subsampling_factor = asr_model.cfg.get('encoder', {}).get('subsampling_factor', 8)
+    subsampling_factor = _get_encoder_subsampling_factor(asr_model)
 
     sot_cfg = {
         'num_speakers': asr_model.cfg.get('max_num_speakers', 4),
@@ -142,6 +140,22 @@ def _build_sot_dataset(asr_model) -> PromptedAudioToTextLhotseDataset:
     )
 
 
+def _get_encoder_subsampling_factor(asr_model) -> int:
+    """Prefer the runtime encoder over saved config layout.
+
+    Self-contained RTMT-ASR exports wrap the ASR encoder with
+    `ParallelExpertEncoder`, so `cfg.encoder.subsampling_factor` is no longer
+    guaranteed to exist directly in the serialized config.
+    """
+    if hasattr(asr_model, 'encoder') and asr_model.encoder is not None:
+        subsampling_factor = getattr(asr_model.encoder, 'subsampling_factor', None)
+        if subsampling_factor is not None:
+            return subsampling_factor
+
+    encoder_cfg = asr_model.cfg.get('encoder', {})
+    return encoder_cfg.get('subsampling_factor', encoder_cfg.get('asr_encoder_cfg', {}).get('subsampling_factor', 8))
+
+
 def load_rttm_speaker_matrices(sorted_manifest_path: str, asr_model) -> torch.Tensor:
     """Build speaker activity matrices from RTTM files listed in the manifest,
     then align each matrix's speaker columns with the SOT text via
@@ -151,9 +165,10 @@ def load_rttm_speaker_matrices(sorted_manifest_path: str, asr_model) -> torch.Te
         Collated (N, T_max, num_speakers) tensor.
     """
     sot_dataset = _build_sot_dataset(asr_model)
+    subsampling_factor = _get_encoder_subsampling_factor(asr_model)
 
     feat_per_sec = round(
-        asr_model.cfg.preprocessor.window_stride * asr_model.cfg.encoder.subsampling_factor, 2
+        asr_model.cfg.preprocessor.window_stride * subsampling_factor, 2
     )
     max_spks = getattr(asr_model, 'max_num_speakers', asr_model.cfg.get('max_num_speakers', 4))
 
@@ -286,6 +301,152 @@ def calculate_cpwer_from_manifest(
     if total_ref_words == 0:
         return 0.0
     return total_errors / total_ref_words
+
+
+_SOT_SPEAKER_TOKEN_PATTERN = re.compile(r'\[s(\d+)\]')
+
+
+def parse_sot_text(text: str) -> List[Tuple[int, str]]:
+    """Parse SOT text into contiguous (speaker_id, words) turns."""
+    text = str(text or "")
+    tag_matches = list(_SOT_SPEAKER_TOKEN_PATTERN.finditer(text))
+
+    if not tag_matches:
+        stripped_text = text.strip()
+        return [(0, stripped_text)] if stripped_text else []
+
+    segments: List[Tuple[int, str]] = []
+    for idx, tag_match in enumerate(tag_matches):
+        speaker_id = int(tag_match.group(1))
+        seg_start = tag_match.end()
+        seg_end = tag_matches[idx + 1].start() if idx + 1 < len(tag_matches) else len(text)
+        segment_text = text[seg_start:seg_end].strip()
+        if segment_text:
+            segments.append((speaker_id, segment_text))
+    return segments
+
+
+def build_chunk_session_id(item: Dict[str, Any], line_num: int, seen_session_ids: Dict[str, int]) -> str:
+    """Create a stable per-manifest-line session id for SegLST cpWER."""
+    uniq_id = item.get("uniq_id")
+    if uniq_id:
+        session_id = str(uniq_id)
+    else:
+        audio_filepath = item.get("audio_filepath")
+        audio_stem = Path(str(audio_filepath)).stem if audio_filepath else f"sample_{line_num}"
+        offset = float(item.get("offset") or 0.0)
+        duration = float(item.get("duration") or 0.0)
+        session_id = f"{audio_stem}_{int(offset * 100)}_{int(duration * 100)}"
+
+    dup_idx = seen_session_ids.get(session_id, 0)
+    seen_session_ids[session_id] = dup_idx + 1
+    if dup_idx > 0:
+        session_id = f"{session_id}__dup{dup_idx}"
+    return session_id
+
+
+def sot_text_to_seglst(text: str, session_id: str, offset: float = 0.0, duration: float = 0.0) -> List[Dict[str, Any]]:
+    """Convert bracket-speaker SOT text into SegLST turns with estimated timestamps."""
+    parsed_segments = parse_sot_text(text)
+    if not parsed_segments:
+        return []
+
+    seglst_entries: List[Dict[str, Any]] = []
+    offset = float(offset or 0.0)
+    duration = float(duration or 0.0)
+    total_chars = sum(max(len(words), 1) for _, words in parsed_segments)
+
+    if duration > 0 and total_chars > 0:
+        cursor = offset
+        chunk_end = offset + duration
+        remaining_duration = duration
+        remaining_chars = total_chars
+
+        for idx, (speaker_id, words) in enumerate(parsed_segments):
+            seg_start = cursor
+            if idx == len(parsed_segments) - 1:
+                seg_end = chunk_end
+            else:
+                seg_chars = max(len(words), 1)
+                seg_duration = remaining_duration * (seg_chars / remaining_chars) if remaining_chars > 0 else 0.0
+                seg_end = min(chunk_end, cursor + seg_duration)
+                remaining_duration -= seg_end - seg_start
+                remaining_chars -= seg_chars
+
+            seglst_entries.append(
+                {
+                    "session_id": session_id,
+                    "words": words,
+                    "start_time": round(seg_start, 3),
+                    "end_time": round(seg_end, 3),
+                    "speaker": f"speaker{speaker_id}",
+                }
+            )
+            cursor = seg_end
+    else:
+        for idx, (speaker_id, words) in enumerate(parsed_segments):
+            seg_start = offset + (idx * 1e-3)
+            seg_end = seg_start + 1e-3
+            seglst_entries.append(
+                {
+                    "session_id": session_id,
+                    "words": words,
+                    "start_time": round(seg_start, 3),
+                    "end_time": round(seg_end, 3),
+                    "speaker": f"speaker{speaker_id}",
+                }
+            )
+
+    return seglst_entries
+
+
+def write_seglst(output_path: str, seglst_entries: List[Dict[str, Any]]) -> None:
+    """Write SegLST entries as a JSON array."""
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(seglst_entries, f, indent=2)
+        f.write("\n")
+
+
+def write_cpwer_seglst_files(
+    pred_manifest: str,
+    gt_text_attr_name: str = "text",
+    pred_text_attr_name: str = "pred_text",
+) -> Tuple[Optional[str], Optional[str]]:
+    """Create reference and hypothesis SegLST files from an output manifest."""
+    manifest_path = Path(pred_manifest)
+    manifest_stem = manifest_path.name[:-5] if manifest_path.name.endswith(".json") else manifest_path.stem
+    ref_output_path = manifest_path.with_name(f"{manifest_stem}_ref.seglst.json")
+    hyp_output_path = manifest_path.with_name(f"{manifest_stem}_hyp.seglst.json")
+
+    ref_seglst: List[Dict[str, Any]] = []
+    hyp_seglst: List[Dict[str, Any]] = []
+    seen_session_ids: Dict[str, int] = {}
+
+    with open(pred_manifest, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            item = json.loads(line)
+            ref_text = item.get(gt_text_attr_name)
+            if ref_text is None or not str(ref_text).strip():
+                continue
+
+            session_id = build_chunk_session_id(item=item, line_num=line_num, seen_session_ids=seen_session_ids)
+            offset = float(item.get("offset") or 0.0)
+            duration = float(item.get("duration") or 0.0)
+            ref_seglst.extend(sot_text_to_seglst(ref_text, session_id=session_id, offset=offset, duration=duration))
+
+            hyp_text = item.get(pred_text_attr_name) or ""
+            hyp_seglst.extend(sot_text_to_seglst(hyp_text, session_id=session_id, offset=offset, duration=duration))
+
+    if not ref_seglst:
+        return None, None
+
+    write_seglst(str(ref_output_path), ref_seglst)
+    write_seglst(str(hyp_output_path), hyp_seglst)
+    return str(ref_output_path), str(hyp_output_path)
 
 
 @dataclass
@@ -723,6 +884,19 @@ def main(cfg: TranscriptionConfigRTMTASR) -> Union[TranscriptionConfigRTMTASR, L
         )
         pnc_label = " (no-PnC)" if cfg.remove_pnc_for_cpwer else " (with-PnC)"
         logging.info(f"cpWER{pnc_label}: {cpwer * 100:.2f}%")
+
+        ref_seglst_path, hyp_seglst_path = write_cpwer_seglst_files(
+            pred_manifest=output_filename,
+            gt_text_attr_name=cfg.gt_text_attr_name,
+            pred_text_attr_name=pred_text_attr_name,
+        )
+        if ref_seglst_path and hyp_seglst_path:
+            logging.info(f"Reference SegLST: {ref_seglst_path}")
+            logging.info(f"Hypothesis SegLST: {hyp_seglst_path}")
+        else:
+            logging.info(
+                f"Skipping SegLST generation because output manifest has no non-empty '{cfg.gt_text_attr_name}'."
+            )
 
     if cfg.calculate_rtfx:
         rtfx_measurements = total_duration / model_measurements_np

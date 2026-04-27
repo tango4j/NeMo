@@ -48,6 +48,7 @@ replacement.
 
 import math
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from typing import List, Optional, Set, Union
 
 import torch
@@ -100,6 +101,37 @@ def _load_pretrained_model(model_path: str, model_cls):
     return model
 
 
+def _clone_config(config: Optional[DictConfig]) -> Optional[DictConfig]:
+    """Deep-copy a config-like object without resolving interpolations.
+
+    Hydra may partially instantiate nested `_target_` configs before they reach
+    `ParallelExpertEncoder.__init__`. This helper converts any such module/model
+    objects back into plain config containers recursively.
+    """
+    if config is None:
+        return None
+
+    if hasattr(config, '_cfg') and config._cfg is not None:
+        config = config._cfg
+    elif hasattr(config, 'to_config_dict'):
+        config = config.to_config_dict()
+
+    def _to_container(value):
+        if OmegaConf.is_config(value):
+            return _to_container(OmegaConf.to_container(value, resolve=False))
+        if hasattr(value, '_cfg') and value._cfg is not None:
+            return _to_container(value._cfg)
+        if hasattr(value, 'to_config_dict'):
+            return _to_container(value.to_config_dict())
+        if isinstance(value, Mapping):
+            return {k: _to_container(v) for k, v in value.items()}
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [_to_container(v) for v in value]
+        return value
+
+    return OmegaConf.create(_to_container(config))
+
+
 class ParallelExpertEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
     """Sortformer-diarizer + ASR Conformer encoder with I/O identical to
     :class:`ConformerEncoder`.
@@ -116,13 +148,12 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMi
     recipe from ``MSEncDecMultiTaskModel.forward``
     (``aed_multitask_models.py``).
 
-    Both pretrained checkpoints are loaded from ``.nemo`` or ``.ckpt`` files:
+    It supports two construction modes:
 
-    * ``asr_model_path`` — :class:`EncDecMultiTaskModel` checkpoint whose
-      ``.encoder`` is a :class:`ConformerEncoder` and whose
-      ``.preprocessor.featurizer.normalize`` provides the normalisation
-      type replayed internally.
-    * ``diar_model_path`` — :class:`SortformerEncLabelModel` checkpoint.
+    * Bootstrap from external checkpoints:
+      ``asr_model_path`` + ``diar_model_path``.
+    * Self-contained reconstruction from inline configs:
+      ``asr_encoder_cfg`` + ``diarization_model_cfg``.
 
     The diarizer is frozen by default to match
     ``MSEncDecMultiTaskModel._init_diar_model``.
@@ -131,6 +162,10 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMi
         asr_model_path: Path to the pretrained :class:`EncDecMultiTaskModel`
             checkpoint.
         diar_model_path: Path to the pretrained Sortformer checkpoint.
+        asr_encoder_cfg: Inline config for the ASR-side :class:`ConformerEncoder`.
+        diarization_model_cfg: Inline config for the :class:`SortformerEncLabelModel`.
+        asr_normalize_type: Normalization replayed on the ASR branch when the
+            encoder is reconstructed from ``asr_encoder_cfg``.
         freeze_diar: Freeze the Sortformer parameters. Defaults to ``True``.
         freeze_asr: Freeze the wrapped ASR ConformerEncoder parameters.
             Defaults to ``False``.
@@ -255,10 +290,13 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMi
     # ------------------------------------------------------------------
     def __init__(
         self,
-        asr_model_path: str,
-        diar_model_path: str,
+        asr_model_path: Optional[str],
+        diar_model_path: Optional[str],
         freeze_diar: bool = True,
         freeze_asr: bool = False,
+        asr_encoder_cfg: Optional[DictConfig] = None,
+        diarization_model_cfg: Optional[DictConfig] = None,
+        asr_normalize_type: Optional[str] = None,
     ):
         super().__init__()
 
@@ -268,24 +306,52 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMi
         from nemo.collections.asr.models.aed_multitask_models import EncDecMultiTaskModel
         from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel
 
-        # ------------- ASR Conformer expert -------------
-        pretrained_asr_model = _load_pretrained_model(asr_model_path, EncDecMultiTaskModel)
-        if not isinstance(pretrained_asr_model.encoder, ConformerEncoder):
-            raise TypeError(
-                f"Expected the loaded ASR model to expose a ConformerEncoder under `.encoder`, "
-                f"got {type(pretrained_asr_model.encoder)} instead."
+        if (asr_model_path is None) == (asr_encoder_cfg is None):
+            raise ValueError(
+                "Provide exactly one of `asr_model_path` or `asr_encoder_cfg` to ParallelExpertEncoder."
             )
-        self.asr_encoder: ConformerEncoder = pretrained_asr_model.encoder
-        self.asr_normalize_type = getattr(
-            pretrained_asr_model.preprocessor.featurizer, 'normalize', 'per_feature'
-        )
-        self._feat_in = self.asr_encoder._feat_in
-        del pretrained_asr_model
+        if (diar_model_path is None) == (diarization_model_cfg is None):
+            raise ValueError(
+                "Provide exactly one of `diar_model_path` or `diarization_model_cfg` to ParallelExpertEncoder."
+            )
+
+        # ------------- ASR Conformer expert -------------
+        if asr_encoder_cfg is not None:
+            if isinstance(asr_encoder_cfg, ConformerEncoder):
+                self.asr_encoder = asr_encoder_cfg
+            else:
+                self.asr_encoder = EncDecMultiTaskModel.from_config_dict(_clone_config(asr_encoder_cfg))
+            if not isinstance(self.asr_encoder, ConformerEncoder):
+                raise TypeError(
+                    f"Expected `asr_encoder_cfg` to instantiate a ConformerEncoder, "
+                    f"got {type(self.asr_encoder)} instead."
+                )
+            self.asr_normalize_type = asr_normalize_type or 'per_feature'
+            self._feat_in = self.asr_encoder._feat_in
+        else:
+            pretrained_asr_model = _load_pretrained_model(asr_model_path, EncDecMultiTaskModel)
+            if not isinstance(pretrained_asr_model.encoder, ConformerEncoder):
+                raise TypeError(
+                    f"Expected the loaded ASR model to expose a ConformerEncoder under `.encoder`, "
+                    f"got {type(pretrained_asr_model.encoder)} instead."
+                )
+            self.asr_encoder = pretrained_asr_model.encoder
+            self.asr_normalize_type = asr_normalize_type or getattr(
+                pretrained_asr_model.preprocessor.featurizer, 'normalize', 'per_feature'
+            )
+            self._feat_in = self.asr_encoder._feat_in
+            del pretrained_asr_model
 
         # ------------- Sortformer diarization expert -------------
-        self.diarization_model: SortformerEncLabelModel = _load_pretrained_model(
-            diar_model_path, SortformerEncLabelModel
-        )
+        if diarization_model_cfg is not None:
+            if isinstance(diarization_model_cfg, SortformerEncLabelModel):
+                self.diarization_model = diarization_model_cfg
+            else:
+                self.diarization_model = SortformerEncLabelModel.from_config_dict(
+                    _clone_config(diarization_model_cfg)
+                )
+        else:
+            self.diarization_model = _load_pretrained_model(diar_model_path, SortformerEncLabelModel)
 
         # ------------- Bookkeeping -------------
         self.freeze_diar = freeze_diar
@@ -311,6 +377,24 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMi
             self.asr_encoder.eval()
             for p in self.asr_encoder.parameters():
                 p.requires_grad = False
+
+    def to_config_dict(self) -> DictConfig:
+        """Return a self-contained config that can rebuild this encoder without external files."""
+        return OmegaConf.create(
+            {
+                '_target_': 'nemo.collections.asr.modules.parallel_expert_encoder.ParallelExpertEncoder',
+                '_recursive_': False,
+                'asr_model_path': None,
+                'diar_model_path': None,
+                'asr_encoder_cfg': OmegaConf.to_container(self.asr_encoder.to_config_dict(), resolve=False),
+                'diarization_model_cfg': OmegaConf.to_container(
+                    self.diarization_model.to_config_dict(), resolve=False
+                ),
+                'asr_normalize_type': self.asr_normalize_type,
+                'freeze_diar': self.freeze_diar,
+                'freeze_asr': self.freeze_asr,
+            }
+        )
 
     # ------------------------------------------------------------------
     # ConformerEncoder-compatible properties (delegated)
@@ -511,21 +595,23 @@ class ParallelExpertEncoderPT(ModelPT):
     :class:`ParallelExpertEncoder` can be written with ``save_to`` and read
     back with ``restore_from`` as a ``.nemo`` archive.
 
-    The saved ``model_config.yaml`` records ``asr_model_path`` and
-    ``diar_model_path``. On ``restore_from``, those checkpoints are loaded
-    first (for module construction), then weights are overwritten from the
-    bundle. The paths must therefore still exist unless you pass
-    ``override_config_path`` with updated locations of **compatible**
-    checkpoints (same classes / tensor shapes).
+    New bundles are saved with a self-contained config (inline ASR encoder and
+    Sortformer configs plus the merged state dict), so they can restore without
+    touching external `.nemo` files. Older bundles that only recorded
+    ``asr_model_path`` / ``diar_model_path`` remain supported for backward
+    compatibility.
     """
 
     def __init__(self, cfg: DictConfig, trainer: Optional[Trainer] = None):
         super().__init__(cfg=cfg, trainer=trainer)
         self.encoder = ParallelExpertEncoder(
-            asr_model_path=self._cfg.asr_model_path,
-            diar_model_path=self._cfg.diar_model_path,
+            asr_model_path=self._cfg.get('asr_model_path', None),
+            diar_model_path=self._cfg.get('diar_model_path', None),
             freeze_diar=self._cfg.get('freeze_diar', True),
             freeze_asr=self._cfg.get('freeze_asr', False),
+            asr_encoder_cfg=self._cfg.get('asr_encoder_cfg', None),
+            diarization_model_cfg=self._cfg.get('diarization_model_cfg', None),
+            asr_normalize_type=self._cfg.get('asr_normalize_type', None),
         )
 
     @classmethod
@@ -537,6 +623,24 @@ class ParallelExpertEncoderPT(ModelPT):
 
     def setup_validation_data(self, val_data_config: Union[DictConfig, dict]):
         pass
+
+    def to_config_dict(self) -> DictConfig:
+        """Persist a self-contained bundle config while keeping `ParallelExpertEncoderPT` as the restore class."""
+        cfg = _clone_config(self.encoder.to_config_dict())
+        if '_target_' in cfg:
+            del cfg['_target_']
+        return cfg
+
+    def on_save_checkpoint(self, checkpoint):
+        """Keep Lightning `.ckpt` hyperparameters aligned with the self-contained bundle config."""
+        checkpoint.setdefault('hyper_parameters', {})
+        checkpoint['hyper_parameters']['cfg'] = self.to_config_dict()
+
+    def to_config_file(self, path2yaml_file: str):
+        """Serialize the self-contained bundle config instead of the live bootstrap config."""
+        cfg = self.to_config_dict()
+        with open(path2yaml_file, 'w', encoding='utf-8') as fout:
+            OmegaConf.save(config=cfg, f=fout, resolve=True)
 
 
 def build_parallel_expert_encoder(
@@ -602,8 +706,8 @@ def import_parallel_expert_encoder_from_nemo(
 ) -> ParallelExpertEncoder:
     """Load a ``.nemo`` archive produced by :func:`export_parallel_expert_encoder_to_nemo`.
 
-    See :class:`ParallelExpertEncoderPT` for requirements on the stored
-    ``asr_model_path`` / ``diar_model_path`` during restoration.
+    New bundles restore from an inline self-contained config. Older bundles may
+    still require the original ``asr_model_path`` / ``diar_model_path``.
     """
     bundle = ParallelExpertEncoderPT.restore_from(
         restore_path=nemo_path,
