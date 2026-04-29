@@ -136,7 +136,15 @@ class MoEFeedForward(nn.Module):
         gate_probs = self.router(x_flat)
 
         top_k_probs, top_k_indices = torch.topk(gate_probs, self.top_k, dim=-1)
-        top_k_probs = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-9)
+        # For top_k > 1 we renormalize so the weighted combination is a convex
+        # combination of the selected experts (standard practice).
+        # For top_k == 1 we KEEP the raw softmax probability so that the router
+        # receives a gradient from the main task loss (Switch Transformer style).
+        # Renormalizing to 1.0 in the top-1 case removes the router's task-loss
+        # gradient pathway entirely, leaving it driven only by the auxiliary
+        # load-balancing loss.
+        if self.top_k > 1:
+            top_k_probs = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-9)
 
         expert_mask = torch.zeros(num_tokens, self.num_experts, device=x.device, dtype=x.dtype)
         expert_mask.scatter_(1, top_k_indices, 1.0)
