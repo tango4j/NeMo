@@ -12,20 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import random
-import re
 from dataclasses import dataclass
-from itertools import permutations
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Union
 
-import numpy as np
 import torch
 import torch.utils.data
 from lhotse import CutSet
 from lhotse.cut import MixedCut
 from lhotse.dataset import AudioSamples
-from lhotse.dataset.collation import collate_matrices, collate_vectors
+from lhotse.dataset.collation import collate_vectors
 
+from nemo.collections.asr.parts.utils.sot_speaker_alignment import (
+    collate_speaker_activity_targets,
+    ensure_single_speaker_sot,
+    fix_speaker_activity,
+    speaker_activity_from_cut,
+)
 from nemo.collections.common.data import apply_prompt_format_fn
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import TokenizerSpec
@@ -126,268 +128,7 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
             self.num_mel_frame_per_target_frame = int(sot_cfg.get('subsampling_factor', 8))
             # self.convert_to_wl = sot_cfg.get('convert_to_wl', False)
 
-    # ── SOT text parsing utilities ─────────────────────────────────────
-
-    @staticmethod
-    def _sl_to_wl(text: str) -> str:
-        """Convert segment-level (SL) SOT text to word-level (WL) SOT text.
-
-        SL has a speaker token only at turn boundaries:
-            ``[s0] hello how are you [s1] i am fine``
-
-        WL repeats the active speaker token before every word:
-            ``[s0] hello [s0] how [s0] are [s0] you [s1] i [s1] am [s1] fine``
-        """
-        parts = re.split(r'(\[s\d+\])', text)
-        result = []
-        current_token = None
-        for part in parts:
-            if re.fullmatch(r'\[s\d+\]', part):
-                current_token = part
-                continue
-            words = part.split()
-            if current_token is None:
-                result.extend(words)
-                continue
-            for w in words:
-                result.append(current_token)
-                result.append(w)
-        return ' '.join(result)
-
-    @staticmethod
-    def _parse_speaker_tokens(text: str) -> List[int]:
-        """Extract the sequence of speaker indices from SOT text.
-
-        Works with both SL and WL formats.
-        Each word inherits the most recent speaker token (forward-fill).
-        Returns one speaker index per word.
-        """
-        parts = re.split(r'(\[s\d+\])', text)
-        spk_seq: List[int] = []
-        current_spk = -1
-        for part in parts:
-            match = re.fullmatch(r'\[s(\d+)\]', part)
-            if match:
-                current_spk = int(match.group(1))
-                continue
-            if current_spk < 0:
-                continue
-            for _ in part.split():
-                spk_seq.append(current_spk)
-        return spk_seq
-
-    @staticmethod
-    def _get_text_speaker_char_counts(text: str, num_spk: int) -> np.ndarray:
-        """Estimate speaking time per speaker from char counts of words.
-
-        Returns ``(num_spk,)`` array of normalised char counts.
-        """
-        parts = re.split(r'(\[s\d+\])', text)
-        char_counts = np.zeros(num_spk, dtype=np.float32)
-        current_spk = -1
-        for part in parts:
-            match = re.fullmatch(r'\[s(\d+)\]', part)
-            if match:
-                current_spk = int(match.group(1))
-                continue
-            if current_spk < 0 or current_spk >= num_spk:
-                continue
-            for word in part.split():
-                char_counts[current_spk] += len(word)
-        total = char_counts.sum()
-        if total > 0:
-            char_counts /= total
-        return char_counts
-
-    # ── DTW / speaker-frequency cost functions ─────────────────────────
-
-    @staticmethod
-    def _dtw_cost_batch(
-        activity: np.ndarray,
-        spk_seq_arr: np.ndarray,
-        perm_batch: np.ndarray,
-        num_spk: int,
-        token_weights: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """Compute DTW costs for a batch of permutations in one vectorized pass.
-
-        Cost is one-hot based: each speaker token is a one-hot vector;
-        cost at ``(k, t) = 1 - dot(text_one_hot, activity_permuted_at_t)``.
-        """
-        K = spk_seq_arr.shape[0]
-        T = activity.shape[0]
-        P = perm_batch.shape[0]
-        if K == 0 or T == 0:
-            return np.full(P, np.float32(np.inf))
-
-        valid = spk_seq_arr < num_spk
-        activity_permuted = activity[:, perm_batch].transpose(1, 0, 2)  # (P, T, num_spk)
-        activity_sum = np.maximum(activity.sum(axis=1), 1.0).astype(np.float32)  # (T,)
-        cols = np.where(valid, spk_seq_arr, 0)
-        local = 1.0 - activity_permuted[:, :, cols].transpose(0, 2, 1) / activity_sum
-        local[:, ~valid, :] = 1.0
-
-        if token_weights is not None:
-            local = local * token_weights[np.newaxis, :, np.newaxis]
-
-        INF = np.float32(np.inf)
-        prev_row = np.cumsum(local[:, 0, :], axis=1).astype(np.float32)
-
-        for k in range(1, K):
-            cur_row = np.full((P, T), INF, dtype=np.float32)
-            cur_row[:, 0] = prev_row[:, 0] + local[:, k, 0]
-            for t in range(1, T):
-                cur_row[:, t] = (
-                    np.minimum(
-                        np.minimum(prev_row[:, t], prev_row[:, t - 1]),
-                        cur_row[:, t - 1],
-                    )
-                    + local[:, k, t]
-                )
-            prev_row = cur_row
-
-        return prev_row[:, T - 1] / (K + T)
-
-    @staticmethod
-    def _speaker_freq_cost_batch(
-        text_freq: np.ndarray,
-        rttm_freq: np.ndarray,
-        perm_batch: np.ndarray,
-    ) -> np.ndarray:
-        """L1 mismatch between text and RTTM speaker frequency under each permutation."""
-        rttm_freq_perm = rttm_freq[perm_batch]  # (P, num_spk)
-        return np.abs(text_freq - rttm_freq_perm).sum(axis=1).astype(np.float32)
-
-    @staticmethod
-    def _dtw_cost(
-        activity: np.ndarray,
-        spk_seq_arr: np.ndarray,
-        perm: List[int],
-        num_spk: int,
-        token_weights: Optional[np.ndarray] = None,
-    ) -> float:
-        """Compute DTW cost for a single permutation (delegates to batch)."""
-        perm_batch = np.array([perm], dtype=np.intp)
-        costs = PromptedAudioToTextLhotseDataset._dtw_cost_batch(
-            activity, spk_seq_arr, perm_batch, num_spk, token_weights
-        )
-        return float(costs[0])
-
-    # ── RTTM ↔ SOT speaker alignment ──────────────────────────────────
-
-    def _fix_speaker_activity(self, cut, speaker_activity: torch.Tensor) -> torch.Tensor:
-        """Align speaker_activity columns (from RTTM) with the SOT speaker
-        token ordering in the transcript using DP-based DTW alignment.
-
-        The SOT text contains a sequence of speaker tokens (one per word in WL
-        mode, or one per turn in SL mode).  The RTTM-derived speaker_activity
-        matrix ``(T, num_spk)`` has columns in an arbitrary order.  We need to
-        find the column permutation that best aligns the text speaker sequence
-        with the frame-level activity.
-
-        Algorithm:
-          1. Parse the SOT text into a word-level speaker token sequence of
-             length K (forward-filling speaker labels for SL format).
-          2. For each candidate permutation of the distinct speakers present in
-             the text, run DTW on the ``K x T`` grid to find the minimum-cost
-             monotonic alignment.
-          3. Pick the permutation with the lowest DTW cost.
-          4. Reorder columns accordingly and zero out columns for speakers
-             absent from the text.
-
-        Falls back to identity mapping when the number of distinct speakers
-        exceeds ``num_speakers + 1`` (to keep permutation count tractable).
-        """
-        text = cut.text or ''
-        if not text:
-            return speaker_activity
-
-        T, num_spk = speaker_activity.shape
-
-        active_frames = speaker_activity.sum(dim=0)
-        num_active = int((active_frames > 0).sum().item())
-        num_active = min(num_active, num_spk)
-
-        spk_seq = self._parse_speaker_tokens(text)
-        if not spk_seq:
-            return speaker_activity
-
-        speakers_in_text = sorted(set(spk_seq))
-        spk_seq_arr = np.array(spk_seq, dtype=np.intp)
-        K = len(spk_seq_arr)
-
-        activity_np = speaker_activity.detach().cpu().numpy().astype(np.float32)
-
-        token_counts = np.bincount(spk_seq_arr, minlength=num_spk).astype(np.float32)
-        token_counts = np.maximum(token_counts, 1.0)
-        token_weights = (K / token_counts)[spk_seq_arr]
-
-        text_freq = self._get_text_speaker_char_counts(text, num_spk)
-        rttm_freq = activity_np.sum(axis=0).astype(np.float32)
-        rttm_total = rttm_freq.sum()
-        if rttm_total > 0:
-            rttm_freq /= rttm_total
-
-        identity_perm = list(range(num_spk))
-
-        max_permutable = self.num_speakers + 1
-        if num_active > 0 and num_active <= max_permutable:
-            perm_active = np.array(list(permutations(range(num_active))), dtype=np.intp)
-            perm_batch = np.zeros((perm_active.shape[0], num_spk), dtype=np.intp)
-            perm_batch[:, :num_active] = perm_active
-            perm_batch[:, num_active:] = np.arange(num_active, num_spk)
-
-            dtw_costs = self._dtw_cost_batch(
-                activity_np, spk_seq_arr, perm_batch, num_spk, token_weights
-            )
-            freq_costs = self._speaker_freq_cost_batch(text_freq, rttm_freq, perm_batch)
-            total_costs = dtw_costs + freq_costs
-
-            best_idx = int(np.argmin(total_costs))
-            best_perm = perm_batch[best_idx].tolist()
-        else:
-            best_perm = identity_perm
-
-        fixed = speaker_activity[:, best_perm].clone()
-
-        speakers_set = set(speakers_in_text)
-        cols_to_zero = [c for c in range(num_spk) if c not in speakers_set]
-        if cols_to_zero:
-            fixed[:, cols_to_zero] = 0.0
-
-        if best_perm != identity_perm:
-            identity_cost = float(
-                self._dtw_cost(activity_np, spk_seq_arr, identity_perm, num_spk, token_weights)
-                + self._speaker_freq_cost_batch(text_freq, rttm_freq, np.array([identity_perm], dtype=np.intp))[0]
-            )
-            best_cost = float(total_costs[best_idx])
-            if False: # TODO: Remove this. It's for debugging fix_speaker_activity.
-                logging.info(
-                    "fix_speaker_activity [%s]: perm %s → %s | cost %.4f → %.4f (Δ=%.4f)",
-                    cut.id, identity_perm[:num_active], best_perm[:num_active],
-                    identity_cost, best_cost, identity_cost - best_cost,
-                )
-
-        return fixed
-
     def __getitem__(self, cuts: CutSet) -> PromptedAudioToTextMiniBatch:
-        # Lazy import to avoid circular import at module load time
-        if self.sot_enabled:
-            from nemo.collections.asr.parts.utils.asr_multispeaker_utils import (
-                get_hidden_length_from_sample_length,
-                speaker_to_target,
-            )
-
-        # # ── SOT: optionally apply SL→WL conversion in-place before tokenization
-        # if self.sot_enabled and self.convert_to_wl:
-        #     for cut in cuts:
-        #         for sup in cut.supervisions:
-        #             text = sup.text or ""
-        #             if text:
-        #                 text = self._sl_to_wl(text)
-        #                 sup.text = text
-        #                 cut.text = text
-
         # ── SOT: compute speaker activity targets from RTTM before audio loading
         speaker_activities = []
         if self.sot_enabled:
@@ -406,19 +147,19 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
                 else:
                     mono_cut = cut
 
-                speaker_activity = speaker_to_target(
-                    a_cut=mono_cut,
+                speaker_activity = speaker_activity_from_cut(
+                    mono_cut,
                     num_speakers=self.num_speakers,
                     num_sample_per_mel_frame=self.num_sample_per_mel_frame,
-                    num_mel_frame_per_asr_frame=self.num_mel_frame_per_target_frame,
-                    boundary_segments=True,
+                    num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
                     no_rttm_to_ones=self.no_rttm_to_ones,
                 )
-                
-                # If there is no "[s*]" token in the text, that is single speaker training data.
-                if not re.search(r'\[s\d+\]', mono_cut.text):
-                    spk_idx = random.randint(0, self.num_speakers - 1) if self.randomize_single_speaker_index else 0
-                    new_text = f"[s{spk_idx}] {cut.text}"
+
+                # No speaker token means single-speaker training data.
+                new_text, spk_idx, changed = ensure_single_speaker_sot(
+                    mono_cut.text, self.num_speakers, self.randomize_single_speaker_index
+                )
+                if changed:
                     mono_cut.text = new_text
                     for sup in mono_cut.supervisions:
                         sup.text = new_text
@@ -429,7 +170,7 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
 
                 mono_cuts.append(mono_cut)
 
-                speaker_activity = self._fix_speaker_activity(cut, speaker_activity)
+                speaker_activity = fix_speaker_activity(mono_cut, speaker_activity, self.num_speakers)
 
                 if speaker_activity.shape[1] > self.num_speakers:
                     logging.warning(
@@ -479,20 +220,13 @@ class PromptedAudioToTextLhotseDataset(torch.utils.data.Dataset):
         targets = None
         target_length = None
         if self.sot_enabled and speaker_activities:
-            targets = collate_matrices(speaker_activities).to(audio.dtype)  # (B, T, N)
-            if targets.shape[2] > self.num_speakers:
-                targets = targets[:, :, :self.num_speakers]
-            elif targets.shape[2] < self.num_speakers:
-                targets = torch.nn.functional.pad(
-                    targets, (0, self.num_speakers - targets.shape[2]), mode='constant', value=0
-                )
-            target_length = torch.tensor(
-                [
-                    get_hidden_length_from_sample_length(
-                        al, self.num_sample_per_mel_frame, self.num_mel_frame_per_target_frame
-                    )
-                    for al in audio_lens
-                ]
+            targets, target_length = collate_speaker_activity_targets(
+                speaker_activities,
+                audio_lens,
+                num_speakers=self.num_speakers,
+                num_sample_per_mel_frame=self.num_sample_per_mel_frame,
+                num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
+                dtype=audio.dtype,
             )
 
         return PromptedAudioToTextMiniBatch(

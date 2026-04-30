@@ -64,6 +64,7 @@ class SALMDataset(torch.utils.data.Dataset):
           and which are part of the source sequences (user prompts)
         - The input_ids and loss_mask will be expanded during model forward pass to account for
           the variable-length audio segments that replace each audio_locator_tag token
+        - SOT speaker tags stay regular text tokens here; normalization and aliasing happen upstream.
     """
 
     def __init__(self, tokenizer: AutoTokenizer) -> None:
