@@ -68,17 +68,34 @@ class DataModule(LightningDataModule):
                     getattr(self.cfg, k).force_map_dataset = True
         self.tokenizer = tokenizer
         self.dataset = dataset
+        self._train_dl = None
 
     def train_dataloader(self):
         if "train_ds" not in self.cfg:
             return None
-        return get_lhotse_dataloader_from_config(
-            config=self.cfg.train_ds,
-            global_rank=self._get_dp_rank(),
-            world_size=self._get_world_size(),
-            dataset=FallbackDataset(self.dataset),
-            tokenizer=self.tokenizer,
-        )
+        if self._train_dl is None:
+            self._train_dl = get_lhotse_dataloader_from_config(
+                config=self.cfg.train_ds,
+                global_rank=self._get_dp_rank(),
+                world_size=self._get_world_size(),
+                dataset=FallbackDataset(self.dataset),
+                tokenizer=self.tokenizer,
+            )
+        return self._train_dl
+
+    def state_dict(self) -> dict:
+        # Persist the train dataloader state when it's stateful (e.g. torchdata's StatefulDataLoader
+        # paired with a checkpointable lhotse sampler). This enables exact-batch resume.
+        if self._train_dl is not None and hasattr(self._train_dl, "state_dict"):
+            return {"train_dataloader": self._train_dl.state_dict()}
+        return {}
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        if "train_dataloader" not in state_dict:
+            return
+        dl = self.train_dataloader()
+        if dl is not None and hasattr(dl, "load_state_dict"):
+            dl.load_state_dict(state_dict["train_dataloader"])
 
     def val_dataloader(self):
         if "validation_ds" not in self.cfg:

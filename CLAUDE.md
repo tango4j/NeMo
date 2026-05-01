@@ -24,6 +24,8 @@ Requires Python 3.10+, PyTorch 2.6+.
 - Check: `python setup.py style --scope <path>`
 - Fix: `python setup.py style --scope <path> --fix`
 - **Incremental reformatting**: most collections are excluded from black (see `extend-exclude` in pyproject.toml). The files are reformatted when somebody makes changes to avoid a single big reformatting PR. Do not reformat files outside your changes.
+- **Helper placement**: keep public APIs and top-level classes/functions near the top of a file; place private
+  helpers and utilities at the bottom of the file unless a local module convention requires otherwise.
 
 ## Testing
 
