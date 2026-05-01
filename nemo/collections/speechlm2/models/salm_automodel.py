@@ -25,10 +25,6 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.parallel import loss_parallel
 from transformers import GenerationConfig
 
-from nemo.collections.common.data.lhotse.speaker_aliases import (
-    SpeakerAliasTable,
-    build_alias_table,
-)
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
@@ -43,6 +39,7 @@ from nemo.collections.speechlm2.parts.pretrained import (
     update_perception_output_dim,
 )
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, MaskType, NeuralType
+from nemo.utils import logging
 
 
 class SALMAutomodel(LightningModule, HFHubMixin):
@@ -60,13 +57,12 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             self.cfg.pretrained_llm, use_fast=True, trust_remote_code=self.cfg.get("trust_remote_code", False)
         )
         self.tokenizer.add_special_tokens({"additional_special_tokens": [self.audio_locator_tag]})
-        # Multi-speaker alias setup. Maps user-facing speaker tags (e.g. "[s0]") onto
-        # ids that already exist in the LLM tokenizer's reserved-token pool, so we
-        # avoid resize_token_embeddings() and stay shape-compatible with the base HF
-        # checkpoint and FSDP2/EP sharding. Disabled if `speaker_aliases` is absent.
-        self.speaker_alias_table: SpeakerAliasTable = build_alias_table(self.cfg.get("speaker_aliases", None))
+        # Native multi-speaker token setup. The LLM tokenizer is expected to already
+        # contain "<spk:0>..<spk:N>" entries at fixed ids (e.g. ids 100..109 for the
+        # patched Nemotron Nano v3 tokenizer). No alias rewrite or vocab growth is
+        # performed; we only resolve the ids and stash them for the LSS loss.
         self.speaker_token_ids: list[int] = []
-        self._init_speaker_aliases()
+        self._init_speaker_token_ids()
         # Optional auxiliary Latent Speaker Supervision (LSS) loss. Mirrors the
         # AED Canary recipe in nemo/collections/asr/models/aed_multitask_models.py
         # (cf. EncDecMultiTaskModel.__init__ around L229-239): instantiated via
@@ -150,37 +146,68 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def audio_locator_tag_id(self) -> int:
         return self.tokenizer.token_to_id(self.audio_locator_tag)
 
-    def _init_speaker_aliases(self) -> None:
-        """Register the alias-table's underlying tokens with the LLM tokenizer
-        and resolve their ids.
+    def _init_speaker_token_ids(self) -> None:
+        """Resolve the native ``<spk:N>`` speaker-token ids from the LLM tokenizer.
 
-        For implementation details (alias semantics, no-vocab-growth assertion,
-        regex precedence for ``[s10]`` vs ``[s1]``, etc.) see
-        :class:`nemo.collections.common.data.lhotse.speaker_aliases.SpeakerAliasTable`.
+        Reads ``cfg.speaker_tokens`` with the schema::
+
+            speaker_tokens:
+              enable: true
+              template: "<spk:{i}>"        # default
+              max_speakers: 10
+              base_token_id: 100           # expected anchor id for ``<spk:0>``
+
+        The LLM tokenizer is expected to already contain
+        ``template.format(i=0)..template.format(i=max_speakers-1)`` as fixed
+        entries (e.g. produced by the upstream tokenizer-patch script that
+        renames the contiguous reserved slots ``<SPECIAL_100>..<SPECIAL_109>``
+        to ``<spk:0>..<spk:9>``). No alias rewrite, no
+        ``resize_token_embeddings`` call, and no vocab growth happens here.
 
         After this call:
-            * ``self.speaker_alias_table`` : alias <-> underlying mapping (also
-              consumed by the dataloader workers via the YAML ``tags:`` mechanism).
-            * ``self.speaker_token_ids``   : ``list[int]`` of the underlying
-              token ids in alias order. Empty list when aliasing is disabled.
+            * ``self.speaker_token_ids`` : ``list[int]`` of resolved ids in
+              speaker order, empty when ``speaker_tokens`` is absent or
+              ``enable: false``.
+
+        Raises:
+            ValueError: if any speaker token is missing from the tokenizer or
+                its resolved id does not match ``base_token_id + i``, or if
+                the act of resolving them grew the tokenizer's vocab size
+                (which would indicate an unpatched tokenizer was passed).
         """
-        if not self.speaker_alias_table.is_active:
+        cfg = self.cfg.get("speaker_tokens", None)
+        if cfg is None or not bool(cfg.get("enable", True)):
             return
-        underlying = list(self.speaker_alias_table.underlying_strings)
+        template = cfg.get("template", "<spk:{i}>")
+        max_speakers = int(cfg.get("max_speakers", 10))
+        base_token_id = int(cfg.get("base_token_id", 100))
+
         before = len(self.tokenizer)
-        self.tokenizer.add_special_tokens({"additional_special_tokens": underlying})
-        after = len(self.tokenizer)
-        assert before == after, (
-            "Speaker alias underlying tokens introduced new ids "
-            f"(vocab grew {before} -> {after}); aliasing requires pre-existing "
-            "reserved tokens. Pick strings already present in the LLM tokenizer "
-            "(e.g. <SPECIAL_*>) or switch to an explicit resize-and-finetune flow."
-        )
         speaker_token_ids: list[int] = []
-        for underlying_str in underlying:
-            tid = self.tokenizer.token_to_id(underlying_str)
-            assert tid is not None, f"Could not resolve id for {underlying_str!r}"
+        for i in range(max_speakers):
+            token = template.format(i=i)
+            tid = self.tokenizer.token_to_id(token)
+            expected = base_token_id + i
+            if tid is None:
+                raise ValueError(
+                    f"Could not resolve speaker token {token!r} in the LLM tokenizer. "
+                    "Ensure pretrained_llm points at the patched tokenizer dir "
+                    "(e.g. '...-spk/') produced by patch_nano_v3_speaker_tokens.py."
+                )
+            if tid != expected:
+                raise ValueError(
+                    f"Speaker token {token!r} resolved to id {tid}, expected "
+                    f"{expected} (= base_token_id={base_token_id} + i={i}). The "
+                    "tokenizer does not match the configured speaker_tokens layout."
+                )
             speaker_token_ids.append(tid)
+        after = len(self.tokenizer)
+        if before != after:
+            raise ValueError(
+                f"Resolving speaker tokens grew the tokenizer ({before} -> {after}); "
+                "speaker_tokens requires the tokens to already exist in the patched "
+                "tokenizer (no resize_token_embeddings on this path)."
+            )
         self.speaker_token_ids = speaker_token_ids
 
     def _init_lss_loss(self) -> None:
@@ -192,9 +219,10 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         * The loss is instantiated from ``cfg.lss_loss`` via Hydra ``_target_``,
           identical to ``EncDecMultiTaskModel.from_config_dict(self.cfg.lss_loss)``.
-        * ``speaker_token_ids`` is auto-injected from this model's alias table
-          when absent in YAML, mirroring AED's auto-injection from
-          ``self.tokenizer.special_tokens[f"[s{i}]"]``.
+        * ``speaker_token_ids`` is auto-injected from
+          ``self.speaker_token_ids`` (resolved by ``_init_speaker_token_ids``
+          from the LLM tokenizer's native ``<spk:N>`` entries) when absent in
+          YAML.
         * Enable/disable is controlled purely by the *presence* of the
           ``lss_loss:`` block (no ``enable:`` flag) — same as AED.
 
@@ -205,29 +233,143 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         loss_cfg = self.cfg.get("lss_loss", None)
         if loss_cfg is None:
             return
+        if loss_cfg.get("include_ce_loss", False):
+            raise ValueError(
+                "model.lss_loss.include_ce_loss must be False (or omitted) on the SALM "
+                "automodel path: SALM already computes CE inside loss_parallel(), so a "
+                "second CE term inside LSS would be double-counted."
+            )
+        if loss_cfg.get("is_rnnt", False):
+            raise ValueError(
+                "model.lss_loss.is_rnnt must be False (or omitted) on the SALM automodel "
+                "path: SALM is AED-style and produces 3D (B, T, V) logits, not the 4D "
+                "RNNT joint tensor expected when is_rnnt=True."
+            )
         with open_dict(loss_cfg):
             loss_cfg.setdefault("pad_id", -100)
+            loss_cfg.setdefault("include_ce_loss", False)
+            loss_cfg.setdefault("is_rnnt", False)
             if loss_cfg.get("speaker_token_ids", None) is None:
                 if not self.speaker_token_ids:
                     raise ValueError(
                         "model.lss_loss is configured but no speaker_token_ids are available. "
-                        "Either set model.speaker_aliases (so ids are derived from the alias table) "
-                        "or pass an explicit model.lss_loss.speaker_token_ids list."
+                        "Either set model.speaker_tokens (so ids are derived from the patched "
+                        "tokenizer's native <spk:N> entries) or pass an explicit "
+                        "model.lss_loss.speaker_token_ids list."
                     )
                 loss_cfg.speaker_token_ids = list(self.speaker_token_ids)
         self.lss_loss = instantiate(loss_cfg)
 
-    def apply_speaker_aliases(self, text: str) -> str:
-        """Convenience proxy: alias [sN] -> underlying tokenizer strings.
+    def _init_pe_encoder(self) -> None:
+        """Optionally swap ``self.perception.encoder`` for a Parallel-Expert encoder bundle.
 
-        See :meth:`SpeakerAliasTable.apply` for behavior. No-op when aliases
-        are disabled.
+        Mirrors :meth:`MSEncDecMultiTaskModel._init_pe_encoder` from
+        ``nemo/collections/asr/models/aed_richtrans_models.py``: when
+        ``cfg.pe_encoder_path`` points at a ``.nemo`` archive produced by
+        :func:`nemo.collections.asr.modules.parallel_expert_encoder.export_parallel_expert_encoder_to_nemo`,
+        we load the bundle and replace SALM's perception encoder
+        (originally a :class:`ConformerEncoder` warm-started from
+        ``cfg.pretrained_asr``) with the
+        :class:`~nemo.collections.asr.modules.parallel_expert_encoder.ParallelExpertEncoder`.
+        The PE encoder owns *both* an ASR Conformer expert *and* a
+        Sortformer speaker-diarization expert internally, fused with a
+        sinusoidal speaker-kernel before its output reaches the modality
+        adapter.
+
+        Two pieces of plumbing are required for the swap to be correct:
+
+        1. **Mel normalization**: ``ParallelExpertEncoder`` expects
+           *un-normalised* mels (Sortformer's native feature format). It
+           re-normalises internally for the ASR branch via
+           ``normalize_batch``. Canary-1B-v2's preprocessor is configured
+           with ``normalize='per_feature'`` by default, which would feed
+           Sortformer pre-normalised mels and silently degrade
+           diarization. We therefore disable normalization on the
+           perception preprocessor as part of the swap. The ASR-side
+           normalize_type from the original Canary preprocessor is
+           preserved on the PE wrapper's ``asr_normalize_type``.
+
+        2. **Encoder hidden-dim parity**: SALM's modality adapter / proj
+           were built around ``cfg.perception.encoder.d_model`` (1024 for
+           Canary-1B-v2). The PE bundle exposes the same property and
+           must match \u2014 we hard-fail otherwise so a mismatched checkpoint
+           cannot silently produce a shape error inside the first forward.
+
+        Freeze policy is taken from the bundle as-saved (``freeze_diar`` /
+        ``freeze_asr`` flags baked in at export time, defaulting to
+        ``freeze_diar=True, freeze_asr=False``). SALM does not introduce
+        a new freeze override here; if you need to retune freeze, re-run
+        :func:`export_parallel_expert_encoder_to_nemo` to produce a new
+        bundle.
         """
-        return self.speaker_alias_table.apply(text)
+        model_path = self.cfg.get("pe_encoder_path", None)
+        if model_path is None:
+            return
 
-    def undo_speaker_aliases(self, text: str) -> str:
-        """Convenience proxy: inverse of :meth:`apply_speaker_aliases`."""
-        return self.speaker_alias_table.undo(text)
+        if self.perception is None:
+            raise RuntimeError(
+                "_init_pe_encoder() called before configure_model() built self.perception. "
+                "This helper must run after setup_speech_encoder() inside configure_model()."
+            )
+        if not isinstance(model_path, str) or not model_path.endswith(".nemo"):
+            raise ValueError(
+                f"cfg.pe_encoder_path must be a .nemo bundle produced by "
+                f"export_parallel_expert_encoder_to_nemo(...), got {model_path!r}."
+            )
+
+        from nemo.collections.asr.modules.parallel_expert_encoder import (
+            ParallelExpertEncoder,
+            import_parallel_expert_encoder_from_nemo,
+        )
+
+        existing_encoder = self.perception.encoder
+        existing_d_model = int(getattr(existing_encoder, "d_model", -1))
+
+        pe_encoder = import_parallel_expert_encoder_from_nemo(
+            model_path, map_location="cpu", strict=True,
+        )
+        if not isinstance(pe_encoder, ParallelExpertEncoder):
+            raise TypeError(
+                f"Loaded {model_path!r} did not yield a ParallelExpertEncoder, "
+                f"got {type(pe_encoder).__name__}. The bundle is not a "
+                "ParallelExpertEncoderPT export."
+            )
+
+        if int(pe_encoder.d_model) != existing_d_model:
+            raise ValueError(
+                f"ParallelExpertEncoder d_model={pe_encoder.d_model} does not match "
+                f"the existing perception encoder d_model={existing_d_model}. The "
+                "modality adapter and proj layers in self.perception were built "
+                "around the latter; loading would break the first forward pass. "
+                "Re-export the PE bundle with a matching ASR encoder, or use a "
+                f"perception/modality_adapter sized for d_model={pe_encoder.d_model}."
+            )
+
+        prev_normalize = getattr(self.perception.preprocessor.featurizer, "normalize", None)
+        if prev_normalize is not None:
+            self.perception.preprocessor.featurizer.normalize = None
+            with open_dict(self.cfg):
+                if "perception" in self.cfg and "preprocessor" in self.cfg.perception:
+                    self.cfg.perception.preprocessor.normalize = None
+            logging.info(
+                "[SALMAutomodel] Disabled perception preprocessor normalization "
+                "(was %r) so the ParallelExpertEncoder receives un-normalised "
+                "mels. The ASR branch re-normalises internally (asr_normalize_type=%r).",
+                prev_normalize, pe_encoder.asr_normalize_type,
+            )
+
+        self.perception.encoder = pe_encoder
+        del existing_encoder
+
+        logging.info(
+            "[SALMAutomodel] Replaced perception.encoder with ParallelExpertEncoder "
+            "from %s (d_model=%d, n_spk=%d, freeze_diar=%s, freeze_asr=%s).",
+            model_path,
+            int(pe_encoder.d_model),
+            int(pe_encoder.n_spk),
+            bool(pe_encoder.freeze_diar),
+            bool(pe_encoder.freeze_asr),
+        )
 
     @property
     def token_equivalent_duration(self) -> float:
@@ -373,6 +515,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def on_validation_epoch_start(self) -> None:
         self._partial_val_losses = defaultdict(list)
         self._partial_accuracies = defaultdict(list)
+        self._partial_val_lss = defaultdict(list)
 
     def on_validation_epoch_end(self) -> None:
         val_losses = []
@@ -389,8 +532,18 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             accuracies.append(val_acc)
         self.log("val_acc", torch.stack(accuracies).mean(), on_epoch=True, sync_dist=True)
 
+        if self.lss_loss is not None:
+            lss_vals = []
+            for name, vals in self._partial_val_lss.items():
+                val_lss = torch.stack(vals).mean()
+                self.log(f"val_lss_{name}", val_lss, on_epoch=True, sync_dist=True)
+                lss_vals.append(val_lss)
+            if lss_vals:
+                self.log("val_lss", torch.stack(lss_vals).mean(), on_epoch=True, sync_dist=True)
+
         self._partial_val_losses.clear()
         self._partial_accuracies.clear()
+        self._partial_val_lss.clear()
 
     def validation_step(self, batch: dict, batch_idx: int):
         for name, dataset_batch in batch.items():
@@ -409,6 +562,14 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     )
                     / num_frames
                 )
+
+            if self.lss_loss is not None and num_frames > 0:
+                logits = forward_outputs["logits"]
+                if isinstance(logits, DTensor):
+                    logits = logits.full_tensor()
+                log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+                lss_val = self.lss_loss(log_probs=log_probs, labels=inputs["target_ids"])
+                self._partial_val_lss[name].append(lss_val.detach())
 
             preds = forward_outputs["logits"].argmax(dim=-1).view(-1)
             refs = inputs["target_ids"].reshape(-1)
@@ -782,6 +943,14 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         # Create perception module (must happen after LLM so output_dim matches)
         setup_speech_encoder(self, pretrained_weights=self.cfg.pretrained_weights)
+
+        # Optionally swap perception.encoder for a Parallel-Expert encoder bundle
+        # (Sortformer + ASR Conformer fused via sinusoidal speaker-kernel). Mirrors
+        # MSEncDecMultiTaskModel._init_pe_encoder in aed_richtrans_models.py. The
+        # swap also disables the perception preprocessor's normalize step because
+        # ParallelExpertEncoder expects un-normalised mels (Sortformer's native
+        # feature format) and re-normalises internally for the ASR branch.
+        self._init_pe_encoder()
 
         # Fix projection dim for pretrained_weights=False (config output_dim may not match LLM)
         update_perception_output_dim(self)
