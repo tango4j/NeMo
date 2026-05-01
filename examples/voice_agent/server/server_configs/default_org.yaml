@@ -24,7 +24,7 @@ stt:
 
 diar:
   type: nemo
-  enabled: false # set to false to disable
+  enabled: true # set to false to disable
   model: "nvidia/diar_streaming_sortformer_4spk-v2.1"
   device: "cuda"
   threshold: 0.4  # threshold value used to determine if a speaker exists or not, setting it to a lower value will increaset the sensitivity of the model
@@ -35,14 +35,10 @@ turn_taking:
   max_buffer_size: 2  # num of words more than this amount will interrupt the LLM immediately if not backchannel phrases
   bot_stop_delay: 0.5  # a delay in seconds allowed between server and client audio output, so that the BotStopSpeaking signal is handled not too far away from the actual time that the user hears all audio output
 
-# llm:
-#   type: auto  # choices in ['auto', 'hf', 'vllm'], if `auto`, it will try to use vllm and fall back to hf if vllm not available
-#   model: "nvidia/NVIDIA-Nemotron-Nano-9B-v2"  # model name for HF models, will be used via `AutoModelForCausalLM.from_pretrained()`
-#   model_config: "./server_configs/llm_configs/nemotron_nano_v2.yaml"
 llm:
-  type: vllm
-  model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
-  model_config: "./server_configs/llm_configs/nemotron_nano_v3.yaml"
+  type: auto  # choices in ['auto', 'hf', 'vllm'], if `auto`, it will try to use vllm and fall back to hf if vllm not available
+  model: "nvidia/NVIDIA-Nemotron-Nano-9B-v2"  # model name for HF models, will be used via `AutoModelForCausalLM.from_pretrained()`
+  model_config: "./server_configs/llm_configs/nemotron_nano_v2.yaml"
   # model: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
   # model_config: "./server_configs/llm_configs/nemotron_nano_v3.yaml"
   # if `model_config` is not specified, and the llm.model is not in model_registry.yaml, it will use `llm_configs/hf_llm_generic.yaml`
