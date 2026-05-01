@@ -2,6 +2,7 @@ from torch import nn
 import torch
 from torch.nn import Conv1d
 from dataclasses import dataclass
+from typing import Optional
 from torch.nn import GELU as TorchGELU
 from torch.nn.functional import scaled_dot_product_attention
 @dataclass
@@ -27,15 +28,26 @@ class TransformerEncoderConfig():
     theta_base: int = 10_000
     context_length: int = 4096
     qk_norm: bool = False
+    # FFN inner dimension. If None, FeedForward defaults to 4 * d_model
+    # (preserves legacy behavior).
+    hidden_size: Optional[int] = None
 
 class FeedForward(nn.Module):
-    def __init__(self, dim):
+    """Two-layer MLP with GELU. ``hidden_size`` controls the inner dim.
+
+    If ``hidden_size`` is None, defaults to ``4 * dim`` to preserve the original
+    (pre-`ff_expansion_factor`) behavior. Pass an explicit ``hidden_size`` to
+    decouple FFN width from ``d_model`` (e.g. for fine-grained MoE).
+    """
+
+    def __init__(self, dim, hidden_size: Optional[int] = None):
         super().__init__()
-        self.dim=dim
+        self.dim = dim
+        self.hidden_size = int(hidden_size) if hidden_size is not None else 4 * dim
         self.ffn = nn.Sequential(
-            nn.Linear(dim, 4*dim),
+            nn.Linear(dim, self.hidden_size),
             TorchGELU(),
-            nn.Linear(4*dim, dim)
+            nn.Linear(self.hidden_size, dim),
         )
 
     def forward(self, x):
@@ -281,7 +293,7 @@ class TransformerBlock(nn.Module):
             )
         self.dropout = nn.Dropout(self.cfg.drop_rate)
         self.post_norm = LayerNorm(self.cfg.d_model)
-        self.ffn = FeedForward(self.cfg.d_model)
+        self.ffn = FeedForward(self.cfg.d_model, hidden_size=self.cfg.hidden_size)
 
     def forward(self, x, attn_mask=None, use_cache=False):
         pre_norm = self.pre_norm(x)
@@ -400,7 +412,19 @@ class TransformerEncoder(nn.Module):
                 nan_debug: bool = True,
                 qk_norm: bool = False,
                 subsampling_factor: int = 4,
+                hidden_size: Optional[int] = None,
+                ff_expansion_factor: Optional[float] = None,
     ):
+        """Transformer encoder for ASR.
+
+        Args:
+            hidden_size: Inner dimension of every per-layer FFN. If None and
+                ``ff_expansion_factor`` is given, computed as
+                ``int(d_model * ff_expansion_factor)``. If both are None,
+                falls back to the legacy ``4 * d_model``.
+            ff_expansion_factor: Multiplier on ``d_model`` to derive
+                ``hidden_size``. Ignored if ``hidden_size`` is given explicitly.
+        """
         super().__init__()
         self.d_model = d_model
         self.nan_debug = nan_debug
@@ -413,7 +437,25 @@ class TransformerEncoder(nn.Module):
         else:
             raise ValueError(f"Invalid pre_encode: {pre_encode}. Choose from: conv, depth_conv, stacking")
 
-        cfg = TransformerEncoderConfig(d_model=d_model, n_heads=n_heads, n_layers=n_layers, drop_rate=drop_rate, qkv_bias=qkv_bias, causal_mask=causal_mask, qk_norm=qk_norm)
+        # Resolve FFN inner dimension. Explicit hidden_size > derived from
+        # ff_expansion_factor > legacy default of 4 * d_model.
+        if hidden_size is None and ff_expansion_factor is not None:
+            hidden_size = int(d_model * ff_expansion_factor)
+        if hidden_size is None:
+            hidden_size = 4 * d_model
+        self.ff_hidden_size = int(hidden_size)
+        self.ff_expansion_factor = ff_expansion_factor
+
+        cfg = TransformerEncoderConfig(
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            drop_rate=drop_rate,
+            qkv_bias=qkv_bias,
+            causal_mask=causal_mask,
+            qk_norm=qk_norm,
+            hidden_size=self.ff_hidden_size,
+        )
         self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
         self.layer_norm = nn.LayerNorm(d_model)
         self.final_norm = nn.LayerNorm(d_model)

@@ -475,6 +475,352 @@ class TestMoEFeedForward:
         moe_ff = MoEFeedForward(d_model=32, num_experts=4, router=router).to(DEVICE)
         assert moe_ff.router is router
 
+    def test_expert_counts_recorded(self):
+        """After forward, _expert_counts should be a length-num_experts long tensor
+        whose total equals num_tokens * top_k.
+        """
+        E, K = 5, 2
+        moe_ff = MoEFeedForward(d_model=16, num_experts=E, top_k=K).to(DEVICE)
+        x = torch.randn(3, 7, 16, device=DEVICE)
+        with torch.no_grad():
+            moe_ff(x)
+        counts = moe_ff._expert_counts
+        assert counts is not None
+        assert counts.shape == (E,)
+        assert counts.dtype == torch.long
+        assert int(counts.sum().item()) == 3 * 7 * K
+
+    def test_gate_prob_sum_recorded(self):
+        """After forward, _gate_prob_sum / _num_tokens should sum to ~1."""
+        E = 4
+        moe_ff = MoEFeedForward(d_model=16, num_experts=E, top_k=1).to(DEVICE)
+        x = torch.randn(2, 5, 16, device=DEVICE)
+        with torch.no_grad():
+            moe_ff(x)
+        prob_sum = moe_ff._gate_prob_sum
+        n = moe_ff._num_tokens
+        assert prob_sum is not None
+        assert prob_sum.shape == (E,)
+        assert prob_sum.dtype == torch.float32
+        assert n == 2 * 5
+        rho = prob_sum / n
+        assert torch.allclose(rho.sum(), torch.tensor(1.0, device=DEVICE), atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Configurable FFN inner dim (hidden_size / ff_expansion_factor)
+# ---------------------------------------------------------------------------
+
+class TestConfigurableFFNHiddenSize:
+    def test_feedforward_default_is_4x(self):
+        """With no hidden_size, FeedForward defaults to 4x dim (legacy)."""
+        ff = FeedForward(64)
+        assert ff.hidden_size == 256
+        # First Linear: in=64, out=256
+        first = ff.ffn[0]
+        assert first.weight.shape == (256, 64)
+
+    def test_feedforward_explicit_hidden_size(self):
+        """Explicit hidden_size sets both Linear shapes."""
+        ff = FeedForward(64, hidden_size=32)
+        assert ff.hidden_size == 32
+        assert ff.ffn[0].weight.shape == (32, 64)
+        assert ff.ffn[2].weight.shape == (64, 32)
+
+    def test_encoder_legacy_default_unchanged(self):
+        """With no hidden_size / ff_expansion_factor, encoder builds 4x FFN."""
+        enc = _make_base_encoder()
+        assert enc.ff_hidden_size == 4 * D_MODEL
+        for layer in enc.layers:
+            assert layer.ffn.hidden_size == 4 * D_MODEL
+
+    def test_encoder_ff_expansion_factor(self):
+        """ff_expansion_factor=0.5 -> hidden_size = int(d_model * 0.5)."""
+        enc = _make_base_encoder(ff_expansion_factor=0.5)
+        assert enc.ff_hidden_size == int(D_MODEL * 0.5)
+        for layer in enc.layers:
+            assert layer.ffn.hidden_size == int(D_MODEL * 0.5)
+
+    def test_encoder_explicit_hidden_size_wins_over_factor(self):
+        """When both are given, explicit hidden_size takes precedence."""
+        enc = _make_base_encoder(hidden_size=24, ff_expansion_factor=2.0)
+        assert enc.ff_hidden_size == 24
+        for layer in enc.layers:
+            assert layer.ffn.hidden_size == 24
+
+    def test_moe_encoder_threads_hidden_size(self):
+        """MoETransformerEncoder must propagate hidden_size to per-expert FFNs."""
+        moe = _make_moe_encoder(
+            hidden_size=24, moe_init_from_ffn=False, moe_num_experts=3
+        )
+        assert moe.ff_hidden_size == 24
+        for layer_idx in moe.moe_layer_indices:
+            moe_ffn = moe.layers[layer_idx].ffn
+            assert isinstance(moe_ffn, MoEFeedForward)
+            for expert in moe_ffn.experts:
+                assert expert.hidden_size == 24
+                assert expert.ffn[0].weight.shape == (24, D_MODEL)
+
+    def test_moe_encoder_ff_expansion_factor(self):
+        moe = _make_moe_encoder(
+            ff_expansion_factor=0.5,
+            moe_init_from_ffn=False,
+            moe_num_experts=2,
+        )
+        h = int(D_MODEL * 0.5)
+        assert moe.ff_hidden_size == h
+        for layer_idx in moe.moe_layer_indices:
+            for expert in moe.layers[layer_idx].ffn.experts:
+                assert expert.hidden_size == h
+
+    def test_moe_thin_param_count(self):
+        """Sanity-check parameter count for a thin MoE configuration."""
+        d, h, E, n = D_MODEL, 24, 3, N_LAYERS
+        moe = _make_moe_encoder(
+            hidden_size=h,
+            moe_init_from_ffn=False,
+            moe_num_experts=E,
+            moe_router_type='omni',
+        )
+
+        # Per-expert FFN: Linear(d, h) + Linear(h, d), both with bias
+        per_expert = (d * h + h) + (h * d + d)
+        # MHA per layer (qkv_bias=False, qk_norm=False default in fixture):
+        # 3 * d^2  (Q, K, V)  + d^2 + d  (out_proj) = 4*d^2 + d
+        per_block_mha = 4 * d * d + d
+        # Custom LayerNorm: 2 * d (scale + shift), pre + post = 4 * d
+        per_block_ln = 4 * d
+        per_block = per_block_mha + per_block_ln + E * per_expert
+
+        encoder_total = n * per_block
+        # Top-level: pre_encode (ConvSubsampling), 2 nn.LayerNorms (2*d each)
+        # We don't want to be too brittle on pre_encode sizes; instead verify
+        # that the encoder param count is at least encoder_total + 2 * 2 * d
+        # (for the two LayerNorms we know exist).
+        actual = sum(p.numel() for p in moe.parameters())
+        assert actual >= encoder_total + 4 * d, (
+            f"Expected at least {encoder_total + 4 * d} params, got {actual}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Optimized dispatch loop equivalence & correctness
+# ---------------------------------------------------------------------------
+
+
+def _reference_dispatch(moe_ff: MoEFeedForward, x: torch.Tensor) -> torch.Tensor:
+    """Naive O(top_k * num_experts) reference implementation -- used to validate
+    the optimized in-tree dispatch in MoEFeedForward.forward.
+    """
+    batch, seq, d = x.shape
+    x_flat = x.reshape(-1, d)
+    num_tokens = x_flat.shape[0]
+
+    gate_probs = moe_ff.router(x_flat)
+    top_k_probs, top_k_indices = torch.topk(gate_probs, moe_ff.top_k, dim=-1)
+    if moe_ff.top_k > 1:
+        top_k_probs = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-9)
+
+    out = torch.zeros_like(x_flat)
+    for k in range(moe_ff.top_k):
+        expert_indices = top_k_indices[:, k]
+        expert_weights = top_k_probs[:, k]
+        for i in range(moe_ff.num_experts):
+            mask = expert_indices == i
+            if mask.any():
+                expert_input = x_flat[mask]
+                expert_output = moe_ff.experts[i](expert_input)
+                out[mask] += expert_output * expert_weights[mask].unsqueeze(-1)
+    return out.reshape(batch, seq, d)
+
+
+class TestOptimizedDispatchEquivalence:
+    def test_top_k_1_matches_reference(self):
+        """Optimized dispatch (top_k=1) matches the naive reference."""
+        torch.manual_seed(0)
+        moe_ff = MoEFeedForward(d_model=16, num_experts=4, top_k=1).to(DEVICE)
+        moe_ff.eval()
+        x = torch.randn(2, 9, 16, device=DEVICE)
+        with torch.no_grad():
+            out_optimized = moe_ff(x)
+            out_reference = _reference_dispatch(moe_ff, x)
+        assert torch.allclose(out_optimized, out_reference, atol=1e-5)
+
+    def test_top_k_2_matches_reference(self):
+        """Optimized dispatch (top_k=2) matches the naive reference."""
+        torch.manual_seed(1)
+        moe_ff = MoEFeedForward(d_model=16, num_experts=4, top_k=2).to(DEVICE)
+        moe_ff.eval()
+        x = torch.randn(2, 9, 16, device=DEVICE)
+        with torch.no_grad():
+            out_optimized = moe_ff(x)
+            out_reference = _reference_dispatch(moe_ff, x)
+        assert torch.allclose(out_optimized, out_reference, atol=1e-5)
+
+    def test_top_k_4_of_8_matches_reference(self):
+        """Higher top_k of more experts also matches the reference."""
+        torch.manual_seed(2)
+        moe_ff = MoEFeedForward(d_model=16, num_experts=8, top_k=4).to(DEVICE)
+        moe_ff.eval()
+        x = torch.randn(2, 9, 16, device=DEVICE)
+        with torch.no_grad():
+            out_optimized = moe_ff(x)
+            out_reference = _reference_dispatch(moe_ff, x)
+        assert torch.allclose(out_optimized, out_reference, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Test 12: MoE diagnostic metrics (cumulative buffers + get_moe_metrics)
+# ---------------------------------------------------------------------------
+
+
+class TestMoEMetrics:
+    def _train_step_then_metrics(self, moe, audio, lengths, n_steps=1):
+        """Run `n_steps` training-mode forwards and return get_moe_metrics()."""
+        moe.train()
+        for _ in range(n_steps):
+            with torch.no_grad():
+                moe(audio, lengths)
+        return moe.get_moe_metrics(distributed=False, reset=False)
+
+    def test_metrics_none_before_any_forward(self):
+        moe = _make_moe_encoder()
+        out = moe.get_moe_metrics(distributed=False, reset=False)
+        assert out is None, "Should return None when no MoE forward has run"
+
+    def test_metrics_present_after_training_forward(self):
+        moe = _make_moe_encoder(moe_num_experts=4, moe_top_k=2)
+        audio, lengths = _make_input()
+        out = self._train_step_then_metrics(moe, audio, lengths, n_steps=2)
+        assert out is not None
+        assert "scalars" in out and "per_layer" in out
+        for key in (
+            "moe/load_cv",
+            "moe/load_cv_max",
+            "moe/load_max_over_ideal",
+            "moe/load_min_over_ideal",
+            "moe/router_entropy_norm",
+            "moe/router_entropy_norm_min",
+            "moe/dead_experts",
+            "moe/dead_experts_pct",
+        ):
+            assert key in out["scalars"], f"missing scalar {key}"
+            assert torch.is_tensor(out["scalars"][key])
+            assert out["scalars"][key].dim() == 0
+
+    def test_metrics_per_layer_shapes(self):
+        E, K, L = 4, 2, N_LAYERS
+        moe = _make_moe_encoder(moe_num_experts=E, moe_top_k=K)
+        audio, lengths = _make_input()
+        out = self._train_step_then_metrics(moe, audio, lengths)
+        pl = out["per_layer"]
+        assert pl["load"].shape == (L, E)
+        assert pl["rho"].shape == (L, E)
+        assert pl["cv"].shape == (L,)
+        assert pl["entropy_norm"].shape == (L,)
+        assert pl["dead"].shape == (L,)
+
+    def test_metrics_load_sums_to_topk_per_layer(self):
+        """Per-layer load fractions f must sum to top_k."""
+        E, K = 4, 2
+        moe = _make_moe_encoder(moe_num_experts=E, moe_top_k=K)
+        audio, lengths = _make_input()
+        out = self._train_step_then_metrics(moe, audio, lengths)
+        load = out["per_layer"]["load"]
+        assert torch.allclose(load.sum(dim=-1), torch.full((load.shape[0],), float(K)), atol=1e-3)
+
+    def test_metrics_rho_sums_to_one_per_layer(self):
+        E = 4
+        moe = _make_moe_encoder(moe_num_experts=E, moe_top_k=1)
+        audio, lengths = _make_input()
+        out = self._train_step_then_metrics(moe, audio, lengths)
+        rho = out["per_layer"]["rho"]
+        assert torch.allclose(rho.sum(dim=-1), torch.ones(rho.shape[0]), atol=1e-3)
+
+    def test_reset_zeros_buffers(self):
+        moe = _make_moe_encoder(moe_num_experts=3)
+        audio, lengths = _make_input()
+        moe.train()
+        with torch.no_grad():
+            moe(audio, lengths)
+        assert moe._cum_counts is not None
+        assert moe._cum_counts.sum().item() > 0
+        moe.reset_moe_metrics()
+        assert moe._cum_counts.sum().item() == 0
+        assert moe._cum_prob_sum.sum().item() == 0.0
+        assert moe._cum_tokens.sum().item() == 0
+
+    def test_get_moe_metrics_with_reset(self):
+        """get_moe_metrics(reset=True) should clear the cumulative state."""
+        moe = _make_moe_encoder(moe_num_experts=3)
+        audio, lengths = _make_input()
+        moe.train()
+        with torch.no_grad():
+            moe(audio, lengths)
+        moe.get_moe_metrics(distributed=False, reset=True)
+        assert moe._cum_counts.sum().item() == 0
+        assert moe._cum_prob_sum.sum().item() == 0.0
+        assert moe._cum_tokens.sum().item() == 0
+
+    def test_eval_mode_does_not_accumulate(self):
+        """Eval / inference forwards must not allocate cumulative tensors."""
+        moe = _make_moe_encoder(moe_num_experts=3)
+        audio, lengths = _make_input()
+        moe.eval()
+        with torch.no_grad():
+            moe(audio, lengths)
+        # Either the cumulative tensors were never allocated, or they remain
+        # all zeros. Both are acceptable.
+        if moe._cum_counts is not None:
+            assert moe._cum_counts.sum().item() == 0
+            assert moe._cum_tokens.sum().item() == 0
+
+    def test_dead_expert_detected(self):
+        """If we manually zero a hot expert's counts, dead_experts should rise."""
+        moe = _make_moe_encoder(moe_num_experts=4, moe_top_k=1)
+        audio, lengths = _make_input()
+        moe.train()
+        with torch.no_grad():
+            moe(audio, lengths)
+        # Force one expert to look dead in every layer.
+        moe._cum_counts[:, 0] = 0
+        out = moe.get_moe_metrics(distributed=False, reset=False)
+        assert out["scalars"]["moe/dead_experts"].item() >= float(len(moe.moe_layer_indices))
+
+    def test_cumulative_state_not_in_state_dict(self):
+        """Cumulative MoE state must not leak into the saved state_dict.
+
+        Implementation detail: cumulative state is held as plain attributes,
+        not via register_buffer, both to keep the state out of checkpoints
+        and to prevent DDP's default broadcast_buffers behavior from
+        overwriting per-rank accumulation each step.
+        """
+        moe = _make_moe_encoder()
+        audio, lengths = _make_input()
+        moe.train()
+        with torch.no_grad():
+            moe(audio, lengths)
+        sd = moe.state_dict()
+        for key in ("_cum_counts", "_cum_prob_sum", "_cum_tokens"):
+            assert not any(k.endswith(key) for k in sd), (
+                f"Cumulative MoE state {key!r} leaked into state_dict"
+            )
+
+    def test_cumulative_state_is_not_a_named_buffer(self):
+        """Hard guard: must NOT be a registered nn.Module buffer.
+
+        register_buffer would expose the tensor to DDP's broadcast_buffers,
+        which would overwrite per-rank accumulation. This test ensures we
+        keep the plain-attribute design.
+        """
+        moe = _make_moe_encoder()
+        named_buffers = {n for n, _ in moe.named_buffers()}
+        for key in ("_cum_counts", "_cum_prob_sum", "_cum_tokens"):
+            assert key not in named_buffers, (
+                f"{key!r} is a registered buffer; this will desync per-rank "
+                f"accumulation under DDP. Keep it as a plain attribute."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Run all tests

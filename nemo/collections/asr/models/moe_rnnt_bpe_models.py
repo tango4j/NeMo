@@ -2,12 +2,15 @@
 RNNT BPE model with Mixture-of-Experts (MoE) encoder auxiliary loss support.
 
 Extends EncDecRNNTBPEModel to collect and add the MoE load-balancing auxiliary
-loss from MoETransformerEncoder during training.
+loss from MoETransformerEncoder during training, and to log MoE routing
+diagnostics (load CV, router entropy, dead-expert count, per-layer histograms,
+expert-load heatmap) to W&B in a multinode-safe way.
 """
 
 import torch
 
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel
+from nemo.collections.asr.parts.utils.moe_logging import log_moe_diagnostics
 
 __all__ = ['EncDecMoERNNTBPEModel']
 
@@ -15,12 +18,15 @@ __all__ = ['EncDecMoERNNTBPEModel']
 class EncDecMoERNNTBPEModel(EncDecRNNTBPEModel):
     """Encoder-Decoder RNNT BPE model with MoE encoder auxiliary loss support.
 
-    Inherits all functionality from :class:`EncDecRNNTBPEModel` and overrides
-    :meth:`add_auxiliary_losses` to collect the MoE load-balancing loss from the
-    encoder during training.
+    Inherits all functionality from :class:`EncDecRNNTBPEModel` and:
 
-    Use this model class with :class:`MoETransformerEncoder` to train RNNT models
-    with MoE feed-forward layers and the auxiliary load-balancing loss.
+    * Overrides :meth:`add_auxiliary_losses` to collect the MoE load-balancing
+      loss from the encoder during training.
+    * Overrides :meth:`on_train_batch_end` to log MoE routing diagnostics to
+      whatever Lightning logger is attached (W&B in our setup).
+
+    Use this model class with :class:`MoETransformerEncoder` to train RNNT
+    models with MoE feed-forward layers and the auxiliary load-balancing loss.
     """
 
     def add_auxiliary_losses(self, loss: torch.Tensor, reset_registry: bool = False) -> torch.Tensor:
@@ -42,3 +48,12 @@ class EncDecMoERNNTBPEModel(EncDecRNNTBPEModel):
                 self.log('moe_aux_loss', moe_loss.detach())
 
         return loss
+
+    def on_train_batch_end(self, *args, **kwargs):  # noqa: D401 (Lightning hook)
+        """Log MoE routing diagnostics at the configured cadence.
+
+        Cadence is taken from ``trainer.log_every_n_steps`` (scalars) and
+        ``trainer.val_check_interval`` (histograms / heatmap).
+        """
+        super().on_train_batch_end(*args, **kwargs)
+        log_moe_diagnostics(self)
