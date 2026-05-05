@@ -234,7 +234,22 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         averaging (see ``_configure_moe_aux_loss_scaler``)."""
         self._configure_moe_aux_loss_scaler()
 
-    def training_step(self, batch: dict, batch_idx: int):
+    def training_step(self, dataloader_iter):
+        # Use the explicit ``dataloader_iter`` signature so Lightning selects
+        # ``_DataLoaderIterDataFetcher`` (no upfront prefetch). With
+        # ``_PrefetchDataFetcher`` Lightning re-primes one batch from the
+        # dataloader every time iteration starts (including on resume), which
+        # advances the StatefulDataLoader past the saved snapshot point and
+        # breaks bit-identical resumption. The dataloader_iter path consumes
+        # one batch per training step, so save/restore captures the exact
+        # next-batch position.
+        batch, batch_idx, _ = next(dataloader_iter)
+        # Move to device + apply precision conversions normally done by Lightning
+        # for the prefetch fetcher path.
+        batch = self.trainer.precision_plugin.convert_input(batch)
+        batch = self._on_before_batch_transfer(batch, dataloader_idx=0)
+        batch = self.trainer.strategy.batch_to_device(batch, dataloader_idx=0)
+
         self._current_batch_idx = batch_idx
         for m in (self.perception.preprocessor, self.perception.encoder, self.llm):
             if is_frozen(m):
@@ -286,8 +301,10 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             "target_to_input_ratio": num_frames / (B * T),
             "padding_ratio": (batch["input_ids"] != self.text_pad_id).long().sum() / batch["input_ids"].numel(),
         }
-        self.log("loss", loss_display, on_step=True, prog_bar=True)
-        self.log_dict({k: v for k, v in ans.items() if k != "loss"}, on_step=True)
+        # batch_size kwarg is required by Lightning when training_step uses
+        # the ``dataloader_iter`` signature (it can't auto-infer otherwise).
+        self.log("loss", loss_display, on_step=True, prog_bar=True, batch_size=B)
+        self.log_dict({k: v for k, v in ans.items() if k != "loss"}, on_step=True, batch_size=B)
         self.maybe_log_moe_metrics(batch_idx)
         return ans
 
