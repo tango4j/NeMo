@@ -81,7 +81,7 @@ class SALMDataset(torch.utils.data.Dataset):
         self.load_audio = AudioSamples(
             fault_tolerant=True,
             use_batch_loader=os.environ.get("USE_AIS_GET_BATCH", "False").lower() == "true",
-            ais_prefer_individual=os.environ.get("USE_AIS_INDIVIDUAL_GETS", "False").lower() == "true",
+            ais_force_individual=os.environ.get("USE_AIS_INDIVIDUAL_GETS", "False").lower() == "true",
             mono_downmix=True,
         )
 
