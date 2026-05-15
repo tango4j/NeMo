@@ -64,6 +64,7 @@ class TransformerEncoderConfig:
         attn_mode: Attention pattern. Currently only ``"full"`` (bidirectional) is supported.
             Future modes: ``"causal"``, ``"lookahead"``, ``"local"``, ``"sliding_window"``.
     """
+
     feat_in: int = 128
     d_model: int = 512
     n_heads: int = 8
