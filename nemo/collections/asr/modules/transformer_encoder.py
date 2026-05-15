@@ -34,7 +34,37 @@ flex_attention_compiled = torch.compile(flex_attention, dynamic=True)
 
 @dataclass
 class TransformerEncoderConfig:
-    feat_in: int = 80
+    """Configuration for ``TransformerEncoder`` and its sub-blocks.
+
+    Args:
+        feat_in: Input feature dimension (e.g. number of mel bins).
+        d_model: Transformer encoder state dimension, i.e. the size of the residual stream that flows
+            through every block (token/frame embedding size, attention input/output size, and
+            feed-forward input/output size). Also known as ``hidden_size`` in HuggingFace
+            ``transformers`` configs and ``embed_dim``/``d_model`` in PyTorch's
+            ``nn.TransformerEncoderLayer``.
+        n_heads: Number of attention heads.
+        n_layers: Number of Transformer blocks.
+        drop_rate: Dropout probability applied inside attention and feed-forward sublayers.
+        qkv_bias: If True, add a learnable bias to the fused Q/K/V projection. Many modern ASR/LM
+            Transformers (e.g. HuggingFace Whisper) drop the bias on the K projection because a
+            constant K bias adds the same scalar to every key and is wiped out by softmax's
+            shift-invariance, making it a redundant parameter. Default ``False`` matches that style.
+        qk_norm: If True, apply per-head ``LayerNorm`` to Q and K before the dot product. Stabilizes
+            training by preventing exponential Q/K-norm growth and "attention entropy collapse"
+            (Henry et al. 2020; used in OLMo 2, Gemma 3, Qwen 3). Cheap, ~no-op for inference.
+        ff_expansion: Multiplier for the per-block FFN inner hidden size:
+            ``ffn_hidden_size = int(ff_expansion * d_model)``. Only widens the intermediate FFN
+            projection; FFN input/output stays at ``d_model``. Typical value ``4.0``; ``float``
+            allows sub-1x experts for MoE. Equivalent to ``intermediate_size / hidden_size`` in
+            HuggingFace and ``dim_feedforward / d_model`` in PyTorch's ``nn.TransformerEncoderLayer``.
+        pre_block_norm: If True, apply ``LayerNorm`` to embeddings before the first Transformer block
+            (BERT/ViT-style). Set False to match pre-norm Transformers such as Whisper or GPT-2.
+        subsampling_factor: Frame-level subsampling factor performed by the pre-encoder.
+        attn_mode: Attention pattern. Currently only ``"full"`` (bidirectional) is supported.
+            Future modes: ``"causal"``, ``"lookahead"``, ``"local"``, ``"sliding_window"``.
+    """
+    feat_in: int = 128
     d_model: int = 512
     n_heads: int = 8
     n_layers: int = 17
@@ -44,8 +74,6 @@ class TransformerEncoderConfig:
     ff_expansion: float = 4.0
     pre_block_norm: bool = True
     subsampling_factor: int = 4
-    # Attention mode — currently only "full" is supported.
-    # Future: "causal", "lookahead", "local", "sliding_window"
     attn_mode: str = "full"
 
 
@@ -100,6 +128,7 @@ class MultiHeadAttention(nn.Module):
             q = self.q_norm(q).to(v.dtype)
             k = self.k_norm(k).to(v.dtype)
 
+        # Use compiled FlexAttention for CUDA, fallback to unfused for CPU.
         attn_fn = flex_attention_compiled if q.is_cuda else flex_attention
         out = attn_fn(q, k, v, block_mask=block_mask)
         out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
@@ -132,9 +161,13 @@ class TransformerEncoder(NeuralModule, Exportable, AccessMixin):
 
     Args:
         feat_in: Input feature dimension (number of mel bins).
-        d_model: Transformer hidden dimension.
+        d_model: Transformer encoder state dimension, i.e. the size of the residual stream that flows
+            through every block (token/frame embedding size, attention input/output size, and
+            feed-forward input/output size). Also known as ``hidden_size`` in HuggingFace
+            ``transformers`` configs and ``embed_dim``/``d_model`` in PyTorch's
+            ``nn.TransformerEncoderLayer``.
         n_heads: Number of attention heads.
-        n_layers: Number of transformer blocks.
+        n_layers: Number of Transformer blocks.
         feat_out: Output feature dimension. Defaults to ``d_model``.
         subsampling: Subsampling method. Supports ``feature_stacking`` for the
             Transformer-native ``FeatureStacking`` module, plus Conformer-style
@@ -147,15 +180,30 @@ class TransformerEncoder(NeuralModule, Exportable, AccessMixin):
         drop_rate: Dropout probability.
         dropout_pre_encoder: Dropout probability after positional encoding. Defaults to ``drop_rate``.
         dropout_emb: Dropout probability for positional embeddings.
-        qkv_bias: Whether to use bias in Q/K/V projections.
-        qk_norm: Whether to apply per-head LayerNorm to Q and K before the dot product.
-        ff_expansion: Feed-forward expansion factor (float to support sub-1x for MoE).
+        qkv_bias: If True, add a learnable bias to the fused Q/K/V projection. Many modern ASR/LM
+            Transformers (e.g. HuggingFace Whisper) drop the bias on the K projection because a
+            constant K bias adds the same scalar to every key and is wiped out by softmax's
+            shift-invariance, making it a redundant parameter. Default ``False`` matches that style.
+        qk_norm: If True, apply per-head ``LayerNorm`` to Q and K before the dot product. Stabilizes
+            training by preventing exponential Q/K-norm growth and "attention entropy collapse"
+            (Henry et al. 2020; used in OLMo 2, Gemma 3, Qwen 3). Cheap, ~no-op for inference.
+        ff_expansion: Multiplier for the per-block FFN inner hidden size:
+            ``ffn_hidden_size = int(ff_expansion * d_model)``. Only widens the intermediate FFN
+            projection; FFN input/output stays at ``d_model``. Typical value ``4.0``; ``float``
+            allows sub-1x experts for MoE. Equivalent to ``intermediate_size / hidden_size`` in
+            HuggingFace and ``dim_feedforward / d_model`` in PyTorch's ``nn.TransformerEncoderLayer``.
         pre_block_norm: If True (default), apply LayerNorm to embeddings before the first
-            transformer block (BERT/ViT-style). Set False to match pre-norm transformers
+            Transformer block (BERT/ViT-style). Set False to match pre-norm Transformers
             such as Whisper or GPT-2 — required when loading pretrained weights from those
             checkpoints.
         pos_emb_max_len: Initial maximum length for sinusoidal positional embeddings.
-        xscaling: Whether to scale embeddings by ``sqrt(d_model)`` before adding positions.
+        xscaling: If True, scale embeddings by ``sqrt(d_model)`` before adding positional encodings,
+            following "Attention Is All You Need" article. Originally intended to balance the magnitude
+            of small-variance token embeddings against unit-bounded sinusoidal positions and to keep
+            tied input/pre-softmax logits well-scaled. With modern unit-variance ``nn.Linear``
+            pre-encoders and the LayerNorm directly after the positional sum, this scaling is
+            largely a no-op for activation magnitudes. Only meaningful when ``pre_block_norm=False``
+            or when matching pretrained checkpoints that expect this scaling.
         stochastic_depth_drop_prob: Final-layer stochastic depth drop probability.
         stochastic_depth_mode: Stochastic depth schedule, ``linear`` or ``uniform``.
         stochastic_depth_start_layer: First 1-based layer index eligible for stochastic depth.
@@ -211,7 +259,7 @@ class TransformerEncoder(NeuralModule, Exportable, AccessMixin):
 
     def __init__(
         self,
-        feat_in: int = 80,
+        feat_in: int = 128,
         d_model: int = 512,
         n_heads: int = 8,
         n_layers: int = 17,
@@ -229,7 +277,7 @@ class TransformerEncoder(NeuralModule, Exportable, AccessMixin):
         ff_expansion: float = 4.0,
         pre_block_norm: bool = True,
         pos_emb_max_len: int = 5000,
-        xscaling: bool = True,
+        xscaling: bool = False,
         stochastic_depth_drop_prob: float = 0.0,
         stochastic_depth_mode: str = "linear",
         stochastic_depth_start_layer: int = 1,
@@ -336,6 +384,7 @@ class TransformerEncoder(NeuralModule, Exportable, AccessMixin):
                 or ``(B, T, D)`` pre-encoded embeddings when ``bypass_pre_encode=True``.
             length: (B,) — valid frame counts per sample.
             bypass_pre_encode: If true, skip the pre-encoder and consume frame-level embeddings.
+
         Returns:
             x: (B, D, T') — encoded representation (channels-first).
             length: (B,) — output lengths after subsampling.

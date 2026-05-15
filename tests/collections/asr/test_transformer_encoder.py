@@ -27,7 +27,7 @@ class TestTransformerEncoderConfig:
     @pytest.mark.unit
     def test_default_config(self):
         cfg = TransformerEncoderConfig()
-        assert cfg.feat_in == 80
+        assert cfg.feat_in == 128
         assert cfg.d_model == 512
         assert cfg.n_heads == 8
         assert cfg.n_layers == 17
@@ -156,7 +156,9 @@ class TestStochasticDepth:
                 )
 
         with pytest.raises(ValueError, match="stochastic_depth_mode has to be one of"):
-            TransformerEncoder(feat_in=10, n_layers=n_layers, d_model=4, n_heads=2, feat_out=8, stochastic_depth_mode="weird")
+            TransformerEncoder(
+                feat_in=10, n_layers=n_layers, d_model=4, n_heads=2, feat_out=8, stochastic_depth_mode="weird"
+            )
 
         for start_layer in [-1, 0, 5]:
             with pytest.raises(ValueError, match="stochastic_depth_start_layer has to be in"):
@@ -311,21 +313,21 @@ class TestBypassPreEncode:
 class TestTransformerEncoder:
     @pytest.mark.unit
     def test_model_creation(self):
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2)
         total_params = sum(p.numel() for p in model.parameters())
         assert total_params > 0
         assert len(model.layers) == 2
 
     @pytest.mark.unit
     def test_model_creation_with_qk_norm(self):
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, qk_norm=True)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, qk_norm=True)
         attn = model.layers[0].attn
         assert hasattr(attn, 'q_norm')
         assert hasattr(attn, 'k_norm')
 
     @pytest.mark.unit
     def test_model_creation_without_qk_norm(self):
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, qk_norm=False)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, qk_norm=False)
         attn = model.layers[0].attn
         assert not hasattr(attn, 'q_norm')
         assert not hasattr(attn, 'k_norm')
@@ -333,15 +335,15 @@ class TestTransformerEncoder:
     @pytest.mark.unit
     def test_invalid_attn_mode(self):
         with pytest.raises(ValueError, match="not yet supported"):
-            TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, attn_mode="causal")
+            TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, attn_mode="causal")
 
     @pytest.mark.unit
     def test_forward_cpu(self):
         """Forward pass on CPU uses unfused FlexAttention fallback."""
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0, subsampling_factor=4)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0, subsampling_factor=4)
         model.eval()
 
-        B, C, T = 2, 80, 400
+        B, C, T = 2, 128, 400
         x = torch.randn(B, C, T)
         lengths = torch.tensor([400, 300])
 
@@ -355,10 +357,10 @@ class TestTransformerEncoder:
 
     @pytest.mark.unit
     def test_forward_cpu_with_qk_norm(self):
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0, qk_norm=True)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0, qk_norm=True)
         model.eval()
 
-        x = torch.randn(1, 80, 200)
+        x = torch.randn(1, 128, 200)
         lengths = torch.tensor([200])
 
         with torch.no_grad():
@@ -369,10 +371,10 @@ class TestTransformerEncoder:
 
     @pytest.mark.run_only_on('GPU')
     def test_forward_basic(self):
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0, subsampling_factor=4)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0, subsampling_factor=4)
         model = model.cuda().to(torch.bfloat16)
 
-        B, C, T = 2, 80, 400
+        B, C, T = 2, 128, 400
         x = torch.randn(B, C, T, device='cuda', dtype=torch.bfloat16)
         lengths = torch.tensor([400, 300], device='cuda')
 
@@ -407,10 +409,10 @@ class TestTransformerEncoder:
     @pytest.mark.run_only_on('GPU')
     def test_forward_output_channels_first(self):
         """Verify output is (B, D, T) channels-first as expected by downstream decoders."""
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=1, drop_rate=0.0)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=1, drop_rate=0.0)
         model = model.cuda().to(torch.bfloat16)
 
-        x = torch.randn(1, 80, 200, device='cuda', dtype=torch.bfloat16)
+        x = torch.randn(1, 128, 200, device='cuda', dtype=torch.bfloat16)
         lengths = torch.tensor([200], device='cuda')
 
         model.eval()
@@ -423,10 +425,10 @@ class TestTransformerEncoder:
     @pytest.mark.run_only_on('GPU')
     def test_eval_deterministic(self):
         """In eval mode with no dropout, repeated forward passes should produce identical output."""
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0)
         model = model.cuda().to(torch.bfloat16).eval()
 
-        x = torch.randn(1, 80, 200, device='cuda', dtype=torch.bfloat16)
+        x = torch.randn(1, 128, 200, device='cuda', dtype=torch.bfloat16)
         lengths = torch.tensor([200], device='cuda')
 
         with torch.no_grad():
@@ -438,15 +440,15 @@ class TestTransformerEncoder:
     @pytest.mark.run_only_on('GPU')
     def test_padding_does_not_affect_valid_output(self):
         """Padding frames should not change the encoded output at valid positions."""
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0)
         model = model.cuda().to(torch.bfloat16).eval()
 
         T_valid = 200
-        x_short = torch.randn(1, 80, T_valid, device='cuda', dtype=torch.bfloat16)
+        x_short = torch.randn(1, 128, T_valid, device='cuda', dtype=torch.bfloat16)
         lengths_short = torch.tensor([T_valid], device='cuda')
 
         T_padded = 400
-        x_long = torch.zeros(1, 80, T_padded, device='cuda', dtype=torch.bfloat16)
+        x_long = torch.zeros(1, 128, T_padded, device='cuda', dtype=torch.bfloat16)
         x_long[:, :, :T_valid] = x_short
         lengths_long = torch.tensor([T_valid], device='cuda')
 
@@ -461,10 +463,10 @@ class TestTransformerEncoder:
 
     @pytest.mark.run_only_on('GPU')
     def test_backward_pass(self):
-        model = TransformerEncoder(feat_in=80, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0)
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, drop_rate=0.0)
         model = model.cuda().to(torch.bfloat16).train()
 
-        x = torch.randn(2, 80, 200, device='cuda', dtype=torch.bfloat16)
+        x = torch.randn(2, 128, 200, device='cuda', dtype=torch.bfloat16)
         lengths = torch.tensor([200, 160], device='cuda')
 
         out, _ = model(audio_signal=x, length=lengths)
