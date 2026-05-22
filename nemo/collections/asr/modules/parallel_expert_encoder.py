@@ -54,7 +54,6 @@ import math
 import os
 import tarfile
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
 from typing import List, Optional, Union
 
 import torch
@@ -89,34 +88,15 @@ __all__ = [
 
 
 def _clone_config(config: Optional[DictConfig]) -> Optional[DictConfig]:
-    """Deep-copy a config-like object without resolving interpolations.
+    """Deep-copy a ``DictConfig`` without resolving interpolations.
 
-    Hydra may partially instantiate nested ``_target_`` configs before they
-    reach :class:`ParallelExpertEncoder.__init__`. This helper converts any
-    such module/model objects back into plain config containers recursively.
+    ``from_config_dict`` mutates the input cfg in place (it pops ``_target_``
+    and friends), so the caller hands the sub-target builders their own copy
+    to keep ``self._cfg`` immutable and reusable for save-back.
     """
     if config is None:
         return None
-
-    if hasattr(config, '_cfg') and config._cfg is not None:
-        config = config._cfg
-    elif hasattr(config, 'to_config_dict'):
-        config = config.to_config_dict()
-
-    def _to_container(value):
-        if OmegaConf.is_config(value):
-            return _to_container(OmegaConf.to_container(value, resolve=False))
-        if hasattr(value, '_cfg') and value._cfg is not None:
-            return _to_container(value._cfg)
-        if hasattr(value, 'to_config_dict'):
-            return _to_container(value.to_config_dict())
-        if isinstance(value, Mapping):
-            return {k: _to_container(v) for k, v in value.items()}
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return [_to_container(v) for v in value]
-        return value
-
-    return OmegaConf.create(_to_container(config))
+    return OmegaConf.create(OmegaConf.to_container(config, resolve=False))
 
 
 class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
@@ -187,24 +167,18 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
                 "these inline in their model_config.yaml."
             )
 
-        if isinstance(asr_encoder_cfg, ConformerEncoder):
-            self.asr_encoder = asr_encoder_cfg
-        else:
-            self.asr_encoder = ConformerEncoder.from_config_dict(_clone_config(asr_encoder_cfg))
+        self.asr_encoder = ConformerEncoder.from_config_dict(_clone_config(asr_encoder_cfg))
         if not isinstance(self.asr_encoder, ConformerEncoder):
             raise TypeError(
-                f"Expected `asr_encoder_cfg` to instantiate a ConformerEncoder, "
-                f"got {type(self.asr_encoder)} instead."
+                f"Expected `asr_encoder_cfg._target_` to instantiate a "
+                f"ConformerEncoder, got {type(self.asr_encoder).__name__} instead."
             )
         self.asr_normalize_type = asr_normalize_type or 'per_feature'
         self._feat_in = self.asr_encoder._feat_in
 
-        if isinstance(diarization_model_cfg, SortformerEncLabelModel):
-            self.diarization_model = diarization_model_cfg
-        else:
-            self.diarization_model = SortformerEncLabelModel.from_config_dict(
-                _clone_config(diarization_model_cfg)
-            )
+        self.diarization_model = SortformerEncLabelModel.from_config_dict(
+            _clone_config(diarization_model_cfg)
+        )
 
         self.freeze_diar = freeze_diar
         self.freeze_asr = freeze_asr
