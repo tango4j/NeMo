@@ -88,7 +88,12 @@ def load_pretrained_automodel_llm(
     from nemo_automodel import NeMoAutoModelForCausalLM
 
     if pretrained_weights:
-        return NeMoAutoModelForCausalLM.from_pretrained(model_path_or_name, torch_dtype=dtype, **kwargs)
+        return NeMoAutoModelForCausalLM.from_pretrained(
+            model_path_or_name,
+            torch_dtype=dtype,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
     else:
         config = AutoConfig.from_pretrained(model_path_or_name, trust_remote_code=trust_remote_code)
         return NeMoAutoModelForCausalLM.from_config(config, torch_dtype=dtype, **kwargs)
@@ -364,7 +369,15 @@ def init_from_training_checkpoint(model: torch.nn.Module, checkpoint_path: str):
     Only model weights are loaded — optimizer state, LR scheduler, and training
     step are NOT restored, enabling a fresh fine-tuning start from the checkpoint.
 
-    Supports three checkpoint formats:
+    Supports four checkpoint formats:
+    - **Parallel-Expert encoder bundle**: ``.nemo`` archive whose
+      ``model_config.yaml`` declares a ``ParallelExpertEncoderPT`` target. In
+      this mode, only ``model.perception.encoder`` is replaced with the loaded
+      :class:`~nemo.collections.asr.modules.parallel_expert_encoder.ParallelExpertEncoder`,
+      and the perception preprocessor's mel normalization is disabled (the
+      encoder expects un-normalised mels and re-normalises internally for its
+      ASR branch). The rest of the model (LLM, modality adapter, etc.) is left
+      untouched.
     - **Distributed checkpoints** (DCP): directories with a ``.metadata`` file,
       produced by ``ModelParallelStrategy`` / ``AutomodelParallelStrategy``.
       Handles resharding when parallelism differs between the source and target runs.
@@ -382,6 +395,43 @@ def init_from_training_checkpoint(model: torch.nn.Module, checkpoint_path: str):
         return
 
     logging.info(f"Initializing model weights from training checkpoint: {checkpoint_path}")
+
+    from nemo.collections.asr.modules.parallel_expert_encoder import (
+        is_parallel_expert_encoder_nemo,
+        load_parallel_expert_encoder_from_nemo,
+    )
+
+    if is_parallel_expert_encoder_nemo(checkpoint_path):
+        if not (hasattr(model, 'perception') and model.perception is not None):
+            raise RuntimeError(
+                f"init_from_checkpoint='{checkpoint_path}' is a ParallelExpertEncoderPT "
+                "bundle but the model has no `perception` attribute to mount it onto."
+            )
+        pe_encoder = load_parallel_expert_encoder_from_nemo(
+            checkpoint_path, map_location='cpu', strict=True,
+        )
+        try:
+            model.perception.preprocessor.featurizer.normalize = None
+        except AttributeError:
+            pass
+        try:
+            with open_dict(model.cfg):
+                if 'perception' in model.cfg and 'preprocessor' in model.cfg.perception:
+                    model.cfg.perception.preprocessor.normalize = None
+        except (AttributeError, TypeError):
+            pass
+        model.perception.encoder = pe_encoder
+        logging.info(
+            "Mounted ParallelExpertEncoder from %s onto model.perception.encoder "
+            "(d_model=%d, n_spk=%d, freeze_diar=%s, freeze_asr=%s); "
+            "perception preprocessor normalization disabled.",
+            checkpoint_path,
+            int(pe_encoder.d_model),
+            int(pe_encoder.n_spk),
+            bool(pe_encoder.freeze_diar),
+            bool(pe_encoder.freeze_asr),
+        )
+        return
 
     if _is_dcp_checkpoint(checkpoint_path):
         import torch.distributed.checkpoint as dcp

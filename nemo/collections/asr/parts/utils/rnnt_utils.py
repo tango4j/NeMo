@@ -26,12 +26,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from nemo.collections.asr.parts.context_biasing.biasing_multi_model import BiasingRequestItemConfig
+if TYPE_CHECKING:
+    from nemo.collections.asr.parts.context_biasing.biasing_multi_model import BiasingRequestItemConfig
 
 
 @dataclass

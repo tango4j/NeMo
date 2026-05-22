@@ -182,7 +182,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         max_speakers = int(cfg.get("max_speakers", 10))
         base_token_id = int(cfg.get("base_token_id", 100))
 
-        before = len(self.tokenizer)
+        before = self.tokenizer.vocab_size
         speaker_token_ids: list[int] = []
         for i in range(max_speakers):
             token = template.format(i=i)
@@ -201,7 +201,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     "tokenizer does not match the configured speaker_tokens layout."
                 )
             speaker_token_ids.append(tid)
-        after = len(self.tokenizer)
+        after = self.tokenizer.vocab_size
         if before != after:
             raise ValueError(
                 f"Resolving speaker tokens grew the tokenizer ({before} -> {after}); "
@@ -259,117 +259,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     )
                 loss_cfg.speaker_token_ids = list(self.speaker_token_ids)
         self.lss_loss = instantiate(loss_cfg)
-
-    def _init_pe_encoder(self) -> None:
-        """Optionally swap ``self.perception.encoder`` for a Parallel-Expert encoder bundle.
-
-        Mirrors :meth:`MSEncDecMultiTaskModel._init_pe_encoder` from
-        ``nemo/collections/asr/models/aed_richtrans_models.py``: when
-        ``cfg.pe_encoder_path`` points at a ``.nemo`` archive produced by
-        :func:`nemo.collections.asr.modules.parallel_expert_encoder.export_parallel_expert_encoder_to_nemo`,
-        we load the bundle and replace SALM's perception encoder
-        (originally a :class:`ConformerEncoder` warm-started from
-        ``cfg.pretrained_asr``) with the
-        :class:`~nemo.collections.asr.modules.parallel_expert_encoder.ParallelExpertEncoder`.
-        The PE encoder owns *both* an ASR Conformer expert *and* a
-        Sortformer speaker-diarization expert internally, fused with a
-        sinusoidal speaker-kernel before its output reaches the modality
-        adapter.
-
-        Two pieces of plumbing are required for the swap to be correct:
-
-        1. **Mel normalization**: ``ParallelExpertEncoder`` expects
-           *un-normalised* mels (Sortformer's native feature format). It
-           re-normalises internally for the ASR branch via
-           ``normalize_batch``. Canary-1B-v2's preprocessor is configured
-           with ``normalize='per_feature'`` by default, which would feed
-           Sortformer pre-normalised mels and silently degrade
-           diarization. We therefore disable normalization on the
-           perception preprocessor as part of the swap. The ASR-side
-           normalize_type from the original Canary preprocessor is
-           preserved on the PE wrapper's ``asr_normalize_type``.
-
-        2. **Encoder hidden-dim parity**: SALM's modality adapter / proj
-           were built around ``cfg.perception.encoder.d_model`` (1024 for
-           Canary-1B-v2). The PE bundle exposes the same property and
-           must match \u2014 we hard-fail otherwise so a mismatched checkpoint
-           cannot silently produce a shape error inside the first forward.
-
-        Freeze policy is taken from the bundle as-saved (``freeze_diar`` /
-        ``freeze_asr`` flags baked in at export time, defaulting to
-        ``freeze_diar=True, freeze_asr=False``). SALM does not introduce
-        a new freeze override here; if you need to retune freeze, re-run
-        :func:`export_parallel_expert_encoder_to_nemo` to produce a new
-        bundle.
-        """
-        model_path = self.cfg.get("pe_encoder_path", None)
-        if model_path is None:
-            return
-
-        if self.perception is None:
-            raise RuntimeError(
-                "_init_pe_encoder() called before configure_model() built self.perception. "
-                "This helper must run after setup_speech_encoder() inside configure_model()."
-            )
-        if not isinstance(model_path, str) or not model_path.endswith(".nemo"):
-            raise ValueError(
-                f"cfg.pe_encoder_path must be a .nemo bundle produced by "
-                f"export_parallel_expert_encoder_to_nemo(...), got {model_path!r}."
-            )
-
-        from nemo.collections.asr.modules.parallel_expert_encoder import (
-            ParallelExpertEncoder,
-            import_parallel_expert_encoder_from_nemo,
-        )
-
-        existing_encoder = self.perception.encoder
-        existing_d_model = int(getattr(existing_encoder, "d_model", -1))
-
-        pe_encoder = import_parallel_expert_encoder_from_nemo(
-            model_path, map_location="cpu", strict=True,
-        )
-        if not isinstance(pe_encoder, ParallelExpertEncoder):
-            raise TypeError(
-                f"Loaded {model_path!r} did not yield a ParallelExpertEncoder, "
-                f"got {type(pe_encoder).__name__}. The bundle is not a "
-                "ParallelExpertEncoderPT export."
-            )
-
-        if int(pe_encoder.d_model) != existing_d_model:
-            raise ValueError(
-                f"ParallelExpertEncoder d_model={pe_encoder.d_model} does not match "
-                f"the existing perception encoder d_model={existing_d_model}. The "
-                "modality adapter and proj layers in self.perception were built "
-                "around the latter; loading would break the first forward pass. "
-                "Re-export the PE bundle with a matching ASR encoder, or use a "
-                f"perception/modality_adapter sized for d_model={pe_encoder.d_model}."
-            )
-
-        prev_normalize = getattr(self.perception.preprocessor.featurizer, "normalize", None)
-        if prev_normalize is not None:
-            self.perception.preprocessor.featurizer.normalize = None
-            with open_dict(self.cfg):
-                if "perception" in self.cfg and "preprocessor" in self.cfg.perception:
-                    self.cfg.perception.preprocessor.normalize = None
-            logging.info(
-                "[SALMAutomodel] Disabled perception preprocessor normalization "
-                "(was %r) so the ParallelExpertEncoder receives un-normalised "
-                "mels. The ASR branch re-normalises internally (asr_normalize_type=%r).",
-                prev_normalize, pe_encoder.asr_normalize_type,
-            )
-
-        self.perception.encoder = pe_encoder
-        del existing_encoder
-
-        logging.info(
-            "[SALMAutomodel] Replaced perception.encoder with ParallelExpertEncoder "
-            "from %s (d_model=%d, n_spk=%d, freeze_diar=%s, freeze_asr=%s).",
-            model_path,
-            int(pe_encoder.d_model),
-            int(pe_encoder.n_spk),
-            bool(pe_encoder.freeze_diar),
-            bool(pe_encoder.freeze_asr),
-        )
 
     @property
     def token_equivalent_duration(self) -> float:
@@ -943,14 +832,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         # Create perception module (must happen after LLM so output_dim matches)
         setup_speech_encoder(self, pretrained_weights=self.cfg.pretrained_weights)
-
-        # Optionally swap perception.encoder for a Parallel-Expert encoder bundle
-        # (Sortformer + ASR Conformer fused via sinusoidal speaker-kernel). Mirrors
-        # MSEncDecMultiTaskModel._init_pe_encoder in aed_richtrans_models.py. The
-        # swap also disables the perception preprocessor's normalize step because
-        # ParallelExpertEncoder expects un-normalised mels (Sortformer's native
-        # feature format) and re-normalises internally for the ASR branch.
-        self._init_pe_encoder()
 
         # Fix projection dim for pretrained_weights=False (config output_dim may not match LLM)
         update_perception_output_dim(self)

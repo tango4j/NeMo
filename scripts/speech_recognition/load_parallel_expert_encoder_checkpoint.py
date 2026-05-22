@@ -51,11 +51,11 @@ def main() -> int:
     args = parser.parse_args()
 
     from nemo.collections.asr.modules.parallel_expert_encoder import (
-        import_parallel_expert_encoder_from_nemo,
+        load_parallel_expert_encoder_from_nemo,
     )
 
     print(f"Loading bundle from {args.nemo!r} ...", flush=True)
-    enc = import_parallel_expert_encoder_from_nemo(args.nemo, map_location="cpu")
+    enc = load_parallel_expert_encoder_from_nemo(args.nemo, map_location="cpu")
     dev = torch.device(args.device)
     enc = enc.to(dev)
     enc.eval()
