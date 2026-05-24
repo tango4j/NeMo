@@ -16,6 +16,7 @@ import os
 import torch
 from lightning.pytorch import Trainer, seed_everything
 from omegaconf import OmegaConf
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from nemo.collections.speechlm2 import SALM, DataModule, SALMDataset
 from nemo.core.config import hydra_runner
@@ -53,4 +54,4 @@ def train(cfg):
 
 
 if __name__ == "__main__":
-    train()
+    record(train)()

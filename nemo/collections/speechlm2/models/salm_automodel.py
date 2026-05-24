@@ -13,6 +13,7 @@
 # limitations under the License.
 import warnings
 from collections import defaultdict
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -35,6 +36,7 @@ from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, i
 from nemo.collections.speechlm2.parts.pretrained import (
     load_pretrained_automodel_llm,
     maybe_load_pretrained_models,
+    setup_parallel_expert_encoder,
     setup_speech_encoder,
     update_perception_output_dim,
 )
@@ -691,6 +693,38 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
             enable_load_balance_tracking(self.llm)
 
+    def maybe_disable_mamba_fast_kernels(self):
+        """Route Nemotron Mamba blocks away from the fused mamba-ssm Triton path.
+
+        Some container/kernel combinations hit OOM or illegal memory access in
+        ``mamba_split_conv1d_scan_combined``. The Nemotron implementation checks
+        a module-level ``is_fast_path_available`` flag, so disabling that flag in
+        each loaded Mamba layer module forces its PyTorch fallback.
+        """
+        if not self.cfg.get("disable_mamba_fast_kernels", False):
+            return
+
+        disabled_modules = set()
+        mamba_layers = 0
+        for module in self.llm.modules():
+            if hasattr(module, "cuda_kernels_forward") and hasattr(module, "torch_forward"):
+                mamba_layers += 1
+                layer_module = import_module(module.__class__.__module__)
+                if hasattr(layer_module, "is_fast_path_available"):
+                    layer_module.is_fast_path_available = False
+                    disabled_modules.add(module.__class__.__module__)
+                if hasattr(module, "config"):
+                    try:
+                        module.config.use_mamba_kernels = False
+                    except AttributeError:
+                        pass
+
+        logging.info(
+            "Disabled Mamba fast kernels for %s layer(s) across %s module(s).",
+            mamba_layers,
+            len(disabled_modules),
+        )
+
     def maybe_log_moe_metrics(self, step: int):
         """Collect and log MoE load balance metrics.
 
@@ -826,12 +860,17 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             trust_remote_code=self.cfg.get("trust_remote_code", False),
             **automodel_kwargs,
         )
+        self.maybe_disable_mamba_fast_kernels()
 
         # Apply MoE options (aux_loss_coeff override, load balance tracking)
         self.setup_moe_options()
 
         # Create perception module (must happen after LLM so output_dim matches)
         setup_speech_encoder(self, pretrained_weights=self.cfg.pretrained_weights)
+
+        # Optionally replace the ASR encoder with a ParallelExpertEncoder bundle
+        # before dtype casting / FSDP wrapping.
+        setup_parallel_expert_encoder(self)
 
         # Fix projection dim for pretrained_weights=False (config output_dim may not match LLM)
         update_perception_output_dim(self)
