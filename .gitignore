@@ -1,6 +1,8 @@
 # log and data files
 *.model
 *.pkl
+# process core dumps (from crashed training/eval runs)
+core.*
 #*.ipynb
 output
 output_2048

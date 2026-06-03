@@ -110,12 +110,24 @@ class NeMoModelCheckpoint(ModelCheckpoint):
         self.best_model_path = ""
 
         checkpoints = list(path for path in self._saved_checkpoint_paths if not self._is_ema_filepath(path))
+        # When monitor is None, top-k degenerates to FIFO. Lightning's base ModelCheckpoint
+        # handles FIFO eviction during a run via `best_k_models`, but on a fresh chain it
+        # cannot see prior chains' checkpoints. We re-populate `best_k_models` by parsing
+        # the step number from the filename so that both (a) excess prior checkpoints are
+        # pruned now, and (b) Lightning can continue evicting older saves during the chain.
+        monitor_is_none = self.monitor is None
         for checkpoint in checkpoints:
             if 'mp_rank' in str(checkpoint) or 'tp_rank' in str(checkpoint):
                 checkpoint = uninject_model_parallel_rank(checkpoint)
             checkpoint = str(checkpoint)
             # second case is for distributed checkpoints, since they are a directory there's no extension
             if checkpoint[-10:] == '-last.ckpt' or checkpoint[-5:] == '-last':
+                continue
+            if monitor_is_none:
+                step_match = re.search(r'step(\d+)', os.path.basename(checkpoint))
+                if step_match:
+                    # Use step number as the sort key; higher step = newer = "better" under FIFO.
+                    self.best_k_models[checkpoint] = float(step_match.group(1))
                 continue
             index = checkpoint.find(self.monitor) + len(self.monitor) + 1  # Find monitor in str + 1 for '='
             if index != len(self.monitor):
@@ -126,7 +138,9 @@ class NeMoModelCheckpoint(ModelCheckpoint):
         if len(self.best_k_models) < 1:
             return  # No saved checkpoints yet
 
-        _reverse = False if self.mode == "min" else True
+        # For monitor=None (FIFO), the highest step number is the "best" (newest), so we
+        # always reverse-sort to put newest first and keep `save_top_k` newest.
+        _reverse = True if (monitor_is_none or self.mode != "min") else False
 
         best_k_models = sorted(self.best_k_models, key=self.best_k_models.get, reverse=_reverse)
 

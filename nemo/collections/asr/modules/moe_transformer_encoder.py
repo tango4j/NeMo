@@ -221,6 +221,44 @@ class MoEFeedForward(nn.Module):
             mask = flat_expert == i
             tok_idx = flat_token[mask]
             if tok_idx.numel() == 0:
+                # DDP fix: ensure expert i's parameters appear in the autograd
+                # graph reachable from `loss` even when no token is routed to
+                # it on this rank, so the find_unused_parameters=true
+                # consensus collective stays in lock-step across ranks.
+                #
+                # IMPORTANT: a disconnected `_ = expert(x).sum() * 0.0` does
+                # NOT work -- DDP's unused-parameter detection walks the
+                # autograd graph backwards from the loss outputs (via
+                # prepare_for_backward), so any computation not threaded into
+                # `output` is invisible to it and the expert is still marked
+                # "unused" on this rank -> NCCL ALLREDUCE mask mismatch ->
+                # deadlock (this is exactly what killed the moe12_top8 and
+                # moe16_top12 runs).
+                #
+                # We instead run the expert on a single token, multiply by 0,
+                # and accumulate into `output` via the SAME index_add_ path
+                # used by live experts. Adds zeros (bit-identical forward
+                # value), keeps the expert reachable from loss via the
+                # autograd graph (so DDP sees it as "used"), and produces a
+                # zero gradient contribution (bit-identical optimizer step).
+                #
+                # DTYPE TRAP (fixed): under autocast, the expert (Linear ops)
+                # returns BF16 while `output = torch.zeros_like(x_flat)` is
+                # FP32 (post-LayerNorm x_flat is FP32). Multiplying by Python
+                # scalar 0.0 does NOT promote BF16 -> FP32, so
+                # `output.index_add_(..., anchor_out)` crashes with
+                # "self (Float) and source (BFloat16) must have the same
+                # scalar type". The LIVE path (line below) avoids this by
+                # multiplying by `flat_weight[mask]` which is FP32 (router
+                # weights) -- BF16 * FP32 promotes to FP32 via type promotion.
+                # We mirror that exactly by multiplying by an FP32 zero
+                # tensor, which both zeroes the contribution and promotes the
+                # BF16 expert output to FP32 to match `output`'s dtype.
+                if x_flat.shape[0] > 0:
+                    zero_idx = torch.zeros(1, dtype=torch.long, device=x_flat.device)
+                    anchor_zero = x_flat.new_zeros(1, 1)  # FP32 (matches output)
+                    anchor_out = self.experts[i](x_flat[:1]) * anchor_zero
+                    output.index_add_(0, zero_idx, anchor_out)
                 continue
             expert_in = x_flat.index_select(0, tok_idx)
             expert_out = self.experts[i](expert_in) * flat_weight[mask].unsqueeze(-1)

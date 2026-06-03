@@ -1394,7 +1394,7 @@ def configure_checkpointing(
     logging.debug(params.filename)
     logging.debug(params.prefix)
 
-    if "val" in params.monitor:
+    if params.monitor is not None and "val" in params.monitor:
         if (
             trainer.max_epochs is not None
             and trainer.max_epochs != -1
