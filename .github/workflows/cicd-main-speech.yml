@@ -164,6 +164,8 @@ jobs:
           - runner: ${{ inputs.runner }}
             script: ASR_dev_run_Speech_to_Text_Hybrid_RNNT_CTC_Prompt
           - runner: ${{ inputs.runner }}
+            script: ASR_dev_run_Speech_to_Text_RNNT_Prompt
+          - runner: ${{ inputs.runner }}
             script: L2_ASR_Multi-dataloader_dev_run_Speech_to_Text_multi-dataloader
           - runner: ${{ inputs.runner }}
             script: L2_ASR_Multi-dataloader_dev_run_Speech_to_Label_multi-dataloader
@@ -180,6 +182,8 @@ jobs:
           - runner: ${{ inputs.runner }}
             script: L2_Speech_Estimate_Duration_Bins
           - runner: ${{ inputs.runner }}
+            script: L2_Speech_Estimate_Token_Bins
+          - runner: ${{ inputs.runner }}
             script: L2_Speech_Batch_Size_OOMptimizer
           - runner: ${{ inputs.runner }}
             script: Optional_L2_Speech_Batch_Size_OOMptimizer_Canary
@@ -190,6 +194,8 @@ jobs:
             script: L2_Speech_Transcription_Speech_to_Text_Streaming_Infer
           - runner: ${{ inputs.runner }}
             script: L2_Speech_Transcription_Speech_to_Text_Cache_Aware_Infer
+          - runner: ${{ inputs.runner }}
+            script: L2_Speech_Transcription_Speech_to_Text_Cache_Aware_with_Prompt_Infer
           - runner: ${{ inputs.runner }}
             script: L2_Speech_Transcription_Streaming_Inference
           - runner: ${{ inputs.runner }}
