@@ -49,7 +49,9 @@ from vllm.model_executor.models.utils import AutoWeightsLoader, init_vllm_regist
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
+from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
 from nemo.collections.speechlm2.vllm.salm.audio import (
+    _SAMPLING_RATE,
     NeMoSpeechLMAudioInputs,
     NeMoSpeechLMDummyInputsBuilder,
     NeMoSpeechLMMultiModalProcessor,
@@ -58,6 +60,9 @@ from nemo.collections.speechlm2.vllm.salm.audio import (
 )
 from nemo.collections.speechlm2.vllm.salm.backends import HybridBackend, make_backend
 from nemo.collections.speechlm2.vllm.salm.config import _AUDIO_PLACEHOLDER
+
+_AUDIO_INPUT_DTYPE = torch.float32
+_PERCEPTION_DTYPE = torch.bfloat16
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -84,6 +89,7 @@ class NeMoSpeechLMForConditionalGeneration(
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
+        self.encoder_chunk_size_seconds = getattr(config, "encoder_chunk_size_seconds", None)
 
         backend = make_backend(config)
         self._backend = backend
@@ -98,7 +104,6 @@ class NeMoSpeechLMForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"audio"}):
             self.perception = _load_nemo_perception(config.perception)
-            self.perception = self.perception.to(torch.float32)
 
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
@@ -137,18 +142,24 @@ class NeMoSpeechLMForConditionalGeneration(
         audio_signal = audio_input.audio_signal
         if isinstance(audio_signal, list):
             audio_signal = torch.stack(audio_signal, dim=0)
-        audio_signal = audio_signal.to(device=device, dtype=torch.float32)
+        audio_signal = audio_signal.to(device=device, dtype=_AUDIO_INPUT_DTYPE)
         audio_lengths = audio_input.audio_signal_length.to(device=device)
 
+        # Mirrors training (``encode_audio_with_optional_chunking``): when the
+        # checkpoint was trained with a chunked encoder (e.g. SALMAutomodel
+        # default 30 s), long audios are split into chunks before the perception
+        # forward and the per-chunk embeddings are concatenated. ``None``
+        # disables chunking and runs a single forward over the full batch.
         with torch.no_grad():
-            audio_embeds, audio_embed_lens = self.perception(
-                input_signal=audio_signal,
-                input_signal_length=audio_lengths,
+            audio_embeds = encode_audio_with_optional_chunking(
+                self.perception,
+                audio_signal,
+                audio_lengths,
+                chunk_size_seconds=self.encoder_chunk_size_seconds,
+                sampling_rate=_SAMPLING_RATE,
             )
 
-        audio_embeds = audio_embeds.to(torch.bfloat16)
-
-        return tuple(audio_embeds[i, : audio_embed_lens[i]] for i in range(audio_embeds.shape[0]))
+        return tuple(emb.to(_PERCEPTION_DTYPE) for emb in audio_embeds)
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         audio_input = self._parse_audio_input(**kwargs)
@@ -183,9 +194,8 @@ class NeMoSpeechLMForConditionalGeneration(
     # ── weight loading ──
 
     def _load_perception_weights(self, perception_weights: dict[str, torch.Tensor]) -> set[str]:
-        float32_weights = {k: v.float() for k, v in perception_weights.items()}
-        self.perception.load_state_dict(float32_weights, strict=False)
-        self.perception = self.perception.to(torch.float32)
+        self.perception = self.perception.to(_PERCEPTION_DTYPE)
+        self.perception.load_state_dict(perception_weights, strict=False)
         return {"perception." + k for k in perception_weights}
 
     @staticmethod

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import inspect
 import os
 
 import pytest
@@ -175,10 +176,30 @@ def test_salm_automodel_training_step(model, dataset, prompt_formatter, training
     training_cutset_batch = training_cutset_batch.map(lambda c: c.apply_prompt_format(prompt_formatter), apply_fn=None)
     batch = dataset[training_cutset_batch]
     batch = move_data_to_device(batch, device=model.device)
-    results = model.training_step(batch, batch_idx=0)
+    results = model._training_step_batch(batch, batch_idx=0)
     assert torch.is_tensor(results["loss"])
     assert not torch.isnan(results["loss"])
     assert results["loss"] > 0
+
+
+def test_salm_automodel_training_step_uses_dataloader_iter_signature():
+    assert list(inspect.signature(SALMAutomodel.training_step).parameters) == ["self", "dataloader_iter"]
+
+
+def test_salm_automodel_record_training_stats_uses_thd_metadata():
+    model = SALMAutomodel.__new__(SALMAutomodel)
+    batch = {"input_ids": torch.zeros(3, 7, dtype=torch.long)}
+    inputs = {
+        "input_embeds": torch.zeros(5, 4),
+        "attention_mask": None,
+        "num_tokens": torch.tensor(11),
+        "num_examples": torch.tensor(3),
+    }
+
+    model._record_training_stats(batch, inputs)
+
+    assert model._last_batch_num_tokens == 11
+    assert model._last_batch_num_examples == 3
 
 
 @requires_cuda
@@ -189,6 +210,33 @@ def test_salm_automodel_validation_step(model, dataset, prompt_formatter, traini
     batch = move_data_to_device(batch, device=model.device)
     results = model.validation_step({"dummy_val_set": batch}, batch_idx=0)
     assert results is None
+
+
+def test_salm_automodel_validation_epoch_end_uses_token_weighted_metrics():
+    model = SALMAutomodel.__new__(SALMAutomodel)
+    torch.nn.Module.__init__(model)
+    model.on_validation_epoch_start()
+    model._get_moe_dp_group = lambda: None
+
+    model._partial_val_loss_sums["dummy"].extend([torch.tensor(2.0), torch.tensor(18.0)])
+    model._partial_val_corrects["dummy"].extend([torch.tensor(1.0), torch.tensor(3.0)])
+    model._partial_val_num_frames["dummy"].extend([torch.tensor(1.0), torch.tensor(9.0)])
+
+    logged = {}
+
+    def fake_log(name, value, **kwargs):
+        logged[name] = value.detach().cpu()
+
+    model.log = fake_log
+    model.on_validation_epoch_end()
+
+    assert logged["val_loss_dummy"].item() == pytest.approx(2.0)
+    assert logged["val_acc_dummy"].item() == pytest.approx(0.4)
+    assert logged["val_loss"].item() == pytest.approx(2.0)
+    assert logged["val_acc"].item() == pytest.approx(0.4)
+    assert not model._partial_val_loss_sums
+    assert not model._partial_val_corrects
+    assert not model._partial_val_num_frames
 
 
 @requires_cuda
