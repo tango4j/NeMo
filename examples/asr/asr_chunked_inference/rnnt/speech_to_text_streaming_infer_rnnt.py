@@ -157,6 +157,7 @@ class TranscriptionConfig:
     use_per_stream_biasing: bool = False
 
     timestamps: bool = False  # output timestamps
+    confidence: bool = False  # output word confidence
 
     # Config for word / character error rate calculation
     calculate_wer: bool = True
@@ -242,6 +243,10 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         cfg.decoding.beam.return_best_hypothesis = True  # return and write the best hypothsis only
         if use_per_stream_biasing:
             cfg.decoding.greedy.enable_per_stream_biasing = use_per_stream_biasing
+        if cfg.confidence:
+            cfg.decoding.greedy.preserve_frame_confidence = True
+            cfg.decoding.confidence_cfg.preserve_frame_confidence = True
+            cfg.decoding.confidence_cfg.preserve_word_confidence = True
 
     # Setup decoding strategy
     if hasattr(asr_model, 'change_decoding_strategy'):
@@ -425,7 +430,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                 encoder_output = encoder_output[:, encoder_context.left :]
 
                 # decode only chunk frames
-                chunk_batched_hyps, _, state = decoding_computer(
+                chunk_batched_hyps, state = decoding_computer(
                     x=encoder_output,
                     out_len=torch.where(
                         is_last_chunk_batch,
@@ -452,7 +457,7 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                     if request is not None and request.multi_model_id is not None:
                         decoding_computer.biasing_multi_model.remove_model(request.multi_model_id)
                         request.multi_model_id = None
-            all_hyps.extend(batched_hyps_to_hypotheses(current_batched_hyps, None, batch_size=batch_size))
+            all_hyps.extend(batched_hyps_to_hypotheses(current_batched_hyps, batch_size=batch_size))
         timer.stop(device=map_location)
 
     # convert text
@@ -466,6 +471,8 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
                 window_stride=asr_model.cfg['preprocessor']['window_stride'],
             )
             all_hyps[i] = hyp
+    if cfg.confidence:
+        all_hyps = asr_model.decoding.compute_confidence(all_hyps)
 
     if cfg.sort_by_duration:
         # restore order for all_hyps and records (all_hyps are consistent with records)
@@ -475,7 +482,13 @@ def main(cfg: TranscriptionConfig) -> TranscriptionConfig:
         records, all_hyps = map(list, zip(*order_restored))
 
     output_filename, pred_text_attr_name = write_transcription(
-        all_hyps, cfg, model_name, filepaths=filepaths, compute_langs=False, timestamps=cfg.timestamps
+        all_hyps,
+        cfg,
+        model_name,
+        filepaths=filepaths,
+        compute_langs=False,
+        timestamps=cfg.timestamps,
+        confidence=cfg.confidence,
     )
     logging.info(f"Finished writing predictions to {output_filename}!")
 
