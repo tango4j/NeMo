@@ -875,7 +875,8 @@ def error_checks(trainer: 'lightning.pytorch.Trainer', cfg: Optional[Union[DictC
             "You are running multi-node training without SLURM handling the processes."
             " Please note that this is not tested in NeMo and could result in errors."
         )
-    if trainer.num_devices > 1 and not isinstance(trainer.strategy, DDPStrategy):
+    is_model_parallel_strategy = any(cls.__name__ == "ModelParallelStrategy" for cls in type(trainer.strategy).mro())
+    if trainer.num_devices > 1 and not isinstance(trainer.strategy, DDPStrategy) and not is_model_parallel_strategy:
         logging.error(
             "You are running multi-gpu without ddp.Please note that this is not tested in NeMo and "
             "could result in errors."

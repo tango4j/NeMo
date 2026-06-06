@@ -1,0 +1,10 @@
+Unsupported opcode: LOAD_FAST_AND_CLEAR (241)
+Unsupported opcode: POP_JUMP_IF_NOT_NONE (238)
+Wrong block type 4 for END_FOR
+Warning: Stack history is not empty!
+Warning: block stack is not empty!
+Unsupported opcode: MAKE_CELL (225)
+Unsupported opcode: LOAD_FAST_CHECK (237)
+Unsupported Node type: 27
+Unsupported Node type: 27
+Unsupported Node type: 12

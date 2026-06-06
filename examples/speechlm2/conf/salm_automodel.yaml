@@ -139,6 +139,16 @@ trainer:
     #   wrap_outer_model: true             # Apply FSDP to the outer model wrapper
 
 data:
+  # Optional RTTM/SOT speaker-activity targets for ParallelExpertEncoder training.
+  # Enable this when your cuts/manifests carry rttm_filepath entries and SOT text.
+  # sot_cfg:
+  #   num_speakers: 4
+  #   sample_rate: ${data.train_ds.sample_rate}
+  #   window_stride: 0.01
+  #   subsampling_factor: 8
+  #   no_rttm_to_ones: true
+  #   randomize_single_speaker_index: false
+
   train_ds:
     sample_rate: 16000
     prompt_format: ${model.prompt_format}

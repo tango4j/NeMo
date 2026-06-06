@@ -28,7 +28,7 @@ from transformers import GenerationConfig
 
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
-from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
+from nemo.collections.speechlm2.data.salm_dataset import SALMDataset, SALMSpkDataset, left_collate_vectors
 from nemo.collections.speechlm2.models.salm import _resolve_audios_in_prompt, replace_placeholders_and_build_targets
 from nemo.collections.speechlm2.parts.automodel_lora import ensure_lora_trainable, make_peft_config, maybe_install_lora
 from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
@@ -80,6 +80,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         if self.cfg.get("init_configure_model", False):
             self.configure_model()
+
+    @staticmethod
+    def build_dataset(tokenizer, data_cfg=None) -> SALMDataset:
+        sot_cfg = data_cfg.get("sot_cfg", None) if data_cfg is not None else None
+        if sot_cfg is not None:
+            return SALMSpkDataset(tokenizer=tokenizer, sot_cfg=sot_cfg)
+        return SALMDataset(tokenizer=tokenizer)
 
     @property
     def device(self) -> torch.device:
@@ -317,9 +324,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         # Source audio encoding.
         # Input audio: (B, T_samples)
         # Audio embeddings: (B, T, H)
-        audio_embs, audio_emb_lens = self.perception(
-            input_signal=batch["audios"], input_signal_length=batch["audio_lens"]
-        )
+        perception_kwargs = {
+            "input_signal": batch["audios"],
+            "input_signal_length": batch["audio_lens"],
+        }
+        if batch.get("targets", None) is not None:
+            perception_kwargs["diar_preds"] = batch["targets"]
+        audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
         audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
         input_ids_to_embed = torch.where(batch["input_ids"] == self.audio_locator_tag_id, 0, batch["input_ids"])
         text_embs = self._embed_tokens(input_ids_to_embed)
@@ -853,9 +864,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             compile_dict = dict(compile_cfg)
             automodel_kwargs["compile_config"] = CompileConfig(**compile_dict)
 
+        pretrained_weights = self.cfg.get("pretrained_weights", True)
+        pretrained_llm_weights = self.cfg.get("pretrained_llm_weights", pretrained_weights)
+        pretrained_asr_weights = self.cfg.get("pretrained_asr_weights", pretrained_weights)
+
         self.llm = load_pretrained_automodel_llm(
             self.cfg.pretrained_llm,
-            pretrained_weights=self.cfg.pretrained_weights,
+            pretrained_weights=pretrained_llm_weights,
             dtype=dtype,
             trust_remote_code=self.cfg.get("trust_remote_code", False),
             **automodel_kwargs,
@@ -866,7 +881,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         self.setup_moe_options()
 
         # Create perception module (must happen after LLM so output_dim matches)
-        setup_speech_encoder(self, pretrained_weights=self.cfg.pretrained_weights)
+        setup_speech_encoder(self, pretrained_weights=pretrained_asr_weights)
 
         # Optionally replace the ASR encoder with a ParallelExpertEncoder bundle
         # before dtype casting / FSDP wrapping.
