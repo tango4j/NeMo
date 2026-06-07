@@ -800,15 +800,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             # Prepare token embeddings and audio embeddings.
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
-<<<<<<< HEAD
-            # TODO: temporary workaround to perform batch_size=1 inference for audio encoder
-            #   due to accuracy issues at bs>1
-            perception_kwargs = {"input_signal": audios, "input_signal_length": audio_lens}
-            if diar_preds is not None:
-                perception_kwargs["diar_preds"] = diar_preds
-            audio_embeds, audio_embed_lens = self.perception(**perception_kwargs)
-            audio_embeds = [audio_embeds[i, :elen] for i, elen in enumerate(audio_embed_lens)]
-=======
             audio_embeds = encode_audio_with_optional_chunking(
                 self.perception,
                 audios,
@@ -816,7 +807,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
                 sampling_rate=self.sampling_rate,
             )
->>>>>>> origin/main
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(
                 input_ids=tokens,
@@ -1081,11 +1071,9 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             compile_dict = dict(compile_cfg)
             automodel_kwargs["compile_config"] = CompileConfig(**compile_dict)
 
-<<<<<<< HEAD
         pretrained_weights = self.cfg.get("pretrained_weights", True)
         pretrained_llm_weights = self.cfg.get("pretrained_llm_weights", pretrained_weights)
         pretrained_asr_weights = self.cfg.get("pretrained_asr_weights", pretrained_weights)
-=======
         # Pass backend through to automodel — lets YAML pick attn/linear/rms_norm/MoE
         # dispatcher backends (e.g. set attn=sdpa to bypass TransformerEngine).
         backend_cfg = self.cfg.get("automodel_backend", None)
@@ -1099,7 +1087,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         sdpa_method = self.cfg.get("sdpa_method", None)
         if sdpa_method is not None:
             automodel_kwargs["sdpa_method"] = list(OmegaConf.to_container(sdpa_method, resolve=True))
->>>>>>> origin/main
 
         self.llm = load_pretrained_automodel_llm(
             self.cfg.pretrained_llm,
