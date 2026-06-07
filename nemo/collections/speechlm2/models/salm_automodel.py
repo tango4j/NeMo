@@ -310,7 +310,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 ans["cache"] = out["past_key_values"]
         return ans
 
-    def prepare_inputs(self, batch: dict):
+    def prepare_inputs(self, batch: dict, is_inference: bool = False):
         """
         Performs additional processing on the mini-batch collected from dataloader.
         Notably:
@@ -320,6 +320,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         * Combine the input audio and target text embeddings.
         * Take care of any necessary slicing to align the shapes of source audio,
             target audio, and target token ids.
+
+        ``is_inference`` controls the speaker activity fed to a
+        ``ParallelExpertEncoder``. When ``False`` (training), RTTM-derived
+        ``batch["spk_targets"]`` are injected as ``diar_preds``. When ``True``
+        (validation / real inference), the targets are ignored so the encoder
+        runs its embedded Sortformer to predict diarization, matching deployment
+        where ground-truth RTTM is unavailable.
         """
         # Source audio encoding.
         # Input audio: (B, T_samples)
@@ -328,8 +335,25 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             "input_signal": batch["audios"],
             "input_signal_length": batch["audio_lens"],
         }
-        if batch.get("targets", None) is not None:
-            perception_kwargs["diar_preds"] = batch["targets"]
+        if not is_inference and batch.get("spk_targets", None) is not None:
+            perception_kwargs["diar_preds"] = batch["spk_targets"]
+        # TODO(temporary-debug): remove this print. Shows whether RTTM-derived diar_preds are
+        # being threaded into the perception encoder during training/validation.
+        _dp = perception_kwargs.get("diar_preds", None)
+        if _dp is not None:
+            print(
+                f"\n[DIAR_PREDS_DEBUG] diar_preds PRESENT shape={tuple(_dp.shape)} dtype={_dp.dtype} "
+                f"device={_dp.device} sum={_dp.float().sum().item():.1f} "
+                f"spk_target_length={batch.get('spk_target_length', None)}",
+                flush=True,
+            )
+        else:
+            print(
+                f"\n[DIAR_PREDS_DEBUG] diar_preds ABSENT (batch has spk_targets key={'spk_targets' in batch}); "
+                "encoder will run embedded Sortformer / plain ASR.",
+                flush=True,
+            )
+        ###################### END TEMPORARY DEBUG ######################
         audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
         audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
         input_ids_to_embed = torch.where(batch["input_ids"] == self.audio_locator_tag_id, 0, batch["input_ids"])
@@ -451,7 +475,9 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
                 continue  # some dataset is exhausted
-            inputs = self.prepare_inputs(dataset_batch)
+            # Validation mirrors real inference: ignore RTTM ground-truth targets and let the
+            # ParallelExpertEncoder run its embedded Sortformer to predict speaker activity.
+            inputs = self.prepare_inputs(dataset_batch, is_inference=True)
             forward_outputs = self(inputs["input_embeds"], attention_mask=inputs["attention_mask"])
             num_frames = (inputs["target_ids"] != -100).long().sum()
             with loss_parallel():
@@ -543,6 +569,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         prompts: list[list[dict[str]]] | torch.Tensor,
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
+        diar_preds: torch.Tensor = None,
         generation_config: GenerationConfig = None,
         enable_thinking: bool | None = None,
         **generation_kwargs,
@@ -607,6 +634,11 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 The number of audios must correspond to the number of occurrences of <audio_locator_tag> in prompts.
                 Each prompt can have multiple audios.
             audio_lens: Optional. Length of each audio example.
+            diar_preds: Optional ``(B, T, n_spk)`` speaker-activity tensor (e.g. oracle / RTTM-derived
+                diarization) injected into the perception encoder. Only effective when the mounted
+                encoder is a ``ParallelExpertEncoder`` (i.e. ``model.pe_encoder_path`` was set); it
+                overrides the encoder's embedded Sortformer prediction for this call. When ``None``
+                (default), the encoder runs its embedded Sortformer as usual.
             generation_config: Optional HuggingFace GenerationConfig object.
             enable_thinking: Optional prompt-formatter hint forwarded to ``encode_dialog``.
                 Relevant for prompt formats that support thinking/reasoning mode.
@@ -644,7 +676,10 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             token_embeds = self._embed_tokens(tokens_to_embed)
             # TODO: temporary workaround to perform batch_size=1 inference for audio encoder
             #   due to accuracy issues at bs>1
-            audio_embeds, audio_embed_lens = self.perception(audios, audio_lens)
+            perception_kwargs = {"input_signal": audios, "input_signal_length": audio_lens}
+            if diar_preds is not None:
+                perception_kwargs["diar_preds"] = diar_preds
+            audio_embeds, audio_embed_lens = self.perception(**perception_kwargs)
             audio_embeds = [audio_embeds[i, :elen] for i, elen in enumerate(audio_embed_lens)]
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(

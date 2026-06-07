@@ -78,7 +78,7 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
     batch = dataset[conversations]
 
     assert torch.equal(
-        batch["targets"],
+        batch["spk_targets"],
         torch.tensor(
             [
                 [
@@ -90,4 +90,4 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
             ]
         ),
     )
-    assert torch.equal(batch["target_length"], torch.tensor([4]))
+    assert torch.equal(batch["spk_target_length"], torch.tensor([4]))

@@ -115,6 +115,23 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
         freeze_diar: Freeze the Sortformer parameters. Defaults to ``True``.
         freeze_asr: Freeze the wrapped ASR ConformerEncoder. Defaults to
             ``False``.
+        chunked_inference_length: Chunk length (in *encoder output frames*, i.e.
+            post-subsampling 80ms frames) used for long-form inference. At the
+            default ``375`` this corresponds to a 30s window (12.5 frames/s x 30s).
+            When ``<= 0`` chunked inference is disabled and the encoder always runs
+            the offline path. Chunked inference is also only engaged at *inference*
+            time (``self.training is False``) and only when the input is longer than
+            one chunk; shorter / training-time inputs use the offline path so
+            existing behaviour is unchanged. See :meth:`_forward_chunked`.
+        diar_chunk_right_context: Sortformer streaming ``chunk_right_context``
+            (future frames attached after each chunk). Defaults to the
+            ``diar_streaming_sortformer_4spk-v2.1`` "very high latency" preset (40).
+        diar_fifo_len: Sortformer streaming ``fifo_len`` (FIFO queue length).
+            Defaults to the same preset (40).
+        diar_spkcache_update_period: Sortformer streaming ``spkcache_update_period``
+            (frames popped from FIFO to update the speaker cache). Defaults to 300.
+        diar_spkcache_len: Sortformer streaming ``spkcache_len`` (total speaker
+            cache size). Defaults to 188.
     """
 
     @property
@@ -152,6 +169,11 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
         asr_normalize_type: Optional[str] = None,
         freeze_diar: bool = True,
         freeze_asr: bool = False,
+        chunked_inference_length: int = 375,
+        diar_chunk_right_context: int = 40,
+        diar_fifo_len: int = 40,
+        diar_spkcache_update_period: int = 300,
+        diar_spkcache_len: int = 188,
     ):
         super().__init__()
 
@@ -182,6 +204,14 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
 
         self.freeze_diar = freeze_diar
         self.freeze_asr = freeze_asr
+
+        # Long-form / chunked inference configuration.
+        self.chunked_inference_length = int(chunked_inference_length)
+        self.diar_chunk_right_context = int(diar_chunk_right_context)
+        self.diar_fifo_len = int(diar_fifo_len)
+        self.diar_spkcache_update_period = int(diar_spkcache_update_period)
+        self.diar_spkcache_len = int(diar_spkcache_len)
+
         self.n_spk = int(self.diarization_model.sortformer_modules.n_spk)
         self.asr_d_model = self.asr_encoder.d_model
 
@@ -279,6 +309,29 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
             diar_preds = diar_preds[:, :target_len, :]
         return diar_preds
 
+    def _fuse_diar_and_asr(self, asr_encoded: torch.Tensor, diar_preds: torch.Tensor) -> torch.Tensor:
+        """Fuse ASR encoder states with speaker-activity predictions.
+
+        LayerNorm both branches, project ``diar_preds`` through the sinusoidal
+        speaker kernel and ADD into the ASR states.
+
+        Args:
+            asr_encoded: ASR encoder output. Shape: ``(B, D, T_asr)``.
+            diar_preds: Speaker-activity predictions. Shape: ``(B, T_diar, n_spk)``.
+
+        Returns:
+            Fused encoder output. Shape: ``(B, D, T_asr)``.
+        """
+        asr_enc_states = asr_encoded.transpose(1, 2)  # (B, T, D)
+        diar_preds = self._align_diar_frames(diar_preds, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
+
+        asr_enc_states = self.asr_norm(asr_enc_states)
+        diar_preds = self.diar_norm(diar_preds)
+        speaker_infusion = torch.matmul(diar_preds, self.diar_kernel.to(diar_preds.dtype))
+        fused = speaker_infusion + asr_enc_states
+
+        return fused.transpose(1, 2)  # (B, D, T)
+
     # ------------------------------------------------------------------
     # Forward — identical signature & docstring to ConformerEncoder.forward
     # ------------------------------------------------------------------
@@ -306,7 +359,51 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
         overrides the internal Sortformer prediction. Use it to feed RTTM ground
         truth during training, or oracle diarization at inference. When ``None``
         (default), the wrapped Sortformer is run as usual.
+
+        Two execution modes are dispatched here:
+
+        - :meth:`_forward` — the offline (non-chunked) path. The ASR encoder sees the
+          whole sequence at once and Sortformer runs its offline ``forward_infer``.
+        - :meth:`_forward_chunked` — long-form inference. The ASR encoder is run on
+          non-overlapping chunks of ``chunked_inference_length`` output frames and
+          Sortformer runs in streaming mode. Engaged only at inference time
+          (``self.training is False``), when ``chunked_inference_length > 0``, when
+          neither cache nor ``bypass_pre_encode`` is used, and when the input is
+          actually longer than a single chunk. Otherwise the offline path runs so
+          short-form / training behaviour is unchanged.
         """
+        chunk_feat_len = self.chunked_inference_length * self.asr_encoder.subsampling_factor
+        use_chunked = (
+            self.chunked_inference_length > 0
+            and not self.training
+            and cache_last_channel is None
+            and not bypass_pre_encode
+            and audio_signal.shape[-1] > chunk_feat_len
+        )
+        if use_chunked:
+            return self._forward_chunked(audio_signal=audio_signal, length=length, diar_preds=diar_preds)
+
+        return self._forward(
+            audio_signal=audio_signal,
+            length=length,
+            cache_last_channel=cache_last_channel,
+            cache_last_time=cache_last_time,
+            cache_last_channel_len=cache_last_channel_len,
+            bypass_pre_encode=bypass_pre_encode,
+            diar_preds=diar_preds,
+        )
+
+    def _forward(
+        self,
+        audio_signal,
+        length,
+        cache_last_channel=None,
+        cache_last_time=None,
+        cache_last_channel_len=None,
+        bypass_pre_encode=False,
+        diar_preds=None,
+    ):
+        """Offline (non-chunked) forward pass. See :meth:`forward` for argument semantics."""
         if diar_preds is None and not bypass_pre_encode:
             with torch.set_grad_enabled(not self.freeze_diar):
                 emb_seq, emb_seq_length = self.diarization_model.frontend_encoder(
@@ -342,21 +439,127 @@ class ParallelExpertEncoder(NeuralModule, StreamingEncoder):
             asr_encoded, asr_encoded_len, *cache_outputs = asr_out
 
         if diar_preds is not None:
-            asr_enc_states = asr_encoded.transpose(1, 2)  # (B, T, D)
-            diar_preds = self._align_diar_frames(diar_preds, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
-
-            asr_enc_states = self.asr_norm(asr_enc_states)
-            diar_preds = self.diar_norm(diar_preds)
-            speaker_infusion = torch.matmul(diar_preds, self.diar_kernel.to(diar_preds.dtype))
-            fused = speaker_infusion + asr_enc_states
-
-            outputs = fused.transpose(1, 2)  # (B, D, T)
+            outputs = self._fuse_diar_and_asr(asr_encoded, diar_preds)
         else:
             outputs = asr_encoded
 
         if not cache_outputs:
             return outputs, asr_encoded_len
         return (outputs, asr_encoded_len, *cache_outputs)
+
+    def _forward_chunked(self, audio_signal, length, diar_preds=None):
+        """Long-form inference: chunked ASR encoder + streaming Sortformer diarization.
+
+        Unlike the cache-aware streaming pipeline in
+        ``multispk_transcribe_utils.perform_serial_streaming_stt_spk`` (whose ASR
+        encoder is trained with masked-causal attention and a left-context cache),
+        the PE bundle's ASR encoder is a *regular* offline ConformerEncoder. There
+        is therefore no cache to carry across chunks: the un-normalised mel
+        ``audio_signal`` is simply split into non-overlapping windows of
+        ``chunked_inference_length`` output frames, each window is independently
+        encoded, and the per-chunk encoder outputs are concatenated along time.
+
+        Diarization, in contrast, *is* run with the wrapped Sortformer in streaming
+        mode (speaker cache + FIFO), since speaker identity must stay coherent
+        across the whole recording. Both branches share the same chunk length so
+        the two output streams line up before fusion.
+
+        Note the differing feature conventions: the streaming Sortformer consumes
+        the *un-normalised* mel features directly (its native input), while the ASR
+        encoder consumes the ``normalize_batch``-normalised mels it was trained on.
+
+        Args:
+            audio_signal: Un-normalised mel features. Shape: ``(B, feat_in, n_frames)``.
+            length: Per-sample feature lengths. Shape: ``(B,)``.
+            diar_preds: Optional ``(B, T, n_spk)`` speaker-activity override (oracle /
+                RTTM). When provided, streaming diarization is skipped.
+
+        Returns:
+            Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape
+            ``(B, D, T_asr)``.
+        """
+        if diar_preds is None:
+            with torch.set_grad_enabled(not self.freeze_diar):
+                diar_preds = self._streaming_diarize(audio_signal, length)
+
+        if self.asr_normalize_type:
+            asr_audio_signal, _, _ = normalize_batch(
+                audio_signal, length, normalize_type=self.asr_normalize_type,
+            )
+        else:
+            asr_audio_signal = audio_signal
+
+        with torch.set_grad_enabled(not self.freeze_asr):
+            asr_encoded, asr_encoded_len = self._chunked_asr_encode(asr_audio_signal, length)
+
+        if diar_preds is not None:
+            outputs = self._fuse_diar_and_asr(asr_encoded, diar_preds)
+        else:
+            outputs = asr_encoded
+
+        return outputs, asr_encoded_len
+
+    def _chunked_asr_encode(self, asr_audio_signal: torch.Tensor, length: torch.Tensor):
+        """Run the (cache-less) ASR ConformerEncoder over non-overlapping chunks.
+
+        The chunk size is ``chunked_inference_length`` *output* frames, converted
+        to input mel frames via the encoder's ``subsampling_factor``. Per-chunk
+        encoder outputs ``(B, D, t_chunk)`` are concatenated along the time axis and
+        the per-chunk valid lengths are summed.
+
+        Args:
+            asr_audio_signal: Normalised mel features. Shape: ``(B, feat_in, n_frames)``.
+            length: Per-sample feature lengths. Shape: ``(B,)``.
+
+        Returns:
+            Tuple ``(asr_encoded, asr_encoded_len)`` with ``asr_encoded`` of shape
+            ``(B, D, T_asr)`` and ``asr_encoded_len`` of shape ``(B,)``.
+        """
+        chunk_feat_len = self.chunked_inference_length * self.asr_encoder.subsampling_factor
+        total_feat_len = min(asr_audio_signal.shape[-1], int(length.max().item()))
+
+        encoded_chunks: List[torch.Tensor] = []
+        encoded_len = torch.zeros_like(length)
+        for start in range(0, total_feat_len, chunk_feat_len):
+            end = min(start + chunk_feat_len, total_feat_len)
+            chunk = asr_audio_signal[:, :, start:end]
+            chunk_length = (length - start).clamp(min=0, max=end - start)
+            chunk_encoded, chunk_encoded_len = self.asr_encoder(audio_signal=chunk, length=chunk_length)
+            encoded_chunks.append(chunk_encoded)
+            encoded_len = encoded_len + chunk_encoded_len
+
+        asr_encoded = torch.cat(encoded_chunks, dim=2)  # (B, D, T_asr)
+        return asr_encoded, encoded_len
+
+    def _streaming_diarize(self, audio_signal: torch.Tensor, length: torch.Tensor) -> torch.Tensor:
+        """Run the wrapped Sortformer in streaming mode over the full recording.
+
+        Configures the Sortformer streaming parameters (chunk length tied to
+        ``chunked_inference_length``; right-context / FIFO / speaker-cache from the
+        ``diar_streaming_sortformer_4spk-v2.1`` preset) and delegates the chunk
+        loop to ``SortformerEncLabelModel.forward_streaming``, which maintains the
+        speaker cache + FIFO queue internally.
+
+        Args:
+            audio_signal: Un-normalised mel features. Shape: ``(B, feat_in, n_frames)``.
+            length: Per-sample feature lengths. Shape: ``(B,)``.
+
+        Returns:
+            Speaker-activity predictions. Shape: ``(B, T_diar, n_spk)``.
+        """
+        sortformer_modules = self.diarization_model.sortformer_modules
+        sortformer_modules.chunk_len = self.chunked_inference_length
+        sortformer_modules.chunk_right_context = self.diar_chunk_right_context
+        sortformer_modules.fifo_len = self.diar_fifo_len
+        sortformer_modules.spkcache_update_period = self.diar_spkcache_update_period
+        sortformer_modules.spkcache_len = self.diar_spkcache_len
+        sortformer_modules._check_streaming_parameters()
+
+        feat = audio_signal[:, :, : int(length.max().item())]
+        diar_preds = self.diarization_model.forward_streaming(
+            processed_signal=feat, processed_signal_length=length,
+        )
+        return diar_preds
 
 
 class ParallelExpertEncoderPT(ModelPT):
@@ -374,6 +577,11 @@ class ParallelExpertEncoderPT(ModelPT):
             asr_normalize_type=self._cfg.get('asr_normalize_type', None),
             freeze_diar=self._cfg.get('freeze_diar', True),
             freeze_asr=self._cfg.get('freeze_asr', False),
+            chunked_inference_length=self._cfg.get('chunked_inference_length', 375),
+            diar_chunk_right_context=self._cfg.get('diar_chunk_right_context', 40),
+            diar_fifo_len=self._cfg.get('diar_fifo_len', 40),
+            diar_spkcache_update_period=self._cfg.get('diar_spkcache_update_period', 300),
+            diar_spkcache_len=self._cfg.get('diar_spkcache_len', 188),
         )
 
     @classmethod

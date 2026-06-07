@@ -127,8 +127,8 @@ class SALMSpkDataset(SALMDataset):
                 num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
                 dtype=batch["audios"].dtype,
             )
-            batch["targets"] = targets
-            batch["target_length"] = target_length
+            batch["spk_targets"] = targets
+            batch["spk_target_length"] = target_length
 
         return batch
 
