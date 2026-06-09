@@ -14,23 +14,9 @@
 
 """Audio-side plumbing for the NeMo Speech LM (SALM) vLLM plugin.
 
-All audio handling lives here: helpers (perception loader, tokenizer special-token
-patcher, vocab-size padder), audio constants and TensorSchema, and the trio of
-classes that bind to vLLM's multimodal registry to drive prompt expansion and
-dummy-input generation. Backbone-agnostic; shared by both transformer and
-hybrid backends.
-
-Public surface used by the rest of the package:
-
-* ``_AUDIO_PLACEHOLDER`` -- the audio locator string vLLM emits during prompt
-  rendering and the processor expands inline.
-* ``_load_nemo_perception``, ``_ensure_special_tokens``, ``_pad_to_vocab_size``
-  -- small helpers reused at model init and weight load time.
-* ``NeMoSpeechLMAudioInputs`` -- vLLM ``TensorSchema`` describing the parsed
-  audio tensors that flow into ``embed_multimodal``.
-* ``NeMoSpeechLMProcessingInfo`` / ``NeMoSpeechLMMultiModalProcessor`` /
-  ``NeMoSpeechLMDummyInputsBuilder`` -- the trio that vLLM's multimodal
-  registry binds to the registered model class.
+Houses the perception/tokenizer/vocab helpers, audio constants and TensorSchema,
+and the trio of classes vLLM's multimodal registry binds to drive prompt
+expansion and dummy-input generation. Backbone-agnostic.
 """
 
 import re
@@ -66,14 +52,7 @@ _AUDIO_CHANNELS = 1
 _DUMMY_AUDIO_DURATION_S = 40.0
 _DUMMY_AUDIO_MAX_DURATION_S = 3600.0
 _DUMMY_AUDIO_TEXT_TOKEN_RESERVE = 64
-# FastConformer preprocessor hop length, used to derive the smallest
-# chunk that produces ≥ 2 feature frames (per-feature normalization
-# breaks on a single frame). Mirrors
-# ``encoder_chunking._get_min_chunk_size_samples`` for the canonical
-# preprocessor we ship; the chunking helper probes the live featurizer
-# at training time, but the prompt processor here runs before the
-# perception module is loaded, so we use the same constant the helper
-# would derive.
+# Smallest chunk producing >= 2 feature frames; mirrors encoder_chunking._get_min_chunk_size_samples.
 _MIN_CHUNK_SIZE_SAMPLES = 320
 
 
@@ -95,13 +74,63 @@ def _load_nemo_perception(perception_cfg: dict) -> nn.Module:
         from nemo.collections.speechlm2.modules import AudioPerceptionModule
     except ImportError as e:
         raise ImportError(
-            "NeMo is required for the audio encoder. " "Install with: pip install 'nemo-toolkit[asr]'"
+            "NeMo is required for the audio encoder. " "Install with: pip install nemo_toolkit[asr]"
         ) from e
 
     cfg = DictConfig(perception_cfg)
     perception = AudioPerceptionModule(cfg)
     perception.eval()
     return perception
+
+
+def _maybe_mount_pe_encoder(perception: nn.Module, pe_encoder_path: str | None) -> bool:
+    """Replace ``perception.encoder`` with a ParallelExpertEncoder bundle so PE-trained
+    checkpoints (nested ``asr_encoder.*`` / ``diarization_model.*`` weights) load correctly.
+
+    Args:
+        perception (nn.Module): Perception module whose ``encoder`` is swapped in place.
+        pe_encoder_path (str | None): Path to a ParallelExpertEncoderPT ``.nemo`` bundle; no-op if falsy.
+
+    Returns:
+        bool: True if a PE encoder was mounted, False otherwise.
+    """
+    if pe_encoder_path in (None, "", False):
+        return False
+    if not hasattr(perception, "encoder"):
+        raise RuntimeError(
+            "pe_encoder_path is set but perception has no `encoder` attribute to replace."
+        )
+
+    from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoderPT
+
+    if not ParallelExpertEncoderPT.is_pe_nemo(pe_encoder_path):
+        raise ValueError(
+            f"pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle."
+        )
+
+    pe_encoder = ParallelExpertEncoderPT.load_from_nemo(pe_encoder_path, map_location="cpu", strict=True)
+
+    existing_d_model = int(getattr(perception.encoder, "d_model", -1))
+    if existing_d_model > 0 and int(pe_encoder.d_model) != existing_d_model:
+        raise ValueError(
+            f"ParallelExpertEncoder d_model={pe_encoder.d_model} does not match the existing "
+            f"perception encoder d_model={existing_d_model}."
+        )
+
+    # load_from_nemo restores onto CPU; copy the replaced encoder's device/dtype to avoid CPU/dtype mismatches.
+    ref_param = next(perception.encoder.parameters(), None)
+    if ref_param is not None:
+        pe_encoder = pe_encoder.to(device=ref_param.device, dtype=ref_param.dtype)
+
+    # PE encoder consumes un-normalised mels and replays ASR norm internally, so disable preprocessor norm.
+    try:
+        perception.preprocessor.featurizer.normalize = None
+    except AttributeError:
+        pass
+
+    perception.encoder = pe_encoder
+    perception.eval()
+    return True
 
 
 def _pad_to_vocab_size(tensor: torch.Tensor, target_vocab: int) -> torch.Tensor:
@@ -139,9 +168,8 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
     def _get_encoder_chunk_size_seconds(self) -> float | None:
         """Return the per-encoder-call chunk size baked into the checkpoint.
 
-        Mirrors the training-time ``model.encoder_chunk_size_seconds`` field
-        (see ``encode_audio_with_optional_chunking``). ``None`` means the
-        encoder runs once over the full audio, matching legacy checkpoints.
+        Returns:
+            float | None: Chunk size in seconds, or None to run once over the full audio.
         """
         return getattr(self.get_hf_config(), "encoder_chunk_size_seconds", None)
 
@@ -149,16 +177,14 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
     def _estimate_audio_tokens_single_pass(audio_length_samples: int) -> int:
         """Predict the encoder's output frame count for one perception forward.
 
-        Mirrors the FastConformer preprocessing chain used by
-        ``AudioPerceptionModule``: STFT (n_fft=512, hop_length=160) followed
-        by 3x Conv(kernel=3, stride=2) subsampling. Implemented as pure
-        Python integer math instead of calling NeMo's ``calc_length`` so
-        the scheduler hotpath avoids ~90x tensor-op overhead (measured
-        0.18 us vs 16 us per call). If the encoder's downsampling stack
-        ever changes upstream, the unit test at
-        ``tests/collections/speechlm2/test_vllm_audio_token_estimator.py``
-        compares this function against ``calc_length`` on a canonical set
-        of lengths and will fail, forcing a rewrite here.
+        Mirrors FastConformer preprocessing (STFT n_fft=512/hop=160 + 3x Conv stride-2) as pure
+        Python int math to avoid tensor-op overhead on the scheduler hotpath.
+
+        Args:
+            audio_length_samples (int): Audio length in samples.
+
+        Returns:
+            int: Estimated encoder output frame count (>= 1).
         """
         n_fft = 512
         hop_length = 160
@@ -177,13 +203,14 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
         audio_length_samples: int,
         chunk_size_seconds: float | None = None,
     ) -> int:
-        """Predict the encoder's total output frame count for an audio of N samples.
+        """Predict the encoder's total output frame count, summing per-chunk estimates when chunked.
 
-        When ``chunk_size_seconds`` is ``None`` or the audio fits in a single
-        chunk, returns the single-pass estimate. Otherwise mirrors
-        ``encode_audio_with_optional_chunking``'s split (with the same
-        tail-folding rule) and sums the per-chunk frame counts so the
-        placeholder count matches what the model emits at forward time.
+        Args:
+            audio_length_samples (int): Audio length in samples.
+            chunk_size_seconds (float | None): Per-call chunk size; None runs a single pass.
+
+        Returns:
+            int: Estimated total encoder output frame count.
         """
         if chunk_size_seconds is None or audio_length_samples <= 0:
             return cls._estimate_audio_tokens_single_pass(audio_length_samples)
@@ -206,14 +233,14 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
 
     @classmethod
     def _samples_for_audio_tokens(cls, target_tokens: int, chunk_size_seconds: float | None = None) -> int:
-        """Return the smallest sample count estimated to produce ``target_tokens``.
+        """Return the smallest sample count estimated to produce ``target_tokens`` (inverse estimator).
 
-        vLLM sizes the multimodal encoder cache from dummy inputs.  The SALM
-        plugin supports arbitrarily long audio by chunking the encoder forward,
-        but the decoder still receives the concatenated full-audio embedding
-        sequence.  This inverse estimator lets ``--limit-mm-per-prompt`` audio
-        length hints reserve cache for that full sequence without hard-coding a
-        single maximum call duration.
+        Args:
+            target_tokens (int): Desired number of audio tokens.
+            chunk_size_seconds (float | None): Per-call chunk size; None runs a single pass.
+
+        Returns:
+            int: Smallest sample count whose estimate reaches ``target_tokens``.
         """
         target_tokens = max(1, int(target_tokens))
         max_samples = int(_DUMMY_AUDIO_MAX_DURATION_S * _SAMPLING_RATE)
@@ -301,9 +328,7 @@ class NeMoSpeechLMMultiModalProcessor(
             audio_list: list[torch.Tensor] = []
             audio_lengths: list[int] = []
             parts = re.split(f"({re.escape(_AUDIO_PLACEHOLDER)})", prompt)
-            # One placeholder is overwritten with one audio's encoder output
-            # at forward time (positional pairing); counts must match or the
-            # merge step in get_input_embeddings crashes / silently drops.
+            # Each placeholder pairs positionally with one audio; counts must match or merge breaks.
             ph_positions = [i for i, p in enumerate(parts) if p == _AUDIO_PLACEHOLDER]
             if len(ph_positions) != len(audios):
                 raise ValueError(
