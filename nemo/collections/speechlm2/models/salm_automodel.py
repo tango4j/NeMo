@@ -196,19 +196,27 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         * Take care of any necessary slicing to align the shapes of source audio,
             target audio, and target token ids.
         """
-        from nemo.collections.speechlm2.parts.cp_helpers import encode_audio_with_cp_distribution, get_cp_mesh
+        from nemo.collections.speechlm2.parts.cp_helpers import (
+            encode_audio_with_cp_distribution,
+            get_cp_mesh,
+            get_perception_fsdp_group,
+        )
 
-        cp_mesh, _, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
+        device_mesh = getattr(self, "_device_mesh", None)
+        cp_mesh, _, _ = get_cp_mesh(device_mesh)
+        fsdp_sync_group = get_perception_fsdp_group(device_mesh)
 
         # Source audio encoding (distributed across CP ranks when CP is active).
         # Input audio: (B_aud, T_samples) → list of (L_i, H) embeddings.
-        audio_embs = encode_audio_with_cp_distribution(
+        audio_embs, dummy_audio_loss = encode_audio_with_cp_distribution(
             self.perception,
             batch["audios"],
             batch["audio_lens"],
             chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
             sampling_rate=self.sampling_rate,
             cp_mesh=cp_mesh,
+            fsdp_sync_group=fsdp_sync_group,
+            return_dummy_loss=True,
         )
         input_ids_to_embed = torch.where(batch["input_ids"] == self.audio_locator_tag_id, 0, batch["input_ids"])
         text_embs = self._embed_tokens(input_ids_to_embed)
@@ -219,15 +227,18 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         if self.cfg.get("packed_sequences", False):
             from nemo.collections.speechlm2.parts.packed_sequences import prepare_packed_llm_inputs
 
-            return prepare_packed_llm_inputs(
+            ans = prepare_packed_llm_inputs(
                 input_ids=batch["input_ids"],
                 text_embs=text_embs,
                 audio_embs=audio_embs,
                 target_ids=target_ids_full,
                 padding_id=self.text_pad_id,
                 placeholder_id=self.audio_locator_tag_id,
-                device_mesh=getattr(self, "_device_mesh", None),
+                device_mesh=device_mesh,
             )
+            if dummy_audio_loss is not None:
+                ans["dummy_audio_loss"] = dummy_audio_loss
+            return ans
 
         input_embs, target_ids, attention_mask = replace_placeholders_and_build_targets(
             input_ids=batch["input_ids"],
@@ -252,12 +263,15 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 attention_mask = attention_mask[:, :-remainder]
                 target_ids = target_ids[:, :-remainder]
 
-        return {
+        ans = {
             "input_embeds": input_embs,
             "attention_mask": attention_mask,
             "target_ids": target_ids,
             "llm_kwargs": {},
         }
+        if dummy_audio_loss is not None:
+            ans["dummy_audio_loss"] = dummy_audio_loss
+        return ans
 
     def on_fit_start(self) -> None:
         """Configure the MoE aux-loss backward scaler to cancel FSDP's gradient
@@ -340,6 +354,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 ignore_index=-100,
             )
             loss = loss_sum * dp_size / num_frames_global
+        if (dummy_audio_loss := inputs.get("dummy_audio_loss")) is not None:
+            loss = loss + dummy_audio_loss
 
         # Display the local per-token CE so logged values stay on the same scale as before
         # this fix. The gradient-carrying ``loss`` above is the globally-normalized quantity.
