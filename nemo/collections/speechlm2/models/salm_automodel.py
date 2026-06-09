@@ -360,53 +360,9 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         }
         if not is_inference and batch.get("spk_targets", None) is not None:
             perception_kwargs["diar_preds"] = batch["spk_targets"]
-        # TODO(temporary-debug): remove this print. Shows whether RTTM-derived diar_preds are
-        # being threaded into the perception encoder during training/validation.
-        _dp = perception_kwargs.get("diar_preds", None)
-        if _dp is not None:
-            print(
-                f"\n[DIAR_PREDS_DEBUG] diar_preds PRESENT shape={tuple(_dp.shape)} dtype={_dp.dtype} "
-                f"device={_dp.device} sum={_dp.float().sum().item():.1f} "
-                f"spk_target_length={batch.get('spk_target_length', None)}",
-                flush=True,
-            )
-        else:
-            print(
-                f"\n[DIAR_PREDS_DEBUG] diar_preds ABSENT (batch has spk_targets key={'spk_targets' in batch}); "
-                "encoder will run embedded Sortformer / plain ASR.",
-                flush=True,
-            )
-        ###################### END TEMPORARY DEBUG ######################
         if self._uses_parallel_expert_encoder():
-            # PE encoder: encode the full audio in a single perception forward and
-            # treat the output as one long encoded sequence per row. The encoder
-            # runs its own context-preserving long-form online inference internally
-            # (forward -> _forward_online); pre-splitting with parts.encoder_chunking
-            # would destroy the cross-time context that diarization / translation
-            # rely on, so it is intentionally bypassed. diar_preds (RTTM injection)
-            # is threaded in via perception_kwargs above during training.
             audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
-            # TODO(temporary-debug): remove. End-to-end dimension trace for the PE
-            # long-form path: how much audio went in vs. how many encoded frames
-            # (= audio tokens spliced into the LLM) came out of perception.
-            _in_sig = perception_kwargs["input_signal"]
-            _in_len = perception_kwargs["input_signal_length"]
-            print(
-                f"\n[PEE_DIM_DEBUG] perception IN  input_signal={tuple(_in_sig.shape)} "
-                f"input_signal_length={_in_len.tolist()} "
-                f"(~{(_in_len.float() / self.sampling_rate).tolist()} s)\n"
-                f"[PEE_DIM_DEBUG] perception OUT audio_embs={tuple(audio_embs.shape)} "
-                f"audio_emb_lens={audio_emb_lens.tolist()} "
-                f"(token_equivalent_duration={self.token_equivalent_duration:.4f}s -> "
-                f"~{(audio_emb_lens.float() * self.token_equivalent_duration).tolist()} s)",
-                flush=True,
-            )
             audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
-            print(
-                "[PEE_DIM_DEBUG] per-row audio tokens spliced into LLM: "
-                f"{[tuple(e.shape) for e in audio_embs]}",
-                flush=True,
-            )
         else:
             # Ordinary encoder: source audio encoding distributed across CP ranks
             # when CP is active. Long source audio is optionally time-chunked and
@@ -521,10 +477,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         num_frames = (inputs["target_ids"] != -100).long().sum()
 
         # Latent speaker supervision loss (auxiliary, optional).
-        # Mirrors aed_multitask_models.py: `transf_loss = transf_loss + lss_loss(...)`.
-        # Computed *outside* loss_parallel() because LSS indexes the vocab
-        # dimension at specific speaker token ids — not safe on a TP-sharded
-        # vocab DTensor; we materialize via .full_tensor() for that path.
         if self.lss_loss is not None and num_frames > 0:
             logits = forward_outputs["logits"]
             if isinstance(logits, DTensor):
@@ -841,13 +793,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
             if self._uses_parallel_expert_encoder():
-                # PE encoder: run perception once over the full audio and treat its
-                # output as a single long encoded sequence. The encoder performs its
-                # own context-preserving long-form online inference internally (forward ->
-                # _forward_online, with streaming Sortformer cache/FIFO). We
-                # deliberately do NOT use parts.encoder_chunking here: that naive
-                # time-splitting severs the cross-time context that diarization /
-                # translation depend on.
                 audio_embeds, audio_embed_lens = self.perception(
                     input_signal=audios, input_signal_length=audio_lens
                 )
