@@ -321,12 +321,30 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 ans["cache"] = out["past_key_values"]
         return ans
 
+    def _uses_parallel_expert_encoder(self) -> bool:
+        """Whether the mounted perception encoder is a ``ParallelExpertEncoder``.
+
+        The PE encoder performs its own context-preserving long-form streaming
+        (``forward`` -> ``_forward_chunked``), so audio must be fed to it as a
+        single long sequence. The naive time-slicer in
+        ``nemo.collections.speechlm2.parts.encoder_chunking`` severs the
+        cross-time context that diarization / translation rely on and must NOT be
+        used when a PE encoder is loaded. For ordinary encoders it is still the
+        intended long-audio path, so we only bypass it here.
+        """
+        from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
+
+        return isinstance(getattr(self.perception, "encoder", None), ParallelExpertEncoder)
+
     def prepare_inputs(self, batch: dict, is_inference: bool = False):
         """
         Performs additional processing on the mini-batch collected from dataloader.
         Notably:
-        * Convert source audio to speech representations.
-        * Optionally chunk long source audio for the encoder and recombine the encoded chunks.
+        * Convert source audio to speech representations. With a
+          ``ParallelExpertEncoder`` the full audio is encoded in a single
+          perception forward (long-form streaming is handled inside the encoder).
+          With an ordinary encoder, long source audio is optionally time-chunked
+          and recombined via ``parts.encoder_chunking``.
         * Convert target audio to target audio tokens.
         * Convert target text to embeddings.
         * Combine the input audio and target text embeddings.
@@ -366,22 +384,51 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 flush=True,
             )
         ###################### END TEMPORARY DEBUG ######################
-        audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
-        audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
-        from nemo.collections.speechlm2.parts.cp_helpers import encode_audio_with_cp_distribution, get_cp_mesh
+        if self._uses_parallel_expert_encoder():
+            # PE encoder: encode the full audio in a single perception forward and
+            # treat the output as one long encoded sequence per row. The encoder
+            # runs its own context-preserving long-form streaming internally
+            # (forward -> _forward_chunked); pre-splitting with parts.encoder_chunking
+            # would destroy the cross-time context that diarization / translation
+            # rely on, so it is intentionally bypassed. diar_preds (RTTM injection)
+            # is threaded in via perception_kwargs above during training.
+            audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
+            # TODO(temporary-debug): remove. End-to-end dimension trace for the PE
+            # long-form path: how much audio went in vs. how many encoded frames
+            # (= audio tokens spliced into the LLM) came out of perception.
+            _in_sig = perception_kwargs["input_signal"]
+            _in_len = perception_kwargs["input_signal_length"]
+            print(
+                f"\n[PEE_DIM_DEBUG] perception IN  input_signal={tuple(_in_sig.shape)} "
+                f"input_signal_length={_in_len.tolist()} "
+                f"(~{(_in_len.float() / self.sampling_rate).tolist()} s)\n"
+                f"[PEE_DIM_DEBUG] perception OUT audio_embs={tuple(audio_embs.shape)} "
+                f"audio_emb_lens={audio_emb_lens.tolist()} "
+                f"(token_equivalent_duration={self.token_equivalent_duration:.4f}s -> "
+                f"~{(audio_emb_lens.float() * self.token_equivalent_duration).tolist()} s)",
+                flush=True,
+            )
+            audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
+            print(
+                "[PEE_DIM_DEBUG] per-row audio tokens spliced into LLM: "
+                f"{[tuple(e.shape) for e in audio_embs]}",
+                flush=True,
+            )
+        else:
+            # Ordinary encoder: source audio encoding distributed across CP ranks
+            # when CP is active. Long source audio is optionally time-chunked and
+            # recombined via parts.encoder_chunking (its intended use).
+            from nemo.collections.speechlm2.parts.cp_helpers import encode_audio_with_cp_distribution, get_cp_mesh
 
-        cp_mesh, _, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
-
-        # Source audio encoding (distributed across CP ranks when CP is active).
-        # Input audio: (B_aud, T_samples) → list of (L_i, H) embeddings.
-        audio_embs = encode_audio_with_cp_distribution(
-            self.perception,
-            batch["audios"],
-            batch["audio_lens"],
-            chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
-            sampling_rate=self.sampling_rate,
-            cp_mesh=cp_mesh,
-        )
+            cp_mesh, _, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
+            audio_embs = encode_audio_with_cp_distribution(
+                self.perception,
+                batch["audios"],
+                batch["audio_lens"],
+                chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
+                sampling_rate=self.sampling_rate,
+                cp_mesh=cp_mesh,
+            )
         input_ids_to_embed = torch.where(batch["input_ids"] == self.audio_locator_tag_id, 0, batch["input_ids"])
         text_embs = self._embed_tokens(input_ids_to_embed)
         target_ids_full = batch["input_ids"].where(batch["loss_mask"], -100)  # CrossEntropyLoss().ignore_index
@@ -800,13 +847,28 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             # Prepare token embeddings and audio embeddings.
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
-            audio_embeds = encode_audio_with_optional_chunking(
-                self.perception,
-                audios,
-                audio_lens,
-                chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
-                sampling_rate=self.sampling_rate,
-            )
+            if self._uses_parallel_expert_encoder():
+                # PE encoder: run perception once over the full audio and treat its
+                # output as a single long encoded sequence. The encoder performs its
+                # own context-preserving long-form streaming internally (forward ->
+                # _forward_chunked, with streaming Sortformer cache/FIFO). We
+                # deliberately do NOT use parts.encoder_chunking here: that naive
+                # time-splitting severs the cross-time context that diarization /
+                # translation depend on.
+                audio_embeds, audio_embed_lens = self.perception(
+                    input_signal=audios, input_signal_length=audio_lens
+                )
+                audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embeds, audio_embed_lens)]
+            else:
+                # Ordinary encoder: long source audio is optionally time-chunked and
+                # recombined via parts.encoder_chunking (its intended use).
+                audio_embeds = encode_audio_with_optional_chunking(
+                    self.perception,
+                    audios,
+                    audio_lens,
+                    chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
+                    sampling_rate=self.sampling_rate,
+                )
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(
                 input_ids=tokens,

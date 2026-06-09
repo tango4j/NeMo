@@ -26,10 +26,6 @@ from lightning.pytorch import Trainer
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from nemo.collections.asr.data.audio_to_sot_text_lhotse_prompted import (
-    PromptedAudioToTextLhotseDataset,
-    PromptedAudioToTextMiniBatch,
-)
 from nemo.collections.asr.metrics import MultiTaskMetric
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin, ASRModuleMixin, ASRTranscriptionMixin
@@ -46,6 +42,19 @@ from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import (
     get_forced_aligned_timestamps_with_external_model,
     process_aed_timestamp_outputs,
+)
+
+# NB: imported here (after the asr.parts.utils.* imports above), not at the top
+# of the import block, to preserve the import order main relies on. This module
+# pulls in ``asr.parts.utils.sot_speaker_alignment``, which forces the
+# ``asr.parts.utils`` package __init__ (-> rnnt_utils -> context_biasing ->
+# metrics -> ctc_decoding) to run. Triggering that before ``metrics`` and the
+# decoding submodules above are loaded re-enters partially-initialized modules
+# and raises a circular ImportError. Letting ``chunking_utils`` / ``rnnt_utils``
+# above initialize that package first keeps the import order identical to main.
+from nemo.collections.asr.data.audio_to_sot_text_lhotse_prompted import (  # noqa: E402
+    PromptedAudioToTextLhotseDataset,
+    PromptedAudioToTextMiniBatch,
 )
 from nemo.collections.common import tokenizers
 from nemo.collections.common.data.lhotse.dataloader import get_lhotse_dataloader_from_config

@@ -50,16 +50,17 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
-from nemo.collections.speechlm2.vllm.salm.audio import (
+from nemo.collections.speechlm2.vllm.salm_LCA.audio import (
     _SAMPLING_RATE,
     NeMoSpeechLMAudioInputs,
     NeMoSpeechLMDummyInputsBuilder,
     NeMoSpeechLMMultiModalProcessor,
     NeMoSpeechLMProcessingInfo,
     _load_nemo_perception,
+    _maybe_mount_pe_encoder,
 )
-from nemo.collections.speechlm2.vllm.salm.backends import HybridBackend, make_backend
-from nemo.collections.speechlm2.vllm.salm.config import _AUDIO_PLACEHOLDER
+from nemo.collections.speechlm2.vllm.salm_LCA.backends import HybridBackend, make_backend
+from nemo.collections.speechlm2.vllm.salm_LCA.config import _AUDIO_PLACEHOLDER
 
 _AUDIO_INPUT_DTYPE = torch.float32
 _PERCEPTION_DTYPE = torch.bfloat16
@@ -104,6 +105,14 @@ class NeMoSpeechLMForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"audio"}):
             self.perception = _load_nemo_perception(config.perception)
+            # Checkpoints trained with a ParallelExpertEncoder serialize their
+            # perception config as the inner ConformerEncoder, but their weights
+            # are nested under the PE wrapper (perception.encoder.asr_encoder.* /
+            # ...diarization_model.* / ...asr_norm / ...diar_norm). Re-mount the
+            # PE encoder from config.pe_encoder_path so the module tree (and thus
+            # the parameter names) matches the checkpoint; the bundle's pretrained
+            # weights are overwritten by load_weights afterwards.
+            _maybe_mount_pe_encoder(self.perception, getattr(config, "pe_encoder_path", None))
 
         # A ParallelExpertEncoder performs its own context-preserving long-form
         # streaming, so it must be fed the full audio as one long sequence rather

@@ -235,6 +235,16 @@ def fix_speaker_activity(
     cols_to_zero = [idx for idx in range(num_activity_speakers) if idx not in speakers_in_text]
     if cols_to_zero:
         fixed[:, cols_to_zero] = 0.0
+
+    orig_cost = dtw_cost(
+        activity_np, spk_seq_arr, identity_perm, num_activity_speakers, token_weights
+    ) + float(speaker_freq_cost_batch(text_freq, rttm_freq, np.array([identity_perm], dtype=np.intp))[0])
+    best_cost = dtw_cost(activity_np, spk_seq_arr, best_perm, num_activity_speakers, token_weights) + float(
+        speaker_freq_cost_batch(text_freq, rttm_freq, np.array([best_perm], dtype=np.intp))[0]
+    )
+    if best_cost < orig_cost:
+        print(f"fix_speaker_activity: score improved {orig_cost:.6f} -> {best_cost:.6f}")
+
     return fixed
 
 
