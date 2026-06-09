@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from itertools import permutations
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import List, Tuple, Union
 
 import numpy as np
 import torch
@@ -26,16 +26,6 @@ from torchmetrics import Metric
 
 from nemo.utils import logging
 
-if TYPE_CHECKING:
-    # Imported only for type hints. The real classes are imported lazily inside
-    # ``CpWER.__init__`` to avoid a circular import: this module is reached via
-    # ``metrics.__init__`` during a cold ``import nemo.collections.asr``, and
-    # importing the decoding submodules at module top re-enters the
-    # partially-initialized asr import chain.
-    from nemo.collections.asr.parts.submodules.ctc_decoding import AbstractCTCDecoding
-    from nemo.collections.asr.parts.submodules.multitask_decoding import AbstractMultiTaskDecoding
-    from nemo.collections.asr.parts.submodules.rnnt_decoding import AbstractRNNTDecoding
-
 __all__ = [
     'CpWER',
     'split_text_by_speaker_tags',
@@ -44,7 +34,7 @@ __all__ = [
     'concat_perm_word_error_rate',
 ]
 
-DEFAULT_SPEAKER_TAG_PATTERN = re.compile(r'\[s\d+\]')
+DEFAULT_SPEAKER_TAG_PATTERN = re.compile(r'<spk:\d+>')
 
 
 def calculate_session_cpWER_bruteforce(spk_hypothesis: List[str], spk_reference: List[str]) -> Tuple[float, str, str]:
@@ -219,7 +209,7 @@ def concat_perm_word_error_rate(
 
 def split_text_by_speaker_tags(text: str, speaker_tag_pattern: re.Pattern = None) -> List[str]:
     """
-    Split SOT-formatted text by bracket speaker tags ([s0], [s1], ...) and
+    Split SOT-formatted text by speaker tags (<spk:0>, <spk:1>, ...) and
     return a list of per-speaker transcripts.
 
     Segments belonging to the same speaker are concatenated in order of
@@ -230,7 +220,7 @@ def split_text_by_speaker_tags(text: str, speaker_tag_pattern: re.Pattern = None
     single-element list.
 
     Example:
-        >>> split_text_by_speaker_tags("[s0] hello world [s1] good morning [s0] how are you")
+        >>> split_text_by_speaker_tags("<spk:0> hello world <spk:1> good morning <spk:0> how are you")
         ['hello world how are you', 'good morning']
     """
     if speaker_tag_pattern is None:
@@ -259,120 +249,76 @@ class CpWER(Metric):
     Concatenated minimum-permutation Word Error Rate (cpWER) metric for
     multi-speaker ASR evaluation.
 
-    Uses ``[s0]``, ``[s1]``, ... bracket speaker tags in both hypothesis and
-    reference to create per-speaker transcripts, then calls
-    ``calculate_session_cpWER`` (Hungarian-algorithm optimal assignment) to
-    compute the session-level cpWER.
+    Operates purely on **decoded text**: callers pass hypothesis/reference
+    transcripts (already detokenized) and the metric splits them on ``<spk:0>``,
+    ``<spk:1>``, ... speaker tags, then calls ``calculate_session_cpWER``
+    (Hungarian-algorithm optimal assignment) for the session-level cpWER. It is
+    decoding-agnostic; turning model outputs into text is the caller's job.
 
-    Accumulates total edit-distance errors and total reference words across
-    all samples so that ``compute()`` returns a micro-averaged cpWER that is
-    correct under DDP (states are summed across workers).
+    Accumulates total edit-distance errors and total reference words so
+    ``compute()`` returns a micro-averaged cpWER, summed across workers under DDP.
+    The ``compute()`` return signature ``(rate, numerator, denominator)`` matches
+    ``WER.compute()``.
 
-    The ``compute()`` return signature ``(rate, numerator, denominator)``
-    matches ``WER.compute()`` so the existing ``MultiTaskMetric`` aggregation
-    pipeline works consistently.
+    Args:
+        log_prediction (bool): If True, log the first hyp/ref pair on each update.
+        dist_sync_on_step (bool): torchmetrics DDP sync-on-step flag.
+        sync_on_compute (bool): torchmetrics DDP sync-on-compute flag.
+        speaker_tag_pattern (re.Pattern): Regex for speaker tags; defaults to ``<spk:N>``.
     """
 
     full_state_update: bool = True
 
     def __init__(
         self,
-        decoding: Union["AbstractCTCDecoding", "AbstractRNNTDecoding", "AbstractMultiTaskDecoding"],
-        log_prediction=True,
-        batch_dim_index=0,
-        dist_sync_on_step=False,
-        sync_on_compute=True,
+        log_prediction: bool = True,
+        dist_sync_on_step: bool = False,
+        sync_on_compute: bool = True,
         speaker_tag_pattern: re.Pattern = None,
         **kwargs,
     ):
         super().__init__(dist_sync_on_step=dist_sync_on_step, sync_on_compute=sync_on_compute)
 
-        # Lazy imports: importing the decoding submodules at module top would
-        # re-enter the partially-initialized asr import chain (circular import)
-        # during a cold ``import nemo.collections.asr``. By __init__ time the
-        # full import has completed, so these resolve cleanly.
-        from nemo.collections.asr.parts.submodules.ctc_decoding import AbstractCTCDecoding
-        from nemo.collections.asr.parts.submodules.multitask_decoding import AbstractMultiTaskDecoding
-        from nemo.collections.asr.parts.submodules.rnnt_decoding import AbstractRNNTDecoding
-
-        self.decoding = decoding
         self.log_prediction = log_prediction
-        self.batch_dim_index = batch_dim_index
         self.speaker_tag_pattern = (
             speaker_tag_pattern if speaker_tag_pattern is not None else DEFAULT_SPEAKER_TAG_PATTERN
         )
 
-        self.decode = None
-        if isinstance(self.decoding, AbstractRNNTDecoding):
-            self.decode = lambda predictions, predictions_lengths, predictions_mask, input_ids: (
-                self.decoding.rnnt_decoder_predictions_tensor(
-                    encoder_output=predictions, encoded_lengths=predictions_lengths, return_hypotheses=False
-                )
-            )
-        elif isinstance(self.decoding, AbstractCTCDecoding):
-            self.decode = lambda predictions, predictions_lengths, predictions_mask, input_ids: (
-                self.decoding.ctc_decoder_predictions_tensor(
-                    decoder_outputs=predictions,
-                    decoder_lengths=predictions_lengths,
-                    fold_consecutive=True,
-                    return_hypotheses=False,
-                )
-            )
-        elif isinstance(self.decoding, AbstractMultiTaskDecoding):
-            self.decode = lambda predictions, prediction_lengths, predictions_mask, input_ids: (
-                self.decoding.decode_predictions_tensor(
-                    encoder_hidden_states=predictions,
-                    encoder_input_mask=predictions_mask,
-                    decoder_input_ids=input_ids,
-                    return_hypotheses=False,
-                )
-            )
-        else:
-            raise TypeError(f"CpWER metric does not support decoding of type {type(self.decoding)}")
-
         self.add_state("total_edit_distance", default=torch.tensor(0), dist_reduce_fx='sum', persistent=False)
         self.add_state("total_ref_word_count", default=torch.tensor(0), dist_reduce_fx='sum', persistent=False)
 
+    def _as_speaker_list(self, transcript: Union[str, List[str]]) -> List[str]:
+        """Normalize one sample's transcript into a per-speaker text list.
+
+        Args:
+            transcript (str | List[str]): SOT-tagged text, or an already-split per-speaker list.
+
+        Returns:
+            List[str]: Per-speaker transcripts.
+        """
+        if isinstance(transcript, str):
+            return split_text_by_speaker_tags(transcript, self.speaker_tag_pattern)
+        return [t for t in transcript if t]
+
     def update(
         self,
-        predictions: torch.Tensor,
-        predictions_lengths: torch.Tensor,
-        targets: torch.Tensor,
-        targets_lengths: torch.Tensor,
-        predictions_mask: Optional[torch.Tensor] = None,
-        input_ids: Optional[torch.Tensor] = None,
+        hypotheses: List[Union[str, List[str]]],
+        references: List[Union[str, List[str]]],
         **kwargs,
     ):
-        # Lazy import (see __init__): avoids a module-top circular import.
-        from nemo.collections.asr.metrics.wer import move_dimension_to_the_front
+        """Accumulate cpWER edit distance and reference word counts from decoded text.
 
-        references = []
-        with torch.no_grad():
-            target_lengths_cpu = targets_lengths.long().cpu()
-            targets_cpu = targets.long().cpu()
-            if self.batch_dim_index != 0:
-                targets_cpu = move_dimension_to_the_front(targets_cpu, self.batch_dim_index)
-            for sample_idx in range(targets_cpu.shape[0]):
-                target_len = target_lengths_cpu[sample_idx].item()
-                target_token_ids = targets_cpu[sample_idx][:target_len].numpy().tolist()
-                reference_text = self.decoding.decode_ids_to_str(target_token_ids)
-                references.append(reference_text)
-            hypotheses = (
-                self.decode(predictions, predictions_lengths, predictions_mask, input_ids)
-                if predictions.numel() > 0
-                else []
-            )
-
+        Args:
+            hypotheses (List[str | List[str]]): Per-sample hypothesis text; each item is a
+                SOT-tagged string (split on speaker tags) or a pre-split per-speaker list.
+            references (List[str | List[str]]): Per-sample reference text, same format as hypotheses.
+        """
         batch_edit_distance = 0
         batch_ref_word_count = 0
 
-        for hypothesis, reference_text in zip(hypotheses, references):
-            if isinstance(hypothesis, list):
-                hypothesis = hypothesis[0]
-            hyp_text = hypothesis.text if hasattr(hypothesis, 'text') else str(hypothesis)
-
-            spk_hyp_transcripts = split_text_by_speaker_tags(hyp_text, self.speaker_tag_pattern)
-            spk_ref_transcripts = split_text_by_speaker_tags(reference_text, self.speaker_tag_pattern)
+        for hypothesis, reference in zip(hypotheses, references):
+            spk_hyp_transcripts = self._as_speaker_list(hypothesis)
+            spk_ref_transcripts = self._as_speaker_list(reference)
 
             if not spk_ref_transcripts:
                 continue
@@ -386,11 +332,9 @@ class CpWER(Metric):
             batch_ref_word_count += ref_word_count
 
         if self.log_prediction and hypotheses and references:
-            first_hyp = hypotheses[0]
-            first_hyp_text = first_hyp.text if hasattr(first_hyp, 'text') else str(first_hyp)
             logging.info("\n")
             logging.info(f"cpWER reference : {references[0]}")
-            logging.info(f"cpWER predicted : {first_hyp_text}")
+            logging.info(f"cpWER predicted : {hypotheses[0]}")
 
         self.total_edit_distance = torch.tensor(
             batch_edit_distance, device=self.total_edit_distance.device, dtype=self.total_edit_distance.dtype

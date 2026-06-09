@@ -25,15 +25,15 @@ from nemo.collections.asr.parts.utils.sot_speaker_alignment import (
 
 @pytest.mark.unit
 def test_parse_speaker_tokens_handles_multi_digit_speakers():
-    assert parse_speaker_tokens("[s10] hello [s1] world") == [10, 1]
+    assert parse_speaker_tokens("<spk:10> hello <spk:1> world") == [10, 1]
 
 
 @pytest.mark.unit
 def test_sl_and_wl_sot_have_same_speaker_sequence():
-    sl_text = "[s0] hello world [s1] yes"
+    sl_text = "<spk:0> hello world <spk:1> yes"
     wl_text = sl_to_wl_sot(sl_text)
 
-    assert wl_text == "[s0] hello [s0] world [s1] yes"
+    assert wl_text == "<spk:0> hello <spk:0> world <spk:1> yes"
     assert parse_speaker_tokens(sl_text) == parse_speaker_tokens(wl_text)
 
 
@@ -41,16 +41,16 @@ def test_sl_and_wl_sot_have_same_speaker_sequence():
 def test_ensure_single_speaker_sot_prefixes_no_token_text():
     text, spk_idx, changed = ensure_single_speaker_sot("hello world", num_speakers=4)
 
-    assert text == "[s0] hello world"
+    assert text == "<spk:0> hello world"
     assert spk_idx == 0
     assert changed
 
 
 @pytest.mark.unit
 def test_ensure_single_speaker_sot_keeps_existing_tokens():
-    text, spk_idx, changed = ensure_single_speaker_sot("[s2] hello", num_speakers=4)
+    text, spk_idx, changed = ensure_single_speaker_sot("<spk:2> hello", num_speakers=4)
 
-    assert text == "[s2] hello"
+    assert text == "<spk:2> hello"
     assert spk_idx == -1
     assert not changed
 
@@ -66,7 +66,7 @@ def test_fix_speaker_activity_swaps_simple_two_speaker_permutation():
         ]
     )
 
-    fixed = fix_speaker_activity("[s0] hello world [s1] yes now", activity, num_speakers=2)
+    fixed = fix_speaker_activity("<spk:0> hello world <spk:1> yes now", activity, num_speakers=2)
 
     expected = torch.tensor(
         [

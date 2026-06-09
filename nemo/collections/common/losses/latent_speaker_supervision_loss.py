@@ -17,7 +17,7 @@ from typing import List, Optional
 import torch
 
 from nemo.core.classes import Loss, typecheck
-from nemo.core.neural_types import LabelsType, LengthsType, LogprobsType, LossType, MaskType, NeuralType
+from nemo.core.neural_types import LabelsType, LogprobsType, LossType, MaskType, NeuralType
 
 __all__ = ["LatentSpeakerSupervisionLoss"]
 
@@ -33,11 +33,11 @@ class LatentSpeakerSupervisionLoss(Loss):
         In SOT-based multi-speaker ASR, there are two labeling strategies:
 
         - **Word-level SOT**: A speaker token precedes every word.
-          e.g. ``<spk0> hi <spk0> how <spk0> are <spk0> you <spk1> I <spk1> am ...``
+          e.g. ``<spk:0> hi <spk:0> how <spk:0> are <spk:0> you <spk:1> I <spk:1> am ...``
           (+) More speaker-label gradients  (-) Very token-inefficient
 
         - **Segment-level SOT**: Speaker tokens appear only at speaker changes.
-          e.g. ``<spk0> hi how are you <spk1> I am good thanks``
+          e.g. ``<spk:0> hi how are you <spk:1> I am good thanks``
           (+) Token-efficient  (-) Fewer speaker-label gradients
 
         This loss gives the **best of both worlds**: the labels remain segment-level
@@ -54,7 +54,7 @@ class LatentSpeakerSupervisionLoss(Loss):
 
     Args:
         speaker_token_ids: List of token IDs for speaker tokens
-            (e.g., IDs for ``[s0]``, ``[s1]``, ``[s2]``, ``[s3]``).
+            (e.g., IDs for ``<spk:0>``, ``<spk:1>``, ``<spk:2>``, ``<spk:3>``).
         speaker_loss_weight: Weight for the auxiliary speaker supervision loss.
         include_ce_loss: If True (default), the forward pass returns standard CE + speaker loss.
             If False, returns **only** the auxiliary speaker loss (useful when a separate
@@ -65,10 +65,6 @@ class LatentSpeakerSupervisionLoss(Loss):
         speaker_label_smoothing: Label smoothing coefficient for the speaker CE loss.
         eps: Small constant to avoid division by zero.
         per_token_reduction: If True, reduces loss per token; if False, returns per-token losses.
-        is_rnnt: If True, expects RNNT-style 4D joint output ``(B, T_enc, U+1, V)`` and
-            target/length arguments instead of AED-style 3D ``(B, T, V)`` log-probs.
-            The 4D joint is marginalized over the encoder time dimension via logsumexp
-            before the speaker loss is computed. Default: False (AED mode).
         per_speaker_normalization: If True, the speaker supervision loss is computed as the
             mean of per-speaker average losses, giving equal importance to each speaker
             regardless of how many words they have. For example, if speaker 0 has 2 words
@@ -79,13 +75,6 @@ class LatentSpeakerSupervisionLoss(Loss):
     @property
     def input_types(self):
         """Returns definitions of module input ports."""
-        if self._is_rnnt:
-            return {
-                "log_probs": NeuralType(("B", "T", "C", "D"), LogprobsType()),
-                "targets": NeuralType(("B", "T"), LabelsType()),
-                "input_lengths": NeuralType(tuple('B'), LengthsType()),
-                "target_lengths": NeuralType(tuple('B'), LengthsType()),
-            }
         return {
             "log_probs": NeuralType(("B", "T", "D"), LogprobsType()),
             "labels": NeuralType(("B", "T"), LabelsType()),
@@ -107,7 +96,6 @@ class LatentSpeakerSupervisionLoss(Loss):
         speaker_label_smoothing: float = 0.0,
         eps: float = 1e-6,
         per_token_reduction: bool = True,
-        is_rnnt: bool = False,
         per_speaker_normalization: bool = True,
     ):
         super().__init__()
@@ -120,7 +108,6 @@ class LatentSpeakerSupervisionLoss(Loss):
         self._speaker_label_smoothing = speaker_label_smoothing
         self._eps = eps
         self._per_token_reduction = per_token_reduction
-        self._is_rnnt = is_rnnt
         self._per_speaker_normalization = per_speaker_normalization
 
     def _compute_standard_ce(self, log_probs, labels, output_mask):
@@ -262,111 +249,24 @@ class LatentSpeakerSupervisionLoss(Loss):
 
         return speaker_loss
 
-    def _forward_rnnt(self, log_probs, targets, input_lengths, target_lengths):
-        """
-        RNNT-style forward pass for latent speaker supervision.
-
-        The RNNT joint network produces a 4D tensor ``(B, T_enc, U+1, V)`` where
-        ``T_enc`` is the encoder time, ``U+1`` is the decoder/label dimension, and
-        ``V`` is the vocabulary size. To reuse the same speaker-level loss used in
-        the AED path, we marginalize over the encoder time dimension via logsumexp
-        to obtain 3D log-probabilities ``(B, U, V)`` and then apply the identical
-        ``_get_active_speaker_per_position`` / ``_compute_speaker_loss`` logic.
-
-        Args:
-            log_probs: (B, T_enc, U+1, V) RNNT joint output log-probabilities.
-            targets: (B, U) target token IDs in segment-level SOT format.
-            input_lengths: (B,) valid encoder output lengths.
-            target_lengths: (B,) valid target sequence lengths.
-
-        Returns:
-            Scalar loss.
-        """
-        B, T_enc, U_plus_1, V = log_probs.shape
-        U = targets.shape[1]
-
-        # --- Marginalize over encoder time dimension T via logsumexp ---
-        # Create encoder time mask: (B, T_enc) -> True for valid frames
-        t_range = torch.arange(T_enc, device=log_probs.device).unsqueeze(0).expand(B, -1)
-        t_mask = t_range < input_lengths.unsqueeze(1)
-
-        # Mask padded encoder frames to -inf so they contribute 0 in logsumexp
-        t_mask_expanded = t_mask.unsqueeze(2).unsqueeze(3)  # (B, T_enc, 1, 1)
-        masked_log_probs = log_probs.masked_fill(~t_mask_expanded, float('-inf'))
-
-        # logsumexp over T_enc: (B, U+1, V)
-        marginalized = torch.logsumexp(masked_log_probs, dim=1)
-
-        # Align with targets: take first U positions (position u predicts label u)
-        marginalized = marginalized[:, :U, :]  # (B, U, V)
-
-        # Renormalize to proper log-probabilities over vocabulary
-        marginalized = marginalized - torch.logsumexp(marginalized, dim=-1, keepdim=True)
-
-        # Create output_mask from target_lengths: (B, U)
-        u_range = torch.arange(U, device=targets.device).unsqueeze(0).expand(B, -1)
-        output_mask = (u_range < target_lengths.unsqueeze(1)).to(marginalized.dtype)
-
-        # --- From here, identical logic to the AED path ---
-        # 1. Optional standard CE loss on the marginalized log-probs.
-        if self.include_ce_loss:
-            ce_loss = self._compute_standard_ce(marginalized, targets, output_mask)
-        else:
-            ce_loss = None
-
-        # 2. Latent speaker supervision loss (auxiliary, at word positions only).
-        active_speaker, _speaker_mask, word_mask = self._get_active_speaker_per_position(targets)
-        word_mask = word_mask & (output_mask > 0)
-
-        if word_mask.any():
-            speaker_loss = self._compute_speaker_loss(marginalized, active_speaker, word_mask)
-        else:
-            speaker_loss = torch.tensor(0.0, device=log_probs.device, dtype=log_probs.dtype)
-
-        # 3. Combine.
-        if ce_loss is not None:
-            total_loss = ce_loss + self.speaker_loss_weight * speaker_loss
-        else:
-            total_loss = self.speaker_loss_weight * speaker_loss
-
-        return total_loss
-
     @typecheck()
     def forward(
         self,
         log_probs,
         labels=None,
         output_mask=None,
-        targets=None,
-        input_lengths=None,
-        target_lengths=None,
     ):
         """
         Compute the combined loss: standard CE + weighted latent speaker supervision.
-
-        **AED mode** (``is_rnnt=False``, default):
 
         Args:
             log_probs: (B, T, V) log-probabilities over vocabulary.
             labels: (B, T) target token IDs in segment-level SOT format.
             output_mask: (B, T) binary mask (optional; computed from pad_id if None).
 
-        **RNNT mode** (``is_rnnt=True``):
-
-        Args:
-            log_probs: (B, T_enc, U+1, V) RNNT joint output log-probabilities.
-            targets: (B, U) target token IDs in segment-level SOT format.
-            input_lengths: (B,) valid encoder output lengths.
-            target_lengths: (B,) valid target sequence lengths.
-
         Returns:
             Scalar combined loss.
         """
-        # ----- RNNT path -----
-        if self._is_rnnt:
-            return self._forward_rnnt(log_probs, targets, input_lengths, target_lengths)
-
-        # ----- AED path (original, unchanged) -----
         if output_mask is None and self._pad_id is None:
             raise ValueError("Both output_mask and pad_id are None")
         if output_mask is None and self._pad_id is not None:

@@ -22,6 +22,7 @@ from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from nemo.collections.asr.models import ASRModel
+from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoderPT
 from nemo.collections.speechlm2.modules import AudioPerceptionModule
 from nemo.collections.speechlm2.parts.precision import fp32_precision
 from nemo.collections.tts.models import AudioCodecModel
@@ -225,17 +226,12 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
             "feature extractors) need a separate implementation."
         )
 
-    from nemo.collections.asr.modules.parallel_expert_encoder import (
-        is_parallel_expert_encoder_nemo,
-        load_parallel_expert_encoder_from_nemo,
-    )
-
-    if not is_parallel_expert_encoder_nemo(pe_encoder_path):
+    if not ParallelExpertEncoderPT.is_pe_nemo(pe_encoder_path):
         raise ValueError(
             f"model.pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle."
         )
 
-    pe_encoder = load_parallel_expert_encoder_from_nemo(
+    pe_encoder = ParallelExpertEncoderPT.load_from_nemo(
         pe_encoder_path, map_location="cpu", strict=True,
     )
 
@@ -505,9 +501,9 @@ def init_from_training_checkpoint(model: torch.nn.Module, checkpoint_path: str):
 
     logging.info(f"Initializing model weights from training checkpoint: {checkpoint_path}")
 
-    from nemo.collections.asr.modules.parallel_expert_encoder import is_parallel_expert_encoder_nemo
+    from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoderPT
 
-    if is_parallel_expert_encoder_nemo(checkpoint_path):
+    if ParallelExpertEncoderPT.is_pe_nemo(checkpoint_path):
         raise ValueError(
             f"init_from_checkpoint={checkpoint_path!r} points to a ParallelExpertEncoderPT bundle. "
             "Use model.pe_encoder_path for PE encoder bundles."

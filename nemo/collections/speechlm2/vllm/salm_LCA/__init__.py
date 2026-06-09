@@ -21,7 +21,7 @@ Registers ``NeMoSpeechLMConfig`` and the single
 This variant of the SALM plugin bakes in long-context-audio support: when the
 perception encoder is a ``ParallelExpertEncoder`` (Sortformer diarization +
 ASR encoder), the model feeds the full audio as one long sequence and lets the
-encoder run its own context-preserving streaming (``_forward_chunked`` with the
+encoder run its own context-preserving online inference (``_forward_online`` with the
 streaming Sortformer speaker cache / FIFO). Ordinary encoders still honor
 ``encoder_chunk_size_seconds`` via ``parts.encoder_chunking``.
 

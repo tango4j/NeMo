@@ -18,6 +18,13 @@ Registers ``NeMoSpeechLMConfig`` and the single
 ``NeMoSpeechLMForConditionalGeneration`` model class with vLLM via the
 ``vllm.general_plugins`` entry point.
 
+This plugin also bakes in long-context-audio encoding support: when the perception
+encoder is a ``ParallelExpertEncoder`` (Sortformer diarization + ASR encoder),
+the model feeds the full audio as one long sequence and lets the encoder run its
+own context-preserving online inference (``_forward_online`` with the streaming
+Sortformer speaker cache / FIFO). Ordinary encoders still honor
+``encoder_chunk_size_seconds`` via ``parts.encoder_chunking``.
+
 A single model class covers every supported backbone family (standard
 decoder-only LLMs like Qwen3, hybrid Mamba+MoE like NemotronH).
 Backbone-specific behavior is selected at instantiation time.

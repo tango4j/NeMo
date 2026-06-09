@@ -40,7 +40,7 @@ from nemo.collections.common.data.lhotse.dataloader import get_lhotse_dataloader
 from nemo.core.classes.common import typecheck
 from nemo.core.neural_types import NeuralType, ProbsType
 from nemo.utils import logging
-from nemo.collections.asr.modules.parallel_expert_encoder import load_parallel_expert_encoder_from_nemo
+from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoderPT
 
 __all__ = ['MSEncDecMultiTaskModel']
 
@@ -184,7 +184,7 @@ class MSEncDecMultiTaskModel(EncDecMultiTaskModel):
                 f"(ParallelExpertEncoderPT), got {model_path!r}."
             )
 
-        pe_encoder = load_parallel_expert_encoder_from_nemo(
+        pe_encoder = ParallelExpertEncoderPT.load_from_nemo(
             model_path, map_location='cpu', strict=True,
         )
         self.encoder = pe_encoder

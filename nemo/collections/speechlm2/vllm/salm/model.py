@@ -48,7 +48,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-
+from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
 from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
 from nemo.collections.speechlm2.vllm.salm.audio import (
     _SAMPLING_RATE,
@@ -57,6 +57,7 @@ from nemo.collections.speechlm2.vllm.salm.audio import (
     NeMoSpeechLMMultiModalProcessor,
     NeMoSpeechLMProcessingInfo,
     _load_nemo_perception,
+    _maybe_mount_pe_encoder,
 )
 from nemo.collections.speechlm2.vllm.salm.backends import HybridBackend, make_backend
 from nemo.collections.speechlm2.vllm.salm.config import _AUDIO_PLACEHOLDER
@@ -104,13 +105,7 @@ class NeMoSpeechLMForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"audio"}):
             self.perception = _load_nemo_perception(config.perception)
-
-        # A ParallelExpertEncoder performs its own context-preserving long-form
-        # streaming, so it must be fed the full audio as one long sequence rather
-        # than pre-split via parts.encoder_chunking. Detect it once here so
-        # _process_audio can bypass the naive chunker for PE checkpoints while
-        # still honoring encoder_chunk_size_seconds for ordinary encoders.
-        from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
+            _maybe_mount_pe_encoder(self.perception, getattr(config, "pe_encoder_path", None))
 
         self._uses_pe_encoder = isinstance(getattr(self.perception, "encoder", None), ParallelExpertEncoder)
 
@@ -156,14 +151,6 @@ class NeMoSpeechLMForConditionalGeneration(
 
         with torch.no_grad():
             if self._uses_pe_encoder:
-                # PE encoder: run perception once over the full audio and treat its
-                # output as a single long encoded sequence per row. The encoder does
-                # its own context-preserving long-form streaming internally (forward
-                # -> _forward_chunked, with streaming Sortformer cache/FIFO). We
-                # deliberately do NOT use parts.encoder_chunking here, and we ignore
-                # any ``encoder_chunk_size_seconds`` baked into the checkpoint
-                # config: that naive time-splitting severs the cross-time context
-                # (diarization / translation) the PE encoder relies on.
                 audio_embs, audio_emb_lens = self.perception(
                     input_signal=audio_signal, input_signal_length=audio_lengths
                 )

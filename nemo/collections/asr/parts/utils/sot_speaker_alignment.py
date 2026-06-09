@@ -22,8 +22,8 @@ from typing import Optional, Sequence
 import numpy as np
 import torch
 
-SPEAKER_TOKEN_PATTERN = re.compile(r"\[s(\d+)\]")
-_SPEAKER_TOKEN_SPLIT_PATTERN = re.compile(r"(\[s\d+\])")
+SPEAKER_TOKEN_PATTERN = re.compile(r"<spk:(\d+)>")
+_SPEAKER_TOKEN_SPLIT_PATTERN = re.compile(r"(<spk:\d+>)")
 
 __all__ = [
     "SPEAKER_TOKEN_PATTERN",
@@ -42,12 +42,26 @@ __all__ = [
 
 
 def has_speaker_tokens(text: Optional[str]) -> bool:
-    """Return True if text contains SOT speaker tags such as ``[s0]``."""
+    """Return True if text contains SOT speaker tags such as ``<spk:0>``.
+
+    Args:
+        text (Optional[str]): Input text that may contain speaker tags.
+
+    Returns:
+        bool: True if at least one ``<spk:N>`` speaker tag is present.
+    """
     return bool(text and SPEAKER_TOKEN_PATTERN.search(text))
 
 
 def sl_to_wl_sot(text: str) -> str:
-    """Convert segment-level SOT text to word-level SOT text."""
+    """Convert segment-level SOT text to word-level SOT text.
+
+    Args:
+        text (str): Segment-level SOT text where a speaker tag precedes each segment.
+
+    Returns:
+        str: Word-level SOT text where a speaker tag precedes every word.
+    """
     parts = _SPEAKER_TOKEN_SPLIT_PATTERN.split(text)
     result = []
     current_token = None
@@ -66,7 +80,14 @@ def sl_to_wl_sot(text: str) -> str:
 
 
 def parse_speaker_tokens(text: str) -> list[int]:
-    """Extract one forward-filled speaker index per word from SOT text."""
+    """Extract one forward-filled speaker index per word from SOT text.
+
+    Args:
+        text (str): SOT text containing ``<spk:N>`` speaker tags.
+
+    Returns:
+        list[int]: Speaker index for each word; words before the first tag are dropped.
+    """
     parts = _SPEAKER_TOKEN_SPLIT_PATTERN.split(text)
     spk_seq: list[int] = []
     current_spk = -1
@@ -83,7 +104,15 @@ def parse_speaker_tokens(text: str) -> list[int]:
 
 
 def get_text_speaker_char_counts(text: str, num_speakers: int) -> np.ndarray:
-    """Estimate per-speaker text mass from word character counts."""
+    """Estimate per-speaker text mass from word character counts.
+
+    Args:
+        text (str): SOT text containing ``<spk:N>`` speaker tags.
+        num_speakers (int): Number of speaker slots in the output vector.
+
+    Returns:
+        np.ndarray: Shape ``(num_speakers,)`` normalized character-count distribution.
+    """
     parts = _SPEAKER_TOKEN_SPLIT_PATTERN.split(text)
     char_counts = np.zeros(num_speakers, dtype=np.float32)
     current_spk = -1
@@ -110,15 +139,24 @@ def ensure_single_speaker_sot(
 ) -> tuple[str, int, bool]:
     """Prefix no-speaker text with a single SOT speaker tag.
 
-    Returns ``(text, speaker_index, changed)``. Existing SOT text is returned
-    unchanged with ``speaker_index=-1`` and ``changed=False``.
+    Existing SOT text is returned unchanged with ``speaker_index=-1`` and ``changed=False``.
+
+    Args:
+        text (Optional[str]): Input text, possibly without speaker tags.
+        num_speakers (int): Number of speakers to sample a tag from.
+        randomize (bool): If True, pick a random speaker index; otherwise use 0.
+        rng (Optional[random.Random]): RNG used when ``randomize`` is True.
+
+    Returns:
+        tuple[str, int, bool]: ``(text, speaker_index, changed)`` where ``changed``
+            indicates whether a tag was inserted.
     """
     text = text or ""
     if has_speaker_tokens(text):
         return text, -1, False
     rng = rng or random
     spk_idx = rng.randint(0, num_speakers - 1) if randomize else 0
-    return f"[s{spk_idx}] {text}", spk_idx, True
+    return f"<spk:{spk_idx}> {text}", spk_idx, True
 
 
 def dtw_cost_batch(
@@ -128,7 +166,18 @@ def dtw_cost_batch(
     num_speakers: int,
     token_weights: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Compute DTW costs for a batch of speaker-column permutations."""
+    """Compute DTW costs for a batch of speaker-column permutations.
+
+    Args:
+        activity (np.ndarray): Shape ``(T, N)`` frame-level speaker activity.
+        spk_seq_arr (np.ndarray): Shape ``(num_tokens,)`` per-word speaker indices.
+        perm_batch (np.ndarray): Shape ``(P, N)`` speaker-column permutations to score.
+        num_speakers (int): Number of valid speakers (tokens at/above this are ignored).
+        token_weights (Optional[np.ndarray]): Shape ``(num_tokens,)`` per-token cost weights.
+
+    Returns:
+        np.ndarray: Shape ``(P,)`` normalized DTW cost for each permutation.
+    """
     num_tokens = spk_seq_arr.shape[0]
     num_frames = activity.shape[0]
     num_perms = perm_batch.shape[0]
@@ -165,7 +214,16 @@ def dtw_cost_batch(
 
 
 def speaker_freq_cost_batch(text_freq: np.ndarray, rttm_freq: np.ndarray, perm_batch: np.ndarray) -> np.ndarray:
-    """L1 mismatch between text and RTTM speaker frequency under each permutation."""
+    """L1 mismatch between text and RTTM speaker frequency under each permutation.
+
+    Args:
+        text_freq (np.ndarray): Shape ``(N,)`` per-speaker text frequency distribution.
+        rttm_freq (np.ndarray): Shape ``(N,)`` per-speaker RTTM activity distribution.
+        perm_batch (np.ndarray): Shape ``(P, N)`` speaker-column permutations to score.
+
+    Returns:
+        np.ndarray: Shape ``(P,)`` L1 distance for each permutation.
+    """
     rttm_freq_perm = rttm_freq[perm_batch]
     return np.abs(text_freq - rttm_freq_perm).sum(axis=1).astype(np.float32)
 
@@ -177,7 +235,18 @@ def dtw_cost(
     num_speakers: int,
     token_weights: Optional[np.ndarray] = None,
 ) -> float:
-    """Compute DTW cost for a single speaker-column permutation."""
+    """Compute DTW cost for a single speaker-column permutation.
+
+    Args:
+        activity (np.ndarray): Shape ``(T, N)`` frame-level speaker activity.
+        spk_seq_arr (np.ndarray): Shape ``(num_tokens,)`` per-word speaker indices.
+        perm (Sequence[int]): Speaker-column permutation to score.
+        num_speakers (int): Number of valid speakers (tokens at/above this are ignored).
+        token_weights (Optional[np.ndarray]): Shape ``(num_tokens,)`` per-token cost weights.
+
+    Returns:
+        float: Normalized DTW cost for the permutation.
+    """
     perm_batch = np.array([perm], dtype=np.intp)
     costs = dtw_cost_batch(activity, spk_seq_arr, perm_batch, num_speakers, token_weights)
     return float(costs[0])
@@ -189,7 +258,18 @@ def fix_speaker_activity(
     num_speakers: int,
     max_permutable: Optional[int] = None,
 ) -> torch.Tensor:
-    """Align RTTM speaker-activity columns with SOT speaker-token order."""
+    """Align RTTM speaker-activity columns with SOT speaker-token order.
+
+    Args:
+        cut_or_text (Union[Cut, str]): A Lhotse cut with a ``text`` attribute, or raw SOT text.
+        speaker_activity (torch.Tensor): Shape ``(T, N)`` frame-level activity to reorder.
+        num_speakers (int): Number of speakers used to bound the permutation search.
+        max_permutable (Optional[int]): Max active speakers to brute-force permute over;
+            defaults to ``num_speakers + 1``.
+
+    Returns:
+        torch.Tensor: Shape ``(T, N)`` activity with columns reordered to match text speaker order.
+    """
     text = getattr(cut_or_text, "text", cut_or_text) or ""
     if not text:
         return speaker_activity
@@ -256,7 +336,19 @@ def speaker_activity_from_cut(
     no_rttm_to_ones: bool = True,
     boundary_segments: bool = True,
 ) -> torch.Tensor:
-    """Build frame-level speaker activity targets from a Lhotse cut."""
+    """Build frame-level speaker activity targets from a Lhotse cut.
+
+    Args:
+        cut (Cut): Lhotse cut carrying RTTM/supervision speaker information.
+        num_speakers (int): Number of speaker slots in the target tensor.
+        num_sample_per_mel_frame (int): Audio samples per mel frame.
+        num_mel_frame_per_target_frame (int): Mel frames per output target frame.
+        no_rttm_to_ones (bool): If True, emit all-ones targets when no RTTM is present.
+        boundary_segments (bool): If True, include boundary segments when building targets.
+
+    Returns:
+        torch.Tensor: Shape ``(T, num_speakers)`` frame-level speaker activity targets.
+    """
     from nemo.collections.asr.parts.utils.asr_multispeaker_utils import speaker_to_target
 
     return speaker_to_target(
@@ -277,7 +369,20 @@ def collate_speaker_activity_targets(
     num_mel_frame_per_target_frame: int,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Collate and length-compute speaker activity targets."""
+    """Collate and length-compute speaker activity targets.
+
+    Args:
+        speaker_activities (list[torch.Tensor]): Per-example ``(T, N)`` activity tensors.
+        audio_lens (torch.Tensor): Shape ``(B,)`` per-example audio sample lengths.
+        num_speakers (int): Number of speaker columns to pad/truncate the targets to.
+        num_sample_per_mel_frame (int): Audio samples per mel frame.
+        num_mel_frame_per_target_frame (int): Mel frames per output target frame.
+        dtype (torch.dtype): Output dtype for the collated targets.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: ``(targets, target_length)`` where ``targets`` is
+            ``(B, T, num_speakers)`` and ``target_length`` is ``(B,)``.
+    """
     from lhotse.dataset.collation import collate_matrices
     from nemo.collections.asr.parts.utils.asr_multispeaker_utils import get_hidden_length_from_sample_length
 

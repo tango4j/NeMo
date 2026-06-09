@@ -14,7 +14,7 @@
 import logging
 import os
 from itertools import groupby
-from typing import Iterable, Optional, Union
+from typing import Iterable, Union
 
 import numpy as np
 import torch
@@ -74,6 +74,9 @@ class SALMDataset(torch.utils.data.Dataset):
         - The input_ids and loss_mask will be expanded during model forward pass to account for
           the variable-length audio segments that replace each audio_locator_tag token
         - SOT speaker tags stay regular text tokens here; normalization and aliasing happen upstream.
+        - Auxiliary SOT mode (off by default) is opt-in via :meth:`configure_sot` /
+          :meth:`with_speaker_targets`; it adds RTTM-derived ``spk_targets`` to each batch
+          without changing the base constructor or the default single-speaker behavior.
     """
 
     def __init__(self, tokenizer: AutoTokenizer) -> None:
@@ -88,6 +91,41 @@ class SALMDataset(torch.utils.data.Dataset):
             mono_downmix=True,
         )
 
+    @classmethod
+    def with_speaker_targets(cls, tokenizer: AutoTokenizer, sot_cfg: dict) -> "SALMDataset":
+        """Build a dataset with the auxiliary SOT speaker-activity mode enabled.
+
+        Args:
+            tokenizer (AutoTokenizer): Tokenizer passed through to ``__init__``.
+            sot_cfg (dict): Speaker-activity settings (see :meth:`configure_sot`).
+
+        Returns:
+            SALMDataset: a configured instance emitting ``spk_targets``.
+        """
+        return cls(tokenizer=tokenizer).configure_sot(sot_cfg)
+
+    def configure_sot(self, sot_cfg: dict) -> "SALMDataset":
+        """Opt into the auxiliary SOT mode (off by default; base ``__init__`` untouched).
+
+        When enabled, each batch additionally carries RTTM-derived speaker-activity
+        targets (``spk_targets`` / ``spk_target_length``).
+
+        Args:
+            sot_cfg (dict): Speaker-activity settings (``num_speakers``,
+                ``window_stride``, ``sample_rate``, ``subsampling_factor``, ...).
+
+        Returns:
+            SALMDataset: ``self``, for chaining.
+        """
+        self.sot_cfg = sot_cfg
+        self.emit_speaker_targets = True
+        self.num_speakers = sot_cfg.get('num_speakers', 4)
+        self.randomize_single_speaker_index = sot_cfg.get('randomize_single_speaker_index', False)
+        self.no_rttm_to_ones = sot_cfg.get('no_rttm_to_ones', True)
+        self.num_sample_per_mel_frame = int(sot_cfg.get('window_stride', 0.01) * sot_cfg.get('sample_rate', 16000))
+        self.num_mel_frame_per_target_frame = int(sot_cfg.get('subsampling_factor', 8))
+        return self
+
     def __getitem__(self, conversations: CutSet) -> dict | None:
         # Note: the function call below may filter out some or all conversations due to audio loading issues.
         # If all conversations are filtered out, we'll return None, and expect users to wrap this dataset
@@ -101,7 +139,7 @@ class SALMDataset(torch.utils.data.Dataset):
             return None
         if not conversations:
             return None
-        return {
+        batch = {
             "audios": audios,
             "audio_lens": audio_lens,
             "input_ids": left_collate_vectors([c.input_ids for c in conversations], padding_value=self.pad_id),
@@ -110,39 +148,26 @@ class SALMDataset(torch.utils.data.Dataset):
             ).to(torch.bool),
             "conversations": drop_in_memory_data(conversations),
         }
-
-
-class SALMSpkDataset(SALMDataset):
-    """SALM dataset variant that emits RTTM-derived SOT speaker activity targets."""
-
-    def __init__(self, tokenizer: AutoTokenizer, sot_cfg: Optional[dict] = None) -> None:
-        super().__init__(tokenizer=tokenizer)
-        sot_cfg = sot_cfg or {}
-        self.num_speakers = sot_cfg.get('num_speakers', 4)
-        self.randomize_single_speaker_index = sot_cfg.get('randomize_single_speaker_index', False)
-        self.no_rttm_to_ones = sot_cfg.get('no_rttm_to_ones', True)
-        self.num_sample_per_mel_frame = int(sot_cfg.get('window_stride', 0.01) * sot_cfg.get('sample_rate', 16000))
-        self.num_mel_frame_per_target_frame = int(sot_cfg.get('subsampling_factor', 8))
-
-    def __getitem__(self, conversations: CutSet) -> dict | None:
-        batch = super().__getitem__(conversations)
-        if batch is None:
-            return None
-
-        speaker_activities = self._build_speaker_activities(batch["conversations"])
-        if speaker_activities:
-            targets, target_length = collate_speaker_activity_targets(
-                speaker_activities,
-                batch["audio_lens"],
-                num_speakers=self.num_speakers,
-                num_sample_per_mel_frame=self.num_sample_per_mel_frame,
-                num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
-                dtype=batch["audios"].dtype,
-            )
-            batch["spk_targets"] = targets
-            batch["spk_target_length"] = target_length
-
+        if getattr(self, "emit_speaker_targets", False):
+            self._add_speaker_activity_targets(batch)
         return batch
+
+    # --- Auxiliary SOT speaker-activity mode (active only when sot_cfg is set) ---
+    def _add_speaker_activity_targets(self, batch: dict) -> None:
+        """Attach RTTM-derived ``spk_targets`` / ``spk_target_length`` to ``batch`` in place."""
+        speaker_activities = self._build_speaker_activities(batch["conversations"])
+        if not speaker_activities:
+            return
+        targets, target_length = collate_speaker_activity_targets(
+            speaker_activities,
+            batch["audio_lens"],
+            num_speakers=self.num_speakers,
+            num_sample_per_mel_frame=self.num_sample_per_mel_frame,
+            num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
+            dtype=batch["audios"].dtype,
+        )
+        batch["spk_targets"] = targets
+        batch["spk_target_length"] = target_length
 
     def _build_speaker_activities(self, conversations: CutSet) -> list[torch.Tensor]:
         speaker_activities = []
@@ -164,9 +189,8 @@ class SALMSpkDataset(SALMDataset):
                 new_text, spk_idx, changed = ensure_single_speaker_sot(
                     text, self.num_speakers, self.randomize_single_speaker_index
                 )
-                if changed:
-                    if spk_idx != 0:
-                        speaker_activity[:, [0, spk_idx]] = speaker_activity[:, [spk_idx, 0]]
+                if changed and spk_idx != 0:
+                    speaker_activity[:, [0, spk_idx]] = speaker_activity[:, [spk_idx, 0]]
 
                 speaker_activity = fix_speaker_activity(new_text, speaker_activity, self.num_speakers)
                 speaker_activities.append(speaker_activity)

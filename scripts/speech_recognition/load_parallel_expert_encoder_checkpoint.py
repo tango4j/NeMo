@@ -50,12 +50,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from nemo.collections.asr.modules.parallel_expert_encoder import (
-        load_parallel_expert_encoder_from_nemo,
-    )
+    from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoderPT
 
     print(f"Loading bundle from {args.nemo!r} ...", flush=True)
-    enc = load_parallel_expert_encoder_from_nemo(args.nemo, map_location="cpu")
+    enc = ParallelExpertEncoderPT.load_from_nemo(args.nemo, map_location="cpu")
     dev = torch.device(args.device)
     enc = enc.to(dev)
     enc.eval()

@@ -167,8 +167,8 @@ class NeMoSpeechLMForConditionalGeneration(
             if self._uses_pe_encoder:
                 # PE encoder: run perception once over the full audio and treat its
                 # output as a single long encoded sequence per row. The encoder does
-                # its own context-preserving long-form streaming internally (forward
-                # -> _forward_chunked, with streaming Sortformer cache/FIFO). We
+                # its own context-preserving long-form online inference internally (forward
+                # -> _forward_online, with streaming Sortformer cache/FIFO). We
                 # deliberately do NOT use parts.encoder_chunking here, and we ignore
                 # any ``encoder_chunk_size_seconds`` baked into the checkpoint
                 # config: that naive time-splitting severs the cross-time context

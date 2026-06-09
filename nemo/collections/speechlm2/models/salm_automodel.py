@@ -29,7 +29,7 @@ from transformers import GenerationConfig
 
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
-from nemo.collections.speechlm2.data.salm_dataset import SALMDataset, SALMSpkDataset, left_collate_vectors
+from nemo.collections.speechlm2.data.salm_dataset import SALMDataset, left_collate_vectors
 from nemo.collections.speechlm2.models.salm import _resolve_audios_in_prompt, replace_placeholders_and_build_targets
 from nemo.collections.speechlm2.parts.automodel_lora import ensure_lora_trainable, make_peft_config, maybe_install_lora
 from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
@@ -88,7 +88,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def build_dataset(tokenizer, data_cfg=None) -> SALMDataset:
         sot_cfg = data_cfg.get("sot_cfg", None) if data_cfg is not None else None
         if sot_cfg is not None:
-            return SALMSpkDataset(tokenizer=tokenizer, sot_cfg=sot_cfg)
+            return SALMDataset.with_speaker_targets(tokenizer, sot_cfg)
         return SALMDataset(tokenizer=tokenizer)
 
     @property
@@ -251,16 +251,9 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 "automodel path: SALM already computes CE inside loss_parallel(), so a "
                 "second CE term inside LSS would be double-counted."
             )
-        if loss_cfg.get("is_rnnt", False):
-            raise ValueError(
-                "model.lss_loss.is_rnnt must be False (or omitted) on the SALM automodel "
-                "path: SALM is AED-style and produces 3D (B, T, V) logits, not the 4D "
-                "RNNT joint tensor expected when is_rnnt=True."
-            )
         with open_dict(loss_cfg):
             loss_cfg.setdefault("pad_id", -100)
             loss_cfg.setdefault("include_ce_loss", False)
-            loss_cfg.setdefault("is_rnnt", False)
             if loss_cfg.get("speaker_token_ids", None) is None:
                 if not self.speaker_token_ids:
                     raise ValueError(
@@ -324,8 +317,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def _uses_parallel_expert_encoder(self) -> bool:
         """Whether the mounted perception encoder is a ``ParallelExpertEncoder``.
 
-        The PE encoder performs its own context-preserving long-form streaming
-        (``forward`` -> ``_forward_chunked``), so audio must be fed to it as a
+        The PE encoder performs its own context-preserving long-form online inference
+        (``forward`` -> ``_forward_online``), so audio must be fed to it as a
         single long sequence. The naive time-slicer in
         ``nemo.collections.speechlm2.parts.encoder_chunking`` severs the
         cross-time context that diarization / translation rely on and must NOT be
@@ -387,8 +380,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         if self._uses_parallel_expert_encoder():
             # PE encoder: encode the full audio in a single perception forward and
             # treat the output as one long encoded sequence per row. The encoder
-            # runs its own context-preserving long-form streaming internally
-            # (forward -> _forward_chunked); pre-splitting with parts.encoder_chunking
+            # runs its own context-preserving long-form online inference internally
+            # (forward -> _forward_online); pre-splitting with parts.encoder_chunking
             # would destroy the cross-time context that diarization / translation
             # rely on, so it is intentionally bypassed. diar_preds (RTTM injection)
             # is threaded in via perception_kwargs above during training.
@@ -850,8 +843,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             if self._uses_parallel_expert_encoder():
                 # PE encoder: run perception once over the full audio and treat its
                 # output as a single long encoded sequence. The encoder performs its
-                # own context-preserving long-form streaming internally (forward ->
-                # _forward_chunked, with streaming Sortformer cache/FIFO). We
+                # own context-preserving long-form online inference internally (forward ->
+                # _forward_online, with streaming Sortformer cache/FIFO). We
                 # deliberately do NOT use parts.encoder_chunking here: that naive
                 # time-splitting severs the cross-time context that diarization /
                 # translation depend on.
