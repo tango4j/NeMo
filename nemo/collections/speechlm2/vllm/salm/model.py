@@ -28,7 +28,7 @@ populates ``text_config.layer_types`` with all-attention markers (vLLM's
 granite-4.0-micro escape hatch).
 
 Requires NeMo toolkit for the audio encoder:
-    pip install nemo_toolkit[asr]
+    pip install 'nemo-toolkit[asr]'
 """
 
 from collections.abc import Iterable
@@ -150,6 +150,13 @@ class NeMoSpeechLMForConditionalGeneration(
         audio_signal = audio_signal.to(device=device, dtype=_AUDIO_INPUT_DTYPE)
         audio_lengths = audio_input.audio_signal_length.to(device=device)
 
+        # Mirrors training (``encode_audio_with_optional_chunking``): when the
+        # checkpoint was trained with a chunked encoder (e.g. SALMAutomodel
+        # default 30 s), long audios are split into chunks before the perception
+        # forward and the per-chunk embeddings are concatenated. ``None``
+        # disables chunking and runs a single forward over the full batch.
+        # A ParallelExpertEncoder instead runs its own context-preserving online
+        # inference over the full audio, so it bypasses the chunking helper.
         with torch.no_grad():
             if self._uses_pe_encoder:
                 audio_embs, audio_emb_lens = self.perception(
@@ -157,11 +164,6 @@ class NeMoSpeechLMForConditionalGeneration(
                 )
                 audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
             else:
-                # Ordinary encoder: mirrors training (``encode_audio_with_optional_chunking``).
-                # When the checkpoint was trained with a chunked encoder, long
-                # audios are split into chunks before the perception forward and the
-                # per-chunk embeddings are concatenated. ``None`` disables chunking
-                # and runs a single forward over the full batch.
                 audio_embeds = encode_audio_with_optional_chunking(
                     self.perception,
                     audio_signal,
