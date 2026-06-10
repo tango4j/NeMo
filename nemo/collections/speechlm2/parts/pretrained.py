@@ -273,6 +273,8 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
             if "perception" in model.cfg and "preprocessor" in model.cfg.perception:
                 model.cfg.perception.preprocessor.normalize = None
     except (AttributeError, TypeError):
+        # cfg may lack this nested key or be a non-editable structure; the runtime
+        # featurizer.normalize disabling above is the functional change that matters.
         pass
 
     model.perception.encoder = pe_encoder

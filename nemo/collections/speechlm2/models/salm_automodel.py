@@ -476,15 +476,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         )
         num_frames = (inputs["target_ids"] != -100).long().sum()
 
-        # Latent speaker supervision loss (auxiliary, optional).
-        if self.lss_loss is not None and num_frames > 0:
-            logits = forward_outputs["logits"]
-            if isinstance(logits, DTensor):
-                logits = logits.full_tensor()
-            log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
-            loss = loss + self.lss_loss(log_probs=log_probs, labels=inputs["target_ids"])
-
-        B, T = inputs["input_embeds"].shape[:2]
         # Match Automodel's training recipe: normalize CE by the *global* token count across
         # the DP group rather than each rank's local count. With variable-length speech batches
         # a local normalizer makes every rank contribute a differently-scaled gradient, and
@@ -509,6 +500,14 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 ignore_index=-100,
             )
             loss = loss_sum * dp_size / num_frames_global
+
+        # Latent speaker supervision loss (auxiliary, optional).
+        if self.lss_loss is not None and num_frames > 0:
+            logits = forward_outputs["logits"]
+            if isinstance(logits, DTensor):
+                logits = logits.full_tensor()
+            log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+            loss = loss + self.lss_loss(log_probs=log_probs, labels=inputs["target_ids"])
 
         # Display the local per-token CE so logged values stay on the same scale as before
         # this fix. The gradient-carrying ``loss`` above is the globally-normalized quantity.
@@ -887,6 +886,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     try:
                         module.config.use_mamba_kernels = False
                     except AttributeError:
+                        # Some config objects don't expose this attribute; the module-level
+                        # is_fast_path_available toggle above is the effective kernel switch.
                         pass
 
         logging.info(

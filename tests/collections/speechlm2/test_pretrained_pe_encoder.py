@@ -19,7 +19,6 @@ import torch
 from omegaconf import OmegaConf
 
 import nemo.collections.speechlm2.parts.pretrained as pretrained
-from nemo.collections.speechlm2.parts.pretrained import setup_parallel_expert_encoder
 
 PE_D_MODEL = 512
 
@@ -74,7 +73,7 @@ def test_noop_when_path_unset(monkeypatch, pe_encoder_path):
     )
     model = _build_model(pe_encoder_path=pe_encoder_path)
     original_encoder = model.perception.encoder
-    assert setup_parallel_expert_encoder(model) is None
+    assert pretrained.setup_parallel_expert_encoder(model) is None
     assert model.perception.encoder is original_encoder
 
 
@@ -82,7 +81,7 @@ def test_noop_when_path_unset(monkeypatch, pe_encoder_path):
 def test_raises_when_no_perception(patched_pe):
     model = _build_model(with_perception=False)
     with pytest.raises(RuntimeError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
@@ -90,14 +89,14 @@ def test_raises_when_no_perception(patched_pe):
 def test_raises_on_non_nemo_path(patched_pe, bad_path):
     model = _build_model(pe_encoder_path=bad_path)
     with pytest.raises(ValueError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
 def test_raises_when_perception_has_no_encoder(patched_pe):
     model = _build_model(with_encoder=False)
     with pytest.raises(RuntimeError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
@@ -105,28 +104,28 @@ def test_raises_when_not_pe_bundle(monkeypatch):
     monkeypatch.setattr(pretrained.ParallelExpertEncoderPT, "is_pe_nemo", lambda path: False)
     model = _build_model()
     with pytest.raises(ValueError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
 def test_raises_on_encoder_d_model_mismatch(patched_pe):
     model = _build_model(encoder_d_model=PE_D_MODEL // 2)
     with pytest.raises(ValueError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
 def test_raises_on_adapter_d_model_mismatch(patched_pe):
     model = _build_model(adapter_d_model=PE_D_MODEL + 1)  # encoder has no d_model -> adapter check fires
     with pytest.raises(ValueError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
 def test_raises_on_proj_in_features_mismatch(patched_pe):
     model = _build_model(proj=torch.nn.Linear(PE_D_MODEL + 7, 10))
     with pytest.raises(ValueError):
-        setup_parallel_expert_encoder(model)
+        pretrained.setup_parallel_expert_encoder(model)
 
 
 @pytest.mark.unit
@@ -136,7 +135,7 @@ def test_happy_path_mounts_and_disables_normalization(patched_pe):
         adapter_d_model=PE_D_MODEL,
         proj=torch.nn.Linear(PE_D_MODEL, 10),
     )
-    setup_parallel_expert_encoder(model)
+    pretrained.setup_parallel_expert_encoder(model)
 
     assert model.perception.encoder is patched_pe
     assert model.perception.preprocessor.featurizer.normalize is None

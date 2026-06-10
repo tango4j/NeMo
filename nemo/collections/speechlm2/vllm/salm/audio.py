@@ -122,6 +122,8 @@ def _maybe_mount_pe_encoder(perception: nn.Module, pe_encoder_path: str | None) 
     try:
         perception.preprocessor.featurizer.normalize = None
     except AttributeError:
+        # Preprocessor/featurizer layout varies across backends; if the attribute is
+        # absent there is no outer normalization to disable, so skipping is correct.
         pass
 
     perception.encoder = pe_encoder
