@@ -31,7 +31,6 @@ import torch
 from lhotse import CutSet, SupervisionSegment
 from lhotse.testing.dummies import dummy_cut, dummy_recording
 from omegaconf import DictConfig
-from torch import nn
 
 from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
 from nemo.collections.common.data.lhotse import NeMoMultimodalConversation
