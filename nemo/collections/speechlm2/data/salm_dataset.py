@@ -120,7 +120,6 @@ class SALMDataset(torch.utils.data.Dataset):
         self.sot_cfg = sot_cfg
         self.emit_speaker_targets = True
         self.num_speakers = sot_cfg.get('num_speakers', 4)
-        self.randomize_single_speaker_index = sot_cfg.get('randomize_single_speaker_index', False)
         self.no_rttm_to_ones = sot_cfg.get('no_rttm_to_ones', True)
         self.num_sample_per_mel_frame = int(sot_cfg.get('window_stride', 0.01) * sot_cfg.get('sample_rate', 16000))
         self.num_mel_frame_per_target_frame = int(sot_cfg.get('subsampling_factor', 8))
@@ -186,11 +185,7 @@ class SALMDataset(torch.utils.data.Dataset):
                 )
 
                 text = self._audio_turn_text(turn, cut)
-                new_text, spk_idx, changed = ensure_single_speaker_sot(
-                    text, self.num_speakers, self.randomize_single_speaker_index
-                )
-                if changed and spk_idx != 0:
-                    speaker_activity[:, [0, spk_idx]] = speaker_activity[:, [spk_idx, 0]]
+                new_text, _, _ = ensure_single_speaker_sot(text)
 
                 speaker_activity = fix_speaker_activity(new_text, speaker_activity, self.num_speakers)
                 speaker_activities.append(speaker_activity)

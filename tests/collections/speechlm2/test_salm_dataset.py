@@ -20,7 +20,7 @@ from lhotse.testing.dummies import dummy_cut, dummy_recording
 import nemo.collections.speechlm2.data.salm_dataset as salm_dataset_module
 from nemo.collections.common.data.lhotse import NeMoMultimodalConversation
 from nemo.collections.common.data.lhotse.text_adapters import AudioTurn, TextTurn
-from nemo.collections.speechlm2.data import SALMSpkDataset
+from nemo.collections.speechlm2.data import SALMDataset
 
 
 class _Tokenizer:
@@ -30,7 +30,7 @@ class _Tokenizer:
 
 @pytest.mark.unit
 def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
-    text = "[s0] hello world [s1] yes now"
+    text = "<spk:0> hello world <spk:1> yes now"
     cut = dummy_cut(0, duration=0.04, recording=dummy_recording(0, duration=0.04, with_data=True))
     cut.custom = {}
     cut.supervisions = [
@@ -48,7 +48,7 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
     conversation.mask = torch.tensor([False, True, True])
     conversations = CutSet([conversation])
 
-    def fake_audio_collate(conversations):
+    def fake_audio_collate(conversations, *args, **kwargs):
         return torch.zeros(1, 640), torch.tensor([640], dtype=torch.long), conversations
 
     def fake_speaker_activity_from_cut(cut, **kwargs):
@@ -65,7 +65,7 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
     monkeypatch.setattr(salm_dataset_module, "collate_conversation_audio_fault_tolerant", fake_audio_collate)
     monkeypatch.setattr(salm_dataset_module, "speaker_activity_from_cut", fake_speaker_activity_from_cut)
 
-    dataset = SALMSpkDataset(
+    dataset = SALMDataset.with_speaker_targets(
         _Tokenizer(),
         sot_cfg={
             "num_speakers": 2,

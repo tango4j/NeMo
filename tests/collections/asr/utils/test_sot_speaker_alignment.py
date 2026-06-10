@@ -39,7 +39,7 @@ def test_sl_and_wl_sot_have_same_speaker_sequence():
 
 @pytest.mark.unit
 def test_ensure_single_speaker_sot_prefixes_no_token_text():
-    text, spk_idx, changed = ensure_single_speaker_sot("hello world", num_speakers=4)
+    text, spk_idx, changed = ensure_single_speaker_sot("hello world")
 
     assert text == "<spk:0> hello world"
     assert spk_idx == 0
@@ -48,7 +48,7 @@ def test_ensure_single_speaker_sot_prefixes_no_token_text():
 
 @pytest.mark.unit
 def test_ensure_single_speaker_sot_keeps_existing_tokens():
-    text, spk_idx, changed = ensure_single_speaker_sot("<spk:2> hello", num_speakers=4)
+    text, spk_idx, changed = ensure_single_speaker_sot("<spk:2> hello")
 
     assert text == "<spk:2> hello"
     assert spk_idx == -1

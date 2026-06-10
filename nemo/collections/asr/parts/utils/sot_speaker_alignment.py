@@ -14,7 +14,6 @@
 """Utilities for SOT-style speaker tokens and speaker-activity alignment."""
 # pylint: disable=import-error
 
-import random
 import re
 from itertools import permutations
 from typing import Optional, Sequence
@@ -131,21 +130,13 @@ def get_text_speaker_char_counts(text: str, num_speakers: int) -> np.ndarray:
     return char_counts
 
 
-def ensure_single_speaker_sot(
-    text: Optional[str],
-    num_speakers: int,
-    randomize: bool = False,
-    rng: Optional[random.Random] = None,
-) -> tuple[str, int, bool]:
-    """Prefix no-speaker text with a single SOT speaker tag.
+def ensure_single_speaker_sot(text: Optional[str]) -> tuple[str, int, bool]:
+    """Prefix no-speaker text with the ``<spk:0>`` SOT speaker tag.
 
     Existing SOT text is returned unchanged with ``speaker_index=-1`` and ``changed=False``.
 
     Args:
         text (Optional[str]): Input text, possibly without speaker tags.
-        num_speakers (int): Number of speakers to sample a tag from.
-        randomize (bool): If True, pick a random speaker index; otherwise use 0.
-        rng (Optional[random.Random]): RNG used when ``randomize`` is True.
 
     Returns:
         tuple[str, int, bool]: ``(text, speaker_index, changed)`` where ``changed``
@@ -154,9 +145,7 @@ def ensure_single_speaker_sot(
     text = text or ""
     if has_speaker_tokens(text):
         return text, -1, False
-    rng = rng or random
-    spk_idx = rng.randint(0, num_speakers - 1) if randomize else 0
-    return f"<spk:{spk_idx}> {text}", spk_idx, True
+    return f"<spk:0> {text}", 0, True
 
 
 def dtw_cost_batch(

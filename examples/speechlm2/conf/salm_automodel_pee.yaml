@@ -32,6 +32,35 @@ model:
   # Set to null to disable encoder chunking and encode each audio row directly.
   encoder_chunk_size_seconds: 30.0
 
+  # ─── Parallel Expert Encoder (PEE) options ──────────────────────────────────
+  # PEE swaps the perception encoder for a ParallelExpertEncoder bundle (streaming
+  # Sortformer diarizer + Canary ASR encoder), letting SALM emit <spk:N>-tagged
+  # multi-speaker (SOT) transcripts. The three blocks below define the PEE recipe;
+  # remove them (and data.sot_cfg) to fall back to plain single-speaker SALM.
+
+  # Path to a ParallelExpertEncoderPT .nemo bundle, mounted onto perception.encoder
+  # at init. The bundle is not yet published to HuggingFace, so point this at a
+  # locally exported .nemo to enable PEE; null keeps the pretrained_asr encoder.
+  pe_encoder_path: null  # Plug-in PEE nemo checkpoint.
+
+  # Resolve the native <spk:N> speaker-token ids from the LLM tokenizer. Requires
+  # the patched "-spk" tokenizer (e.g. from patch_nano_v3_speaker_tokens.py) where
+  # <spk:0>..<spk:{max_speakers-1}> occupy contiguous ids starting at base_token_id.
+  speaker_tokens:
+    enable: true
+    template: "<spk:{i}>"   # speaker-token string format
+    max_speakers: 10        # number of contiguous <spk:N> entries to resolve
+    base_token_id: 100      # expected token id of <spk:0>
+
+  # Auxiliary Latent Speaker Supervision (LSS) loss. Its mere presence enables it
+  # (no enable flag); speaker_token_ids is auto-injected from speaker_tokens above.
+  # include_ce_loss MUST stay False — SALM already computes CE in loss_parallel().
+  lss_loss:
+    _target_: nemo.collections.common.losses.latent_speaker_supervision_loss.LatentSpeakerSupervisionLoss
+    speaker_loss_weight: 1.0
+    speaker_label_smoothing: 0.0
+    per_speaker_normalization: true
+
   # Uncomment the block below to enable LoRA on the LLM via Automodel.
   # LoRA parameters are kept trainable even when the LLM is frozen.
   # lora:
@@ -179,6 +208,16 @@ trainer:
     #   wrap_outer_model: true             # Apply FSDP to the outer model wrapper
 
 data:
+  # RTTM/SOT speaker-activity targets for ParallelExpertEncoder training. Active for
+  # the PEE recipe; requires cuts/manifests that carry rttm_filepath entries and SOT
+  # (<spk:N>-tagged) text. Comment out to train SALM without speaker targets.
+  sot_cfg:
+    num_speakers: 4                            # max speakers per sample (matches PEE n_spk)
+    sample_rate: ${data.train_ds.sample_rate}
+    window_stride: 0.01                        # preprocessor hop in seconds
+    subsampling_factor: 8                      # encoder output stride (mel -> target frames)
+    no_rttm_to_ones: true                      # cuts without RTTM -> single full-duration speaker
+
   train_ds:
     sample_rate: 16000
     prompt_format: ${model.prompt_format}
