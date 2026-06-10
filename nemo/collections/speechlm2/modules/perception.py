@@ -111,11 +111,11 @@ class AudioPerceptionModule(NeuralModule, Exportable):
         return processed_signal, processed_signal_length
 
     @staticmethod
-    def _encoder_accepts_diar_preds(encoder: nn.Module) -> bool:
+    def _encoder_accepts_spk_targets(encoder: nn.Module) -> bool:
         if hasattr(encoder, "diarization_model") and hasattr(encoder, "diar_kernel"):
             return True
         try:
-            return "diar_preds" in inspect.signature(encoder.forward).parameters
+            return "spk_targets" in inspect.signature(encoder.forward).parameters
         except (TypeError, ValueError):
             return False
 
@@ -128,7 +128,7 @@ class AudioPerceptionModule(NeuralModule, Exportable):
         processed_signal=None,
         processed_signal_length=None,
         return_encoder_emb=False,
-        diar_preds=None,
+        spk_targets=None,
     ):
         processed_signal, processed_signal_length = self.maybe_preprocess_audio(
             input_signal, input_signal_length, processed_signal, processed_signal_length
@@ -144,8 +144,8 @@ class AudioPerceptionModule(NeuralModule, Exportable):
             )
         else:
             encoder_kwargs = {"audio_signal": processed_signal, "length": processed_signal_length}
-            if diar_preds is not None and self._encoder_accepts_diar_preds(self.encoder):
-                encoder_kwargs["diar_preds"] = diar_preds
+            if spk_targets is not None and self._encoder_accepts_spk_targets(self.encoder):
+                encoder_kwargs["spk_targets"] = spk_targets
             encoder_emb, encoded_len = self.encoder(**encoder_kwargs)
         encoded, encoded_len = self.modality_adapter(audio_signal=encoder_emb, length=encoded_len)
 

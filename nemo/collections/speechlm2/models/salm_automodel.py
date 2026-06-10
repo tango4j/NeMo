@@ -335,7 +335,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         ``is_inference`` controls the speaker activity fed to a
         ``ParallelExpertEncoder``. When ``False`` (training), RTTM-derived
-        ``batch["spk_targets"]`` are injected as ``diar_preds``. When ``True``
+        ``batch["spk_targets"]`` are injected as ``spk_targets``. When ``True``
         (validation / real inference), the targets are ignored so the encoder
         runs its embedded Sortformer to predict diarization, matching deployment
         where ground-truth RTTM is unavailable.
@@ -348,7 +348,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             "input_signal_length": batch["audio_lens"],
         }
         if not is_inference and batch.get("spk_targets", None) is not None:
-            perception_kwargs["diar_preds"] = batch["spk_targets"]
+            perception_kwargs["spk_targets"] = batch["spk_targets"]
         if self._uses_parallel_expert_encoder():
             audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
             audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
@@ -530,6 +530,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         self._partial_val_loss_sums = defaultdict(list)
         self._partial_val_corrects = defaultdict(list)
         self._partial_val_num_frames = defaultdict(list)
+        self._partial_val_lss = defaultdict(list)
 
     def on_validation_epoch_end(self) -> None:
         val_losses = []
@@ -555,7 +556,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         self.log("val_loss", torch.stack(val_losses).mean(), on_epoch=True, sync_dist=True)
         self.log("val_acc", torch.stack(accuracies).mean(), on_epoch=True, sync_dist=True)
 
-        if self.lss_loss is not None:
+        if getattr(self, "lss_loss", None) is not None:
             lss_vals = []
             for name, vals in self._partial_val_lss.items():
                 val_lss = torch.stack(vals).mean()
@@ -567,6 +568,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         self._partial_val_loss_sums.clear()
         self._partial_val_corrects.clear()
         self._partial_val_num_frames.clear()
+        self._partial_val_lss.clear()
 
     def _reduce_validation_metric_sums(self, metric_sums: Tensor, group) -> Tensor:
         if group is not None and dist.is_available() and dist.is_initialized():
@@ -675,7 +677,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         prompts: list[list[dict[str]]] | torch.Tensor,
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
-        diar_preds: torch.Tensor = None,
+        spk_targets: torch.Tensor = None,
         generation_config: GenerationConfig = None,
         enable_thinking: bool | None = None,
         **generation_kwargs,
@@ -740,7 +742,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 The number of audios must correspond to the number of occurrences of <audio_locator_tag> in prompts.
                 Each prompt can have multiple audios.
             audio_lens: Optional. Length of each audio example.
-            diar_preds: Optional ``(B, T, n_spk)`` speaker-activity tensor (e.g. oracle / RTTM-derived
+            spk_targets: Optional ``(B, T, n_spk)`` speaker-activity tensor (e.g. oracle / RTTM-derived
                 diarization) injected into the perception encoder. Only effective when the mounted
                 encoder is a ``ParallelExpertEncoder`` (i.e. ``model.pe_encoder_path`` was set); it
                 overrides the encoder's embedded Sortformer prediction for this call. When ``None``

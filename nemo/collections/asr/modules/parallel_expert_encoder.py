@@ -388,15 +388,15 @@ class ParallelExpertEncoder(nn.Module):
         return pe
 
     @staticmethod
-    def _align_diar_frames(diar_preds: torch.Tensor, target_len: int) -> torch.Tensor:
-        """Pad-by-repeat or truncate ``diar_preds`` to ``target_len`` along time."""
-        cur_len = diar_preds.shape[1]
+    def _align_diar_frames(spk_targets: torch.Tensor, target_len: int) -> torch.Tensor:
+        """Pad-by-repeat or truncate ``spk_targets`` to ``target_len`` along time."""
+        cur_len = spk_targets.shape[1]
         if cur_len < target_len:
-            last = diar_preds[:, -1:, :]
-            diar_preds = torch.cat([diar_preds, last.repeat(1, target_len - cur_len, 1)], dim=1)
+            last = spk_targets[:, -1:, :]
+            spk_targets = torch.cat([spk_targets, last.repeat(1, target_len - cur_len, 1)], dim=1)
         elif cur_len > target_len:
-            diar_preds = diar_preds[:, :target_len, :]
-        return diar_preds
+            spk_targets = spk_targets[:, :target_len, :]
+        return spk_targets
 
     @staticmethod
     def _match_module_io(tensor: torch.Tensor, module: nn.Module) -> torch.Tensor:
@@ -414,22 +414,22 @@ class ParallelExpertEncoder(nn.Module):
             return tensor
         return tensor.to(device=param.device, dtype=param.dtype)
 
-    def _fuse_diar_and_asr(self, asr_encoded: torch.Tensor, diar_preds: torch.Tensor) -> torch.Tensor:
+    def _fuse_diar_and_asr(self, asr_encoded: torch.Tensor, spk_targets: torch.Tensor) -> torch.Tensor:
         """Fuse ASR states with speaker-activity preds (LayerNorm + sinusoidal kernel + ADD).
 
         Args:
             asr_encoded (Tensor): ASR encoder output. Shape ``(B, D, T_asr)``.
-            diar_preds (Tensor): Speaker-activity predictions. Shape ``(B, T_diar, n_spk)``.
+            spk_targets (Tensor): Speaker-activity predictions. Shape ``(B, T_diar, n_spk)``.
 
         Returns:
             Fused encoder output. Shape ``(B, D, T_asr)``.
         """
         asr_enc_states = asr_encoded.transpose(1, 2)  # (B, T, D)
-        diar_preds = self._align_diar_frames(diar_preds, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
+        spk_targets = self._align_diar_frames(spk_targets, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
 
         asr_enc_states = self.asr_norm(asr_enc_states)
-        diar_preds = self.diar_norm(diar_preds)
-        speaker_infusion = torch.matmul(diar_preds, self.diar_kernel.to(diar_preds.dtype))
+        spk_targets = self.diar_norm(spk_targets)
+        speaker_infusion = torch.matmul(spk_targets, self.diar_kernel.to(spk_targets.dtype))
         fused = speaker_infusion + asr_enc_states
 
         return fused.transpose(1, 2)  # (B, D, T)
@@ -439,7 +439,7 @@ class ParallelExpertEncoder(nn.Module):
         self,
         audio_signal,
         length,
-        diar_preds=None,
+        spk_targets=None,
     ):
         """Encode ``audio_signal``, optionally fusing diarization.
 
@@ -449,7 +449,7 @@ class ParallelExpertEncoder(nn.Module):
         Args:
             audio_signal (Tensor): Un-normalised mel features. Shape ``(B, feat_in, n_frames)``.
             length (Tensor): Per-sample feature lengths. Shape ``(B,)``.
-            diar_preds (Tensor, optional): ``(B, T, n_spk)`` speaker-activity override (RTTM/oracle);
+            spk_targets (Tensor, optional): ``(B, T, n_spk)`` speaker-activity override (RTTM/oracle);
                 when ``None`` the wrapped Sortformer is run.
 
         Returns:
@@ -459,22 +459,22 @@ class ParallelExpertEncoder(nn.Module):
             self.online_inference_length > 0 and not self.training and audio_signal.shape[-1] > self.chunk_feat_len
         )
         if use_online:
-            return self._forward_online(audio_signal=audio_signal, length=length, diar_preds=diar_preds)
+            return self._forward_online(audio_signal=audio_signal, length=length, spk_targets=spk_targets)
 
         return self._forward(
             audio_signal=audio_signal,
             length=length,
-            diar_preds=diar_preds,
+            spk_targets=spk_targets,
         )
 
     def _forward(
         self,
         audio_signal,
         length,
-        diar_preds=None,
+        spk_targets=None,
     ):
         """Offline (non-chunked) forward pass. See :meth:`forward` for argument semantics."""
-        if diar_preds is None:
+        if spk_targets is None:
             # Cast fp32 mels to the diarizer's device/dtype before its conv subsampling.
             diar_signal = self._match_module_io(audio_signal, self.diarization_model)
             diar_length = length.to(device=diar_signal.device)
@@ -484,7 +484,7 @@ class ParallelExpertEncoder(nn.Module):
                     processed_signal_length=diar_length,
                     bypass_pre_encode=False,
                 )
-                diar_preds = self.diarization_model.forward_infer(
+                spk_targets = self.diarization_model.forward_infer(
                     emb_seq=emb_seq,
                     emb_seq_length=emb_seq_length,
                 )
@@ -507,14 +507,14 @@ class ParallelExpertEncoder(nn.Module):
                 length=asr_length,
             )
 
-        if diar_preds is not None:
-            outputs = self._fuse_diar_and_asr(asr_encoded, diar_preds)
+        if spk_targets is not None:
+            outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
         else:
             outputs = asr_encoded
 
         return outputs, asr_encoded_len
 
-    def _forward_online(self, audio_signal, length, diar_preds=None):
+    def _forward_online(self, audio_signal, length, spk_targets=None):
         """Long-form online inference: a lock-step loop over fixed windows.
 
         Walks the recording in non-overlapping windows of ``online_inference_length``
@@ -528,7 +528,7 @@ class ParallelExpertEncoder(nn.Module):
         Args:
             audio_signal (Tensor): Un-normalised mel features. Shape ``(B, feat_in, n_frames)``.
             length (Tensor): Per-sample feature lengths. Shape ``(B,)``.
-            diar_preds (Tensor, optional): ``(B, T, n_spk)`` override; when given, only ASR is chunked.
+            spk_targets (Tensor, optional): ``(B, T, n_spk)`` override; when given, only ASR is chunked.
 
         Returns:
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
@@ -550,7 +550,7 @@ class ParallelExpertEncoder(nn.Module):
         asr_audio_signal = self._match_module_io(asr_audio_signal, self.asr_encoder)
         length = length.to(device=asr_audio_signal.device)
 
-        run_streaming_diar = diar_preds is None
+        run_streaming_diar = spk_targets is None
         if run_streaming_diar:
             streaming_state, stream_dtype, diar_audio_signal, diar_length = self._init_streaming_diar(
                 audio_signal,
@@ -621,10 +621,10 @@ class ParallelExpertEncoder(nn.Module):
 
         asr_encoded = torch.cat(asr_chunks, dim=2)  # (B, D, T_asr)
         if run_streaming_diar:
-            diar_preds = torch.cat(diar_chunks, dim=1)  # (B, T_asr, n_spk)
+            spk_targets = torch.cat(diar_chunks, dim=1)  # (B, T_asr, n_spk)
 
-        if diar_preds is not None:
-            outputs = self._fuse_diar_and_asr(asr_encoded, diar_preds)
+        if spk_targets is not None:
+            outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
         else:
             outputs = asr_encoded
 
