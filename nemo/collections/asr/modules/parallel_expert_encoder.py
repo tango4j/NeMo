@@ -42,8 +42,8 @@ from nemo.collections.asr.parts.preprocessing.features import normalize_batch
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.classes.module import freeze, unfreeze
-from nemo.utils.decorators import experimental
 from nemo.utils import logging
+from nemo.utils.decorators import experimental
 
 __all__ = [
     'ParallelExpertEncoder',
@@ -96,6 +96,7 @@ def _clone_config(config: Optional[DictConfig]) -> Optional[DictConfig]:
     if config is None:
         return None
     return OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+
 
 @experimental
 class ParallelExpertEncoderPT(ModelPT):
@@ -176,7 +177,9 @@ class ParallelExpertEncoderPT(ModelPT):
             The restored :class:`ParallelExpertEncoder`.
         """
         bundle = cls.restore_from(
-            restore_path=nemo_path, map_location=map_location, strict=strict,
+            restore_path=nemo_path,
+            map_location=map_location,
+            strict=strict,
         )
         return bundle.encoder
 
@@ -200,14 +203,9 @@ class ParallelExpertEncoderPT(ModelPT):
             template_bundle_path (str): Existing PE ``.nemo`` whose ``model_config.yaml`` is reused.
         """
         if not isinstance(encoder, ParallelExpertEncoder):
-            raise TypeError(
-                f"save_to_nemo expects a ParallelExpertEncoder, "
-                f"got {type(encoder).__name__}"
-            )
+            raise TypeError(f"save_to_nemo expects a ParallelExpertEncoder, " f"got {type(encoder).__name__}")
         if not os.path.isfile(template_bundle_path):
-            raise FileNotFoundError(
-                f"template_bundle_path does not exist: {template_bundle_path}"
-            )
+            raise FileNotFoundError(f"template_bundle_path does not exist: {template_bundle_path}")
 
         template_cfg: Optional[DictConfig] = None
         with tarfile.open(template_bundle_path, mode='r') as tf:
@@ -218,9 +216,7 @@ class ParallelExpertEncoderPT(ModelPT):
                         template_cfg = OmegaConf.create(fobj.read().decode('utf-8'))
                     break
         if template_cfg is None:
-            raise RuntimeError(
-                f"Could not read 'model_config.yaml' from template bundle: {template_bundle_path}"
-            )
+            raise RuntimeError(f"Could not read 'model_config.yaml' from template bundle: {template_bundle_path}")
 
         tmpl_asr = template_cfg.get('asr_encoder_cfg', None)
         tmpl_diar = template_cfg.get('diarization_model_cfg', None)
@@ -232,9 +228,7 @@ class ParallelExpertEncoderPT(ModelPT):
             )
 
         tmpl_d_model = int(tmpl_asr.get('d_model', -1))
-        tmpl_n_spk = int(
-            tmpl_diar.get('sortformer_modules', {}).get('num_spks', -1)
-        )
+        tmpl_n_spk = int(tmpl_diar.get('sortformer_modules', {}).get('num_spks', -1))
         enc_d_model = int(encoder.d_model)
         enc_n_spk = int(encoder.n_spk)
         if tmpl_d_model != enc_d_model:
@@ -259,7 +253,8 @@ class ParallelExpertEncoderPT(ModelPT):
         shell.save_to(output_nemo_path)
         logging.info(
             "[ParallelExpertEncoder] Saved PE bundle to %s using template config from %s",
-            output_nemo_path, template_bundle_path,
+            output_nemo_path,
+            template_bundle_path,
         )
 
 
@@ -321,9 +316,7 @@ class ParallelExpertEncoder(nn.Module):
         self.asr_normalize_type = asr_normalize_type or 'per_feature'
         self._feat_in = self.asr_encoder._feat_in
 
-        self.diarization_model = SortformerEncLabelModel.from_config_dict(
-            _clone_config(diarization_model_cfg)
-        )
+        self.diarization_model = SortformerEncLabelModel.from_config_dict(_clone_config(diarization_model_cfg))
 
         self.freeze_diar = freeze_diar
         self.freeze_asr = freeze_asr
@@ -387,8 +380,7 @@ class ParallelExpertEncoder(nn.Module):
         """Mirror of ``MSEncDecMultiTaskModel.get_sinusoid_position_encoding``."""
         position = torch.arange(max_position, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, embedding_dim, 2, dtype=torch.float32)
-            * -(math.log(10000.0) / embedding_dim)
+            torch.arange(0, embedding_dim, 2, dtype=torch.float32) * -(math.log(10000.0) / embedding_dim)
         )
         pe = torch.zeros(max_position, embedding_dim, dtype=torch.float32)
         pe[:, 0::2] = torch.sin(position * div_term)
@@ -464,9 +456,7 @@ class ParallelExpertEncoder(nn.Module):
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
         """
         use_online = (
-            self.online_inference_length > 0
-            and not self.training
-            and audio_signal.shape[-1] > self.chunk_feat_len
+            self.online_inference_length > 0 and not self.training and audio_signal.shape[-1] > self.chunk_feat_len
         )
         if use_online:
             return self._forward_online(audio_signal=audio_signal, length=length, diar_preds=diar_preds)
@@ -495,12 +485,15 @@ class ParallelExpertEncoder(nn.Module):
                     bypass_pre_encode=False,
                 )
                 diar_preds = self.diarization_model.forward_infer(
-                    emb_seq=emb_seq, emb_seq_length=emb_seq_length,
+                    emb_seq=emb_seq,
+                    emb_seq_length=emb_seq_length,
                 )
 
         if self.asr_normalize_type:
             asr_audio_signal, _, _ = normalize_batch(
-                audio_signal, length, normalize_type=self.asr_normalize_type,
+                audio_signal,
+                length,
+                normalize_type=self.asr_normalize_type,
             )
         else:
             asr_audio_signal = audio_signal
@@ -546,7 +539,9 @@ class ParallelExpertEncoder(nn.Module):
         # Normalise the whole utterance once (not per chunk) to match offline stats.
         if self.asr_normalize_type:
             asr_audio_signal, _, _ = normalize_batch(
-                audio_signal, length, normalize_type=self.asr_normalize_type,
+                audio_signal,
+                length,
+                normalize_type=self.asr_normalize_type,
             )
         else:
             asr_audio_signal = audio_signal
@@ -558,7 +553,9 @@ class ParallelExpertEncoder(nn.Module):
         run_streaming_diar = diar_preds is None
         if run_streaming_diar:
             streaming_state, stream_dtype, diar_audio_signal, diar_length = self._init_streaming_diar(
-                audio_signal, length, batch_size=audio_signal.shape[0],
+                audio_signal,
+                length,
+                batch_size=audio_signal.shape[0],
             )
             n_spk = self.diarization_model.sortformer_modules.n_spk
             total_preds = torch.zeros(
@@ -597,17 +594,17 @@ class ParallelExpertEncoder(nn.Module):
             enc_chunk = enc_ctx[:, :, left_drop : left_drop + core_len]
             asr_chunks.append(enc_chunk)
             asr_encoded_len += core_len
-            asr_in_frames = asr_chunk.shape[-1]
-            asr_out_frames, align_target = enc_chunk.shape[-1], enc_chunk.shape[-1]
-            
+            align_target = enc_chunk.shape[-1]
+
             # Diar branch: stream the same window; Sortformer trims context internally.
-            diar_in_frames = diar_raw_out = diar_out_frames = 0
             if run_streaming_diar:
                 prev_len = total_preds.shape[1]
                 diar_chunk = diar_audio_signal[:, :, enc_stt:enc_end].transpose(1, 2)  # (B, t, feat_in)
                 diar_chunk_length = (diar_length - enc_stt).clamp(min=0, max=enc_end - enc_stt)
-                with torch.set_grad_enabled(not self.freeze_diar), _disable_dist_feature_sync(), _default_dtype(
-                    stream_dtype
+                with (
+                    torch.set_grad_enabled(not self.freeze_diar),
+                    _disable_dist_feature_sync(),
+                    _default_dtype(stream_dtype),
                 ):
                     streaming_state, total_preds = self.diarization_model.forward_streaming_step(
                         processed_signal=diar_chunk,
@@ -621,9 +618,6 @@ class ParallelExpertEncoder(nn.Module):
                 # Newly emitted frames, aligned to the ASR chunk (frame-parallel).
                 new_preds = self._align_diar_frames(diar_raw, align_target)
                 diar_chunks.append(new_preds)
-                diar_in_frames = diar_chunk.shape[1]
-                diar_raw_out = diar_raw.shape[1]
-                diar_out_frames = new_preds.shape[1]
 
         asr_encoded = torch.cat(asr_chunks, dim=2)  # (B, D, T_asr)
         if run_streaming_diar:

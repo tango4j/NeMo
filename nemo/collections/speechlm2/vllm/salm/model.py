@@ -48,6 +48,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+
 from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
 from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
 from nemo.collections.speechlm2.vllm.salm.audio import (

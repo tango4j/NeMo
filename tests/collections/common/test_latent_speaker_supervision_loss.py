@@ -56,9 +56,7 @@ def _make_log_probs(labels: torch.Tensor, seed: int = 0) -> torch.Tensor:
         ),
     ],
 )
-def test_get_active_speaker_per_position(
-    labels_row, expected_active, expected_speaker_mask, expected_word_mask
-):
+def test_get_active_speaker_per_position(labels_row, expected_active, expected_speaker_mask, expected_word_mask):
     loss = LatentSpeakerSupervisionLoss(speaker_token_ids=SPK_IDS)
     labels = torch.tensor([labels_row], dtype=torch.long)
 
@@ -113,9 +111,7 @@ def test_zero_weight_no_ce_is_zero():
     log_probs = _make_log_probs(labels)
     mask = torch.ones_like(labels, dtype=torch.float32)
 
-    loss = LatentSpeakerSupervisionLoss(
-        speaker_token_ids=SPK_IDS, speaker_loss_weight=0.0, include_ce_loss=False
-    )
+    loss = LatentSpeakerSupervisionLoss(speaker_token_ids=SPK_IDS, speaker_loss_weight=0.0, include_ce_loss=False)
     out = loss(log_probs=log_probs, labels=labels, output_mask=mask)
     assert torch.isclose(out, torch.zeros(()))
 
@@ -127,9 +123,7 @@ def test_no_words_returns_zero():
     log_probs = _make_log_probs(labels)
     mask = torch.ones_like(labels, dtype=torch.float32)
 
-    loss = LatentSpeakerSupervisionLoss(
-        speaker_token_ids=SPK_IDS, speaker_loss_weight=2.0, include_ce_loss=False
-    )
+    loss = LatentSpeakerSupervisionLoss(speaker_token_ids=SPK_IDS, speaker_loss_weight=2.0, include_ce_loss=False)
     out = loss(log_probs=log_probs, labels=labels, output_mask=mask)
     assert torch.isclose(out, torch.zeros(()))
 
@@ -141,9 +135,7 @@ def test_include_ce_loss_adds_ce_term():
     mask = torch.ones_like(labels, dtype=torch.float32)
 
     # weight=0 so only CE remains; compare against the standalone CE helper.
-    loss = LatentSpeakerSupervisionLoss(
-        speaker_token_ids=SPK_IDS, speaker_loss_weight=0.0, include_ce_loss=True
-    )
+    loss = LatentSpeakerSupervisionLoss(speaker_token_ids=SPK_IDS, speaker_loss_weight=0.0, include_ce_loss=True)
     total = loss(log_probs=log_probs, labels=labels, output_mask=mask)
     ce_only = loss._compute_standard_ce(log_probs, labels, mask)
 

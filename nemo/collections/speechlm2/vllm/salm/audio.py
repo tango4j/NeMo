@@ -97,16 +97,12 @@ def _maybe_mount_pe_encoder(perception: nn.Module, pe_encoder_path: str | None) 
     if pe_encoder_path in (None, "", False):
         return False
     if not hasattr(perception, "encoder"):
-        raise RuntimeError(
-            "pe_encoder_path is set but perception has no `encoder` attribute to replace."
-        )
+        raise RuntimeError("pe_encoder_path is set but perception has no `encoder` attribute to replace.")
 
     from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoderPT
 
     if not ParallelExpertEncoderPT.is_pe_nemo(pe_encoder_path):
-        raise ValueError(
-            f"pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle."
-        )
+        raise ValueError(f"pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle.")
 
     pe_encoder = ParallelExpertEncoderPT.load_from_nemo(pe_encoder_path, map_location="cpu", strict=True)
 

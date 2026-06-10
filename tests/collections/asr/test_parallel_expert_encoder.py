@@ -146,10 +146,10 @@ def _dispatch_stub(online_inference_length, chunk_feat_len, training):
 @pytest.mark.parametrize(
     "online_len, chunk_feat_len, training, n_frames, expected",
     [
-        (500, 100, False, 200, "online"),   # eval + long enough -> online
-        (500, 100, False, 50, "offline"),   # eval but shorter than one window
-        (500, 100, True, 200, "offline"),   # training always offline
-        (0, 100, False, 200, "offline"),    # online disabled
+        (500, 100, False, 200, "online"),  # eval + long enough -> online
+        (500, 100, False, 50, "offline"),  # eval but shorter than one window
+        (500, 100, True, 200, "offline"),  # training always offline
+        (0, 100, False, 200, "offline"),  # online disabled
         (500, 100, False, 100, "offline"),  # exactly one window (not strictly greater)
     ],
 )
@@ -206,7 +206,7 @@ def _online_stub(d_model, n_spk, sf, win, lc, rc):
     [
         (8, 10, 2, 2, 240),  # 3 full chunks
         (8, 10, 0, 0, 200),  # partial last chunk, no context
-        (4, 5, 1, 1, 64),    # 4 chunks, small subsampling
+        (4, 5, 1, 1, 64),  # 4 chunks, small subsampling
         (8, 50, 5, 5, 160),  # single chunk (n_frames < window)
     ],
 )

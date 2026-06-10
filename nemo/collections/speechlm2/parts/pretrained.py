@@ -216,8 +216,7 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
         )
     if not isinstance(pe_encoder_path, str) or not pe_encoder_path.endswith(".nemo"):
         raise ValueError(
-            f"model.pe_encoder_path must point to a ParallelExpertEncoderPT .nemo bundle, "
-            f"got {pe_encoder_path!r}."
+            f"model.pe_encoder_path must point to a ParallelExpertEncoderPT .nemo bundle, " f"got {pe_encoder_path!r}."
         )
     if not hasattr(model.perception, "encoder"):
         raise RuntimeError(
@@ -227,12 +226,12 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
         )
 
     if not ParallelExpertEncoderPT.is_pe_nemo(pe_encoder_path):
-        raise ValueError(
-            f"model.pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle."
-        )
+        raise ValueError(f"model.pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle.")
 
     pe_encoder = ParallelExpertEncoderPT.load_from_nemo(
-        pe_encoder_path, map_location="cpu", strict=True,
+        pe_encoder_path,
+        map_location="cpu",
+        strict=True,
     )
 
     existing_encoder = model.perception.encoder

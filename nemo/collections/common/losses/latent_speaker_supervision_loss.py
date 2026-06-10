@@ -172,9 +172,7 @@ class LatentSpeakerSupervisionLoss(Loss):
         # cummax propagates the largest seen position forward, which is always the
         # most recent speaker-token position.
         positions = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
-        speaker_positions = torch.where(
-            speaker_mask, positions, torch.tensor(-1, device=device, dtype=torch.long)
-        )
+        speaker_positions = torch.where(speaker_mask, positions, torch.tensor(-1, device=device, dtype=torch.long))
         last_speaker_pos, _ = speaker_positions.cummax(dim=1)  # (B, T)
 
         # Step 3: Gather the speaker index at the last speaker position.

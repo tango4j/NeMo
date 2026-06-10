@@ -17,11 +17,11 @@ from importlib import import_module
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from hydra.utils import instantiate
 from lightning import LightningModule
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch import Tensor
-import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.parallel import loss_parallel
@@ -793,9 +793,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
             if self._uses_parallel_expert_encoder():
-                audio_embeds, audio_embed_lens = self.perception(
-                    input_signal=audios, input_signal_length=audio_lens
-                )
+                audio_embeds, audio_embed_lens = self.perception(input_signal=audios, input_signal_length=audio_lens)
                 audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embeds, audio_embed_lens)]
             else:
                 # Ordinary encoder: long source audio is optionally time-chunked and
