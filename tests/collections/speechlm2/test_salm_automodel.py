@@ -33,8 +33,25 @@ from tests.collections.speechlm2._chunking_helpers import (
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="SALMAutomodel requires CUDA")
 
-if torch.cuda.is_available():
+
+@pytest.fixture(autouse=True, scope="module")
+def _default_device_cuda():
+    """Run this module's tests on CUDA by default, but scope the change so it does
+    not leak. ``torch.set_default_device`` is a global, process-wide mutation; setting
+    it at import time bleeds into other modules collected in the same pytest session
+    (e.g. the CPU tests in tests/collections/asr/test_parallel_expert_encoder.py),
+    causing spurious cuda/cpu device-mismatch failures. The previous default device
+    is always restored on teardown.
+    """
+    if not torch.cuda.is_available():
+        yield
+        return
+    prev = torch.get_default_device()
     torch.set_default_device('cuda')
+    try:
+        yield
+    finally:
+        torch.set_default_device(prev)
 
 
 def resolve_pretrained_models():

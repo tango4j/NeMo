@@ -15,14 +15,17 @@ model:
   use_nemo_automodel: true
 
   # Regexp (re.compile) patterns matching parameters to be frozen.
+  # PEE recipe: freeze the LLM and the Sortformer diarizer expert; keep the ASR
+  # Conformer encoder (perception.encoder.asr_encoder) and the fusion layers
+  # (perception.encoder.asr_norm / diar_norm) trainable.
   freeze_params:
     # Frozen LLM (embed_tokens stays inside llm, so this pattern covers it too)
     - "^llm\\..+$"
-    # Frozen pretrained ASR (only the modality adapter layers are trainable).
-    # The second alternation matches the MultiLayerProjectionConnector path where the encoder
-    # is wrapped inside ``perception.encoder_multilayer.encoder`` instead of ``perception.encoder``.
+    # Frozen speech-feature preprocessor (mel front-end).
     - "^perception\\.preprocessor\\..+$"
-    - "^perception\\.encoder(_multilayer\\.encoder)?\\..+$"
+    # Frozen Sortformer diarizer inside the Parallel Expert Encoder. The ASR encoder
+    # (perception.encoder.asr_encoder) and fusion norms deliberately stay trainable.
+    - "^perception\\.encoder\\.diarization_model\\..+$"
   prevent_freeze_params: []  # Use to make specific submodules trainable; overrides freeze_params
 
   prompt_format: nemotron-nano-v3
@@ -30,7 +33,7 @@ model:
   # Split audios longer than this before the speech encoder forward, then concatenate
   # the encoded chunks back into one sequence before passing them to the LLM.
   # Set to null to disable encoder chunking and encode each audio row directly.
-  encoder_chunk_size_seconds: 30.0
+  encoder_chunk_size_seconds: 60.0
 
   # ─── Parallel Expert Encoder (PEE) options ──────────────────────────────────
   # PEE swaps the perception encoder for a ParallelExpertEncoder bundle (streaming

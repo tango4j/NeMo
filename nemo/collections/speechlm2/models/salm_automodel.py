@@ -243,15 +243,20 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         from nemo.collections.speechlm2.parts.cp_helpers import encode_audio_with_cp_distribution, get_cp_mesh
 
         spk_targets = batch.get("spk_targets", None)
+        cp_mesh, cp_size, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
+        # Encoder path by (PEE, spk_targets):
+        # PEE=true  & spk_targets=None  : Inference mode, uses recursive encoding in PEE, NO chunking/CP.
+        # PEE=true  & spk_targets!=None : Training mode, ``spk_targets`` injected into PEE with chunking/CP.
+        # PEE=false & spk_targets=None  : Training/Inference mode, plain encoder with chunking/CP.
+        # PEE=false & spk_targets!=None : Training/Inference mode, plain encoder with chunking/CP and
+        #                                 the provided ``spk_targets`` is ignored (no-op).
         if self._uses_parallel_expert_encoder() and spk_targets is None:
-            _, cp_size, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
             self._warn_parallel_expert_encoder_inference_compatibility(cp_size)
             audio_embs, audio_emb_lens = self.perception(
                 input_signal=batch["audios"], input_signal_length=batch["audio_lens"]
             )
             audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
         else:
-            cp_mesh, _, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
             audio_embs = encode_audio_with_cp_distribution(
                 self.perception,
                 batch["audios"],
