@@ -20,8 +20,6 @@ from lhotse.testing.dummies import dummy_cut, dummy_recording
 import nemo.collections.speechlm2.data.salm_dataset as salm_dataset_module
 from nemo.collections.common.data.lhotse import NeMoMultimodalConversation
 from nemo.collections.common.data.lhotse.text_adapters import AudioTurn, TextTurn
-from nemo.collections.speechlm2.data import SALMDataset
-from nemo.collections.speechlm2.data.salm_dataset import MultiSpeakerConfig
 
 
 class _Tokenizer:
@@ -66,7 +64,7 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
     monkeypatch.setattr(salm_dataset_module, "collate_conversation_audio_fault_tolerant", fake_audio_collate)
     monkeypatch.setattr(salm_dataset_module, "speaker_activity_from_cut", fake_speaker_activity_from_cut)
 
-    dataset = SALMDataset(
+    dataset = salm_dataset_module.SALMDataset(
         tokenizer=_Tokenizer(),
         multispeaker_cfg={
             "num_speakers": 2,
@@ -75,7 +73,7 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
             "subsampling_factor": 1,
         },
     )
-    assert dataset.multispeaker_cfg == MultiSpeakerConfig(
+    assert dataset.multispeaker_cfg == salm_dataset_module.MultiSpeakerConfig(
         num_speakers=2,
         num_sample_per_mel_frame=160,
         num_mel_frame_per_target_frame=1,
