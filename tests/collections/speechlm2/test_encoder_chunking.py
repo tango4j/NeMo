@@ -61,9 +61,9 @@ def test_split_audio_into_chunks_returns_spans_independent_of_spk_targets(
     expected_chunk_spans,
 ):
     max_signal_len = max(input_signal_lengths, default=0)
-    input_signal = torch.arange(
-        len(input_signal_lengths) * max_signal_len, dtype=torch.float32
-    ).reshape(len(input_signal_lengths), max_signal_len)
+    input_signal = torch.arange(len(input_signal_lengths) * max_signal_len, dtype=torch.float32).reshape(
+        len(input_signal_lengths), max_signal_len
+    )
     chunks, chunk_lens, chunks_per_audio, chunk_spans = _split_audio_into_chunks(
         input_signal=input_signal,
         input_signal_lengths=input_signal_lengths,

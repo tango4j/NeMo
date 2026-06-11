@@ -82,6 +82,7 @@ def encode_audio_with_optional_chunking(
     chunked_embs, chunked_emb_lens = perception(**chunked_perception_kwargs)
     return _recombine_chunked_audio_embeddings(chunked_embs, chunked_emb_lens, chunks_per_audio)
 
+
 def _get_chunk_size_samples(chunk_size_seconds: float | None, sampling_rate: int) -> int | None:
     """Convert a chunk size in seconds to a positive integer sample count, or ``None``.
 

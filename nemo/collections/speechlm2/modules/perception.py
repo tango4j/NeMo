@@ -144,10 +144,11 @@ class AudioPerceptionModule(NeuralModule, Exportable):
             )
         else:
             encoder_kwargs = {"audio_signal": processed_signal, "length": processed_signal_length}
-            if spk_targets is not None and not self._encoder_accepts_spk_targets(self.encoder):
-                raise ValueError(
+            if spk_targets is not None:
+                if not self._encoder_accepts_spk_targets(self.encoder):
+                    raise ValueError(
                         "`spk_targets` were provided, but the mounted perception encoder "
-                        f"({type(self.encoder).__name__}) does not support speaker-target inputs."
+                        f"({type(self.encoder).__name__}) does not support speaker-target inputs. "
                         "spk_targets has no effect when the encoder does not support it."
                     )
                 encoder_kwargs["spk_targets"] = spk_targets
