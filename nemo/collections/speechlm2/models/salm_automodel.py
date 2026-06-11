@@ -17,9 +17,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from hydra.utils import instantiate
 from lightning import LightningModule
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 from torch import Tensor
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
@@ -28,16 +27,16 @@ from transformers import GenerationConfig
 
 from nemo.collections.common.prompts import PromptFormatter
 from nemo.collections.common.tokenizers import AutoTokenizer
-from nemo.collections.speechlm2.data.salm_dataset import SALMDataset, left_collate_vectors
+from nemo.collections.speechlm2.data.salm_dataset import left_collate_vectors
 from nemo.collections.speechlm2.models.salm import _resolve_audios_in_prompt, replace_placeholders_and_build_targets
 from nemo.collections.speechlm2.parts.automodel_lora import ensure_lora_trainable, make_peft_config, maybe_install_lora
 from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
 from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
+from nemo.collections.speechlm2.parts.multispeaker import build_speaker_tokens, maybe_init_lss_loss
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
 from nemo.collections.speechlm2.parts.pretrained import (
     load_pretrained_automodel_llm,
     maybe_load_pretrained_models,
-    setup_parallel_expert_encoder,
     setup_speech_encoder,
     update_perception_output_dim,
 )
@@ -60,10 +59,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             tokenizer_src, use_fast=True, trust_remote_code=self.cfg.get("trust_remote_code", False)
         )
         self.tokenizer.add_special_tokens({"additional_special_tokens": [self.audio_locator_tag]})
-        self.speaker_token_ids: list[int] = []
-        self._init_speaker_token_ids()
-        self.lss_loss = None
-        self._init_lss_loss()
+        self.speaker_token_ids = build_speaker_tokens(self.cfg.get("speaker_tokens", None), self.tokenizer)
+        self.lss_loss = maybe_init_lss_loss(self.cfg.get("lss_loss", None), self.speaker_token_ids)
         self.llm = None  # populated by configure_model
         self.perception = None  # populated by configure_model
 
@@ -72,13 +69,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         if self.cfg.get("init_configure_model", False):
             self.configure_model()
-
-    @staticmethod
-    def build_dataset(tokenizer, data_cfg=None) -> SALMDataset:
-        sot_cfg = data_cfg.get("sot_cfg", None) if data_cfg is not None else None
-        if sot_cfg is not None:
-            return SALMDataset.with_speaker_targets(tokenizer, sot_cfg)
-        return SALMDataset(tokenizer=tokenizer)
 
     @property
     def device(self) -> torch.device:
@@ -147,113 +137,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def audio_locator_tag_id(self) -> int:
         return self.tokenizer.token_to_id(self.audio_locator_tag)
 
-    def _init_speaker_token_ids(self) -> None:
-        """Resolve the native ``<spk:N>`` speaker-token ids from the LLM tokenizer.
-
-        Reads ``cfg.speaker_tokens`` with the schema::
-
-            speaker_tokens:
-              enable: true
-              template: "<spk:{i}>"        # default
-              max_speakers: 10
-              base_token_id: 100           # expected anchor id for ``<spk:0>``
-
-        The LLM tokenizer is expected to already contain
-        ``template.format(i=0)..template.format(i=max_speakers-1)`` as fixed
-        entries (e.g. produced by the upstream tokenizer-patch script that
-        renames the contiguous reserved slots ``<SPECIAL_100>..<SPECIAL_109>``
-        to ``<spk:0>..<spk:9>``). No alias rewrite, no
-        ``resize_token_embeddings`` call, and no vocab growth happens here.
-
-        After this call:
-            * ``self.speaker_token_ids`` : ``list[int]`` of resolved ids in
-              speaker order, empty when ``speaker_tokens`` is absent or
-              ``enable: false``.
-
-        Raises:
-            ValueError: if any speaker token is missing from the tokenizer or
-                its resolved id does not match ``base_token_id + i``, or if
-                the act of resolving them grew the tokenizer's vocab size
-                (which would indicate an unpatched tokenizer was passed).
-        """
-        cfg = self.cfg.get("speaker_tokens", None)
-        if cfg is None or not bool(cfg.get("enable", True)):
-            return
-        template = cfg.get("template", "<spk:{i}>")
-        max_speakers = int(cfg.get("max_speakers", 10))
-        base_token_id = int(cfg.get("base_token_id", 100))
-
-        before = self.tokenizer.vocab_size
-        speaker_token_ids: list[int] = []
-        for i in range(max_speakers):
-            token = template.format(i=i)
-            tid = self.tokenizer.token_to_id(token)
-            expected = base_token_id + i
-            if tid is None:
-                raise ValueError(
-                    f"Could not resolve speaker token {token!r} in the LLM tokenizer. "
-                    "Ensure pretrained_llm points at the patched tokenizer dir "
-                    "(e.g. '...-spk/') produced by patch_nano_v3_speaker_tokens.py."
-                )
-            if tid != expected:
-                raise ValueError(
-                    f"Speaker token {token!r} resolved to id {tid}, expected "
-                    f"{expected} (= base_token_id={base_token_id} + i={i}). The "
-                    "tokenizer does not match the configured speaker_tokens layout."
-                )
-            speaker_token_ids.append(tid)
-        after = self.tokenizer.vocab_size
-        if before != after:
-            raise ValueError(
-                f"Resolving speaker tokens grew the tokenizer ({before} -> {after}); "
-                "speaker_tokens requires the tokens to already exist in the patched "
-                "tokenizer (no resize_token_embeddings on this path)."
-            )
-        self.speaker_token_ids = speaker_token_ids
-
-    def _init_lss_loss(self) -> None:
-        """Optionally build the auxiliary Latent Speaker Supervision (LSS) loss.
-
-        Mirrors the AED Canary recipe at
-        ``nemo/collections/asr/models/aed_multitask_models.py`` (search for
-        ``self.lss_loss``):
-
-        * The loss is instantiated from ``cfg.lss_loss`` via Hydra ``_target_``,
-          identical to ``EncDecMultiTaskModel.from_config_dict(self.cfg.lss_loss)``.
-        * ``speaker_token_ids`` is auto-injected from
-          ``self.speaker_token_ids`` (resolved by ``_init_speaker_token_ids``
-          from the LLM tokenizer's native ``<spk:N>`` entries) when absent in
-          YAML.
-        * Enable/disable is controlled purely by the *presence* of the
-          ``lss_loss:`` block (no ``enable:`` flag) — same as AED.
-
-        SALM uses ``-100`` as the ignore index in ``target_ids`` (HF convention),
-        not a tokenizer ``pad_id``. Setting ``pad_id=-100`` lets the loss build
-        ``output_mask = (labels != -100)`` internally, again mirroring AED.
-        """
-        loss_cfg = self.cfg.get("lss_loss", None)
-        if loss_cfg is None:
-            return
-        if loss_cfg.get("include_ce_loss", False):
-            raise ValueError(
-                "model.lss_loss.include_ce_loss must be False (or omitted) on the SALM "
-                "automodel path: SALM already computes CE inside loss_parallel(), so a "
-                "second CE term inside LSS would be double-counted."
-            )
-        with open_dict(loss_cfg):
-            loss_cfg.setdefault("pad_id", -100)
-            loss_cfg.setdefault("include_ce_loss", False)
-            if loss_cfg.get("speaker_token_ids", None) is None:
-                if not self.speaker_token_ids:
-                    raise ValueError(
-                        "model.lss_loss is configured but no speaker_token_ids are available. "
-                        "Either set model.speaker_tokens (so ids are derived from the patched "
-                        "tokenizer's native <spk:N> entries) or pass an explicit "
-                        "model.lss_loss.speaker_token_ids list."
-                    )
-                loss_cfg.speaker_token_ids = list(self.speaker_token_ids)
-        self.lss_loss = instantiate(loss_cfg)
-
     @property
     def token_equivalent_duration(self) -> float:
         """
@@ -308,17 +191,34 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         The PE encoder performs its own context-preserving long-form online inference
         (``forward`` -> ``_forward_online``), so audio must be fed to it as a
-        single long sequence. The naive time-slicer in
-        ``nemo.collections.speechlm2.parts.encoder_chunking`` severs the
-        cross-time context that diarization / translation rely on and must NOT be
-        used when a PE encoder is loaded. For ordinary encoders it is still the
-        intended long-audio path, so we only bypass it here.
+        single long sequence when oracle speaker targets are absent.
         """
         from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
 
         return isinstance(getattr(self.perception, "encoder", None), ParallelExpertEncoder)
 
-    def prepare_inputs(self, batch: dict, is_inference: bool = False):
+    def _warn_parallel_expert_encoder_inference_compatibility(self, cp_size: int) -> None:
+        if not self.cfg.get("pe_encoder_path", None):
+            return
+
+        unsupported = []
+        if self.cfg.get("encoder_chunk_size_seconds", None) is not None:
+            unsupported.append("encoder_chunk_size_seconds")
+        if self.cfg.get("packed_sequences", False):
+            unsupported.append("packed_sequences")
+        if cp_size > 1:
+            unsupported.append(f"cp_size={cp_size}")
+
+        if unsupported:
+            warnings.warn(
+                "The ParallelExpertEncoder inference path is currently experimental and does not support "
+                f"{', '.join(unsupported)}. It will be made to work with these options later."
+                " This warning only applies when `spk_targets` are absent; training with ground-truth "
+                "`spk_targets` still uses the regular encoder chunking path.",
+                stacklevel=2,
+            )
+
+    def prepare_inputs(self, batch: dict):
         """
         Performs additional processing on the mini-batch collected from dataloader.
         Notably:
@@ -333,31 +233,24 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         * Take care of any necessary slicing to align the shapes of source audio,
             target audio, and target token ids.
 
-        ``is_inference`` controls the speaker activity fed to a
-        ``ParallelExpertEncoder``. When ``False`` (training), RTTM-derived
-        ``batch["spk_targets"]`` are injected as ``spk_targets``. When ``True``
-        (validation / real inference), the targets are ignored so the encoder
-        runs its embedded Sortformer to predict diarization, matching deployment
-        where ground-truth RTTM is unavailable.
+        When ``batch["spk_targets"]`` is present, those RTTM-derived speaker
+        targets are injected into a ``ParallelExpertEncoder``. Otherwise, the
+        encoder runs its embedded Sortformer to predict diarization.
         """
         # Source audio encoding.
         # Input audio: (B, T_samples)
         # Audio embeddings: (B, T, H)
-        perception_kwargs = {
-            "input_signal": batch["audios"],
-            "input_signal_length": batch["audio_lens"],
-        }
-        if not is_inference and batch.get("spk_targets", None) is not None:
-            perception_kwargs["spk_targets"] = batch["spk_targets"]
-        if self._uses_parallel_expert_encoder():
-            audio_embs, audio_emb_lens = self.perception(**perception_kwargs)
+        from nemo.collections.speechlm2.parts.cp_helpers import encode_audio_with_cp_distribution, get_cp_mesh
+
+        spk_targets = batch.get("spk_targets", None)
+        if self._uses_parallel_expert_encoder() and spk_targets is None:
+            _, cp_size, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
+            self._warn_parallel_expert_encoder_inference_compatibility(cp_size)
+            audio_embs, audio_emb_lens = self.perception(
+                input_signal=batch["audios"], input_signal_length=batch["audio_lens"]
+            )
             audio_embs = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
         else:
-            # Ordinary encoder: source audio encoding distributed across CP ranks
-            # when CP is active. Long source audio is optionally time-chunked and
-            # recombined via parts.encoder_chunking (its intended use).
-            from nemo.collections.speechlm2.parts.cp_helpers import encode_audio_with_cp_distribution, get_cp_mesh
-
             cp_mesh, _, _ = get_cp_mesh(getattr(self, "_device_mesh", None))
             audio_embs = encode_audio_with_cp_distribution(
                 self.perception,
@@ -366,6 +259,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
                 sampling_rate=self.sampling_rate,
                 cp_mesh=cp_mesh,
+                spk_targets=spk_targets,
             )
         input_ids_to_embed = torch.where(batch["input_ids"] == self.audio_locator_tag_id, 0, batch["input_ids"])
         text_embs = self._embed_tokens(input_ids_to_embed)
@@ -492,7 +386,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         # Latent speaker supervision loss (auxiliary, optional).
         if self.lss_loss is not None and num_frames > 0:
-            logits = forward_outputs["logits"]
             if isinstance(logits, DTensor):
                 logits = logits.full_tensor()
             log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
@@ -580,9 +473,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         for name, dataset_batch in batch.items():
             if dataset_batch is None:
                 continue  # some dataset is exhausted
-            # Validation mirrors real inference: ignore RTTM ground-truth targets and let the
-            # ParallelExpertEncoder run its embedded Sortformer to predict speaker activity.
-            inputs = self.prepare_inputs(dataset_batch, is_inference=True)
+            inputs = self.prepare_inputs(dataset_batch)
             forward_outputs = self(
                 inputs["input_embeds"],
                 attention_mask=inputs["attention_mask"],
@@ -599,7 +490,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 )
 
             if self.lss_loss is not None and num_frames > 0:
-                logits = forward_outputs["logits"]
                 if isinstance(logits, DTensor):
                     logits = logits.full_tensor()
                 log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
@@ -782,18 +672,20 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             # Prepare token embeddings and audio embeddings.
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
-            if self._uses_parallel_expert_encoder():
+            if self._uses_parallel_expert_encoder() and spk_targets is None:
+                # This is only used for inference when ``spk_targets`` is None.
+                # PEE needs to produce ``spk_targets`` itself through recursive encoding.
+                self._warn_parallel_expert_encoder_inference_compatibility(cp_size=1)
                 audio_embeds, audio_embed_lens = self.perception(input_signal=audios, input_signal_length=audio_lens)
                 audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embeds, audio_embed_lens)]
             else:
-                # Ordinary encoder: long source audio is optionally time-chunked and
-                # recombined via parts.encoder_chunking (its intended use).
                 audio_embeds = encode_audio_with_optional_chunking(
                     self.perception,
                     audios,
                     audio_lens,
                     chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
                     sampling_rate=self.sampling_rate,
+                    spk_targets=spk_targets,
                 )
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(
@@ -1057,10 +949,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         # Create perception module (must happen after LLM so output_dim matches)
         setup_speech_encoder(self, pretrained_weights=pretrained_asr_weights)
-
-        # Optionally replace the ASR encoder with a ParallelExpertEncoder bundle
-        # before dtype casting / FSDP wrapping.
-        setup_parallel_expert_encoder(self)
 
         # Fix projection dim for pretrained_weights=False (config output_dim may not match LLM)
         update_perception_output_dim(self)

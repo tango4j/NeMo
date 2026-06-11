@@ -192,6 +192,9 @@ def setup_speech_encoder(model: torch.nn.Module, pretrained_weights: bool = True
     else:
         model.perception = AudioPerceptionModule(model.cfg.perception).train()
 
+    if model.cfg.get("pe_encoder_path", None) not in (None, "", False):
+        setup_parallel_expert_encoder(model)
+
 
 def setup_parallel_expert_encoder(model: torch.nn.Module):
     """Mount a ParallelExpertEncoder bundle from ``model.pe_encoder_path``.

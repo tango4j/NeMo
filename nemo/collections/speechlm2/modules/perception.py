@@ -112,7 +112,7 @@ class AudioPerceptionModule(NeuralModule, Exportable):
 
     @staticmethod
     def _encoder_accepts_spk_targets(encoder: nn.Module) -> bool:
-        if hasattr(encoder, "diarization_model") and hasattr(encoder, "diar_kernel"):
+        if hasattr(encoder, "diarization_model") or hasattr(encoder, "diar_kernel"):
             return True
         try:
             return "spk_targets" in inspect.signature(encoder.forward).parameters
@@ -144,7 +144,12 @@ class AudioPerceptionModule(NeuralModule, Exportable):
             )
         else:
             encoder_kwargs = {"audio_signal": processed_signal, "length": processed_signal_length}
-            if spk_targets is not None and self._encoder_accepts_spk_targets(self.encoder):
+            if spk_targets is not None and not self._encoder_accepts_spk_targets(self.encoder):
+                raise ValueError(
+                        "`spk_targets` were provided, but the mounted perception encoder "
+                        f"({type(self.encoder).__name__}) does not support speaker-target inputs."
+                        "spk_targets has no effect when the encoder does not support it."
+                    )
                 encoder_kwargs["spk_targets"] = spk_targets
             encoder_emb, encoded_len = self.encoder(**encoder_kwargs)
         encoded, encoded_len = self.modality_adapter(audio_signal=encoder_emb, length=encoded_len)

@@ -36,7 +36,7 @@ model:
   # PEE swaps the perception encoder for a ParallelExpertEncoder bundle (streaming
   # Sortformer diarizer + Canary ASR encoder), letting SALM emit <spk:N>-tagged
   # multi-speaker (SOT) transcripts. The three blocks below define the PEE recipe;
-  # remove them (and data.sot_cfg) to fall back to plain single-speaker SALM.
+  # remove them (and data.multispeaker_cfg) to fall back to plain single-speaker SALM.
 
   # Path to a ParallelExpertEncoderPT .nemo bundle, mounted onto perception.encoder
   # at init. The bundle is not yet published to HuggingFace, so point this at a
@@ -211,7 +211,7 @@ data:
   # RTTM/SOT speaker-activity targets for ParallelExpertEncoder training. Active for
   # the PEE recipe; requires cuts/manifests that carry rttm_filepath entries and SOT
   # (<spk:N>-tagged) text. Comment out to train SALM without speaker targets.
-  sot_cfg:
+  multispeaker_cfg:
     num_speakers: 4                            # max speakers per sample (matches PEE n_spk)
     sample_rate: ${data.train_ds.sample_rate}
     window_stride: 0.01                        # preprocessor hop in seconds

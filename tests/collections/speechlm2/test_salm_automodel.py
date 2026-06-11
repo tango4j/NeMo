@@ -321,11 +321,13 @@ def test_salm_automodel_generation_prompts_as_tensor(model):
 @pytest.mark.parametrize("device", chunking_test_devices())
 def test_salm_automodel_prepare_inputs_chunks_long_audio(device):
     model = _make_chunking_test_model(encoder_chunk_size_seconds=1.0, sampling_rate=2, device=device)
+    spk_targets = torch.arange(10, dtype=torch.float32, device=device).reshape(1, 5, 2)
     batch = {
         "audios": torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]], device=device),
         "audio_lens": torch.tensor([5], dtype=torch.long, device=device),
         "input_ids": torch.tensor([[model.audio_locator_tag_id, 10]], dtype=torch.long, device=device),
         "loss_mask": torch.tensor([[False, True]], dtype=torch.bool, device=device),
+        "spk_targets": spk_targets,
     }
 
     inputs = model.prepare_inputs(batch)
@@ -333,6 +335,10 @@ def test_salm_automodel_prepare_inputs_chunks_long_audio(device):
     chunked_signal, chunked_lens = model.perception.calls[0]
     assert chunked_signal.shape == (2, 3)
     assert torch.equal(chunked_lens, torch.tensor([2, 3], dtype=torch.long, device=device))
+    assert torch.equal(
+        model.perception.spk_targets_calls[0],
+        torch.stack([torch.cat([spk_targets[0, :2], spk_targets[0, 1:2]]), spk_targets[0, 2:5]]),
+    )
     assert torch.equal(inputs["input_embeds"][0, :, 0], torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], device=device))
     assert torch.equal(inputs["attention_mask"], torch.ones((1, 5), dtype=torch.bool, device=device))
 
@@ -352,6 +358,7 @@ def test_salm_automodel_prepare_inputs_merges_short_tail_chunk(device):
     chunked_signal, chunked_lens = model.perception.calls[0]
     assert chunked_signal.shape == (2, 5)
     assert torch.equal(chunked_lens, torch.tensor([4, 5], dtype=torch.long, device=device))
+    assert model.perception.spk_targets_calls[0] is None
     assert torch.equal(
         inputs["input_embeds"][0, :, 0],
         torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], device=device),
@@ -404,17 +411,23 @@ def test_salm_automodel_prepare_inputs_preserves_chunked_audio_order(device):
 @pytest.mark.parametrize("device", chunking_test_devices())
 def test_salm_automodel_generate_chunks_audio_before_llm(device):
     model = _make_chunking_test_model(encoder_chunk_size_seconds=1.0, sampling_rate=2, device=device)
+    spk_targets = torch.arange(10, dtype=torch.float32, device=device).reshape(1, 5, 2)
 
     answer = model.generate(
         prompts=torch.tensor([[model.audio_locator_tag_id, 10]], dtype=torch.long, device=device),
         audios=torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]], device=device),
         audio_lens=torch.tensor([5], dtype=torch.long, device=device),
+        spk_targets=spk_targets,
         max_new_tokens=3,
     )
 
     chunked_signal, chunked_lens = model.perception.calls[0]
     assert chunked_signal.shape == (2, 3)
     assert torch.equal(chunked_lens, torch.tensor([2, 3], dtype=torch.long, device=device))
+    assert torch.equal(
+        model.perception.spk_targets_calls[0],
+        torch.stack([torch.cat([spk_targets[0, :2], spk_targets[0, 1:2]]), spk_targets[0, 2:5]]),
+    )
     assert torch.equal(
         model.llm.generate_kwargs["inputs_embeds"][0, :5, 0],
         torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], device=device),

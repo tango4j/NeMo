@@ -186,7 +186,7 @@ def model():
 @pytest.fixture(scope="session")
 def dataset(model):
     # SOT mode: each batch additionally carries RTTM-derived `spk_targets`.
-    return SALMDataset.with_speaker_targets(model.tokenizer, SOT_CFG)
+    return SALMDataset(model.tokenizer, multispeaker_cfg=SOT_CFG)
 
 
 @pytest.fixture(scope="session")
@@ -328,10 +328,10 @@ class _PEETestPerception(torch.nn.Module):
         return input_signal[:, :max_len].unsqueeze(-1), input_signal_length.clone()
 
 
-def _make_pee_routing_test_model(pe_encoder):
+def _make_pee_routing_test_model(pe_encoder, cfg=None):
     model = SALMAutomodel.__new__(SALMAutomodel)
     torch.nn.Module.__init__(model)
-    model.cfg = DictConfig({"encoder_chunk_size_seconds": None})
+    model.cfg = DictConfig(cfg or {"encoder_chunk_size_seconds": None})
     model.audio_locator_tag = AUDIO_LOCATOR_TAG
     model.tokenizer = _PEETestTokenizer(AUDIO_LOCATOR_TAG)
     model.llm = _PEETestLLM()
@@ -363,10 +363,29 @@ def test_pee_prepare_inputs_routes_spk_targets_as_spk_targets(dummy_pe_encoder):
         "spk_targets": spk_targets,
     }
 
-    # Training path (is_inference=False): RTTM-derived spk_targets are forwarded as spk_targets.
-    model.prepare_inputs(batch, is_inference=False)
+    # RTTM-derived spk_targets are forwarded when present in the batch.
+    model.prepare_inputs(batch)
     assert model.perception.spk_targets_calls[-1] is spk_targets
 
-    # Inference path (is_inference=True): targets are ignored so the embedded Sortformer runs.
-    model.prepare_inputs(batch, is_inference=True)
+    # No spk_targets key means the embedded Sortformer predicts speaker activity.
+    batch_without_spk_targets = {k: v for k, v in batch.items() if k != "spk_targets"}
+    model.prepare_inputs(batch_without_spk_targets)
+    assert model.perception.spk_targets_calls[-1] is None
+
+
+@pytest.mark.unit
+def test_pee_prepare_inputs_warns_for_experimental_inference_options(dummy_pe_encoder):
+    model = _make_pee_routing_test_model(
+        dummy_pe_encoder,
+        cfg={"pe_encoder_path": "/tmp/pee.nemo", "encoder_chunk_size_seconds": 30.0},
+    )
+    batch = {
+        "audios": torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]]),
+        "audio_lens": torch.tensor([5], dtype=torch.long),
+        "input_ids": torch.tensor([[model.audio_locator_tag_id, 10]], dtype=torch.long),
+        "loss_mask": torch.tensor([[False, True]], dtype=torch.bool),
+    }
+
+    with pytest.warns(UserWarning, match="ParallelExpertEncoder inference path.*encoder_chunk_size_seconds"):
+        model.prepare_inputs(batch)
     assert model.perception.spk_targets_calls[-1] is None

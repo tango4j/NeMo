@@ -455,9 +455,14 @@ class ParallelExpertEncoder(nn.Module):
         Returns:
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
         """
-        use_online = (
-            self.online_inference_length > 0 and not self.training and audio_signal.shape[-1] > self.chunk_feat_len
-        )
+        if spk_targets is not None:
+            use_online = False
+        elif self.online_inference_length > 0 and not self.training:
+            # Even if spk_targets is None, use offline if audio is short enough
+            use_online = audio_signal.shape[-1] > self.chunk_feat_len
+        else:
+            use_online = False
+
         if use_online:
             return self._forward_online(audio_signal=audio_signal, length=length, spk_targets=spk_targets)
 

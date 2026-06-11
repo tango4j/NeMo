@@ -46,10 +46,7 @@ def train(cfg):
     with trainer.init_module():
         model = model_cls(OmegaConf.to_container(cfg.model, resolve=True))
 
-    if hasattr(model, "build_dataset"):
-        dataset = model.build_dataset(tokenizer=model.tokenizer, data_cfg=cfg.data)
-    else:
-        dataset = SALMDataset(tokenizer=model.tokenizer)
+    dataset = SALMDataset(tokenizer=model.tokenizer, multispeaker_cfg=cfg.data.get("multispeaker_cfg", None))
     datamodule = DataModule(cfg.data, tokenizer=model.tokenizer, dataset=dataset)
 
     trainer.fit(model, datamodule)

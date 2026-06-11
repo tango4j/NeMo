@@ -13,6 +13,7 @@
 # limitations under the License.
 import logging
 import os
+from dataclasses import dataclass
 from itertools import groupby
 from typing import Iterable, Union
 
@@ -43,132 +44,36 @@ from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.collections.speechlm2.data.utils import get_pad_id
 
 
-class SALMDataset(torch.utils.data.Dataset):
-    """
-    A dataset for Speech-Augmented Language Models (SALM) that processes multimodal conversations
-    containing both text and audio turns.
+@dataclass(frozen=True)
+class MultiSpeakerConfig:
+    """Configuration for auxiliary multi-speaker SOT targets."""
 
-    This dataset handles NeMoMultimodalConversation objects which combine text messages
-    and audio segments in a conversational format. It uses audio_locator_tag in the text,
-    where each such placeholder corresponds to an entire audio segment.
+    num_speakers: int = 4
+    no_rttm_to_ones: bool = True
+    num_sample_per_mel_frame: int = 160
+    num_mel_frame_per_target_frame: int = 8
 
-    Args:
-        tokenizer (AutoTokenizer):
-            Tokenizer for converting text to token IDs and vice versa. Must have a special
-            audio_locator_tag token that will be replaced with audio embeddings during model's
-            training step.
 
-    Returns:
-        A dictionary with the following keys:
-            - audios: Tensor of audio waveform samples [B_audio, T_samples]
-            - audio_lens: Tensor of audio lengths [B_audio]
-            - input_ids: Tensor of text token IDs [B, T_tokens], including audio_locator_tag tokens
-            - loss_mask: Boolean tensor [B, T_tokens] indicating which tokens are part of the
-                assistant's responses (True) and should be used for computing loss
+class SALMMultiSpeakerProcessor:
+    """Adds auxiliary SOT speaker-activity targets to an otherwise prepared SALM batch."""
 
-    Notes:
-        - Each audio_locator_tag token in input_ids corresponds to an audio segment in audios
-        - The SALM model later replaces these audio_locator_tag tokens with encoded audio embeddings
-        - The loss_mask identifies which tokens are part of the target sequences (assistant responses)
-          and which are part of the source sequences (user prompts)
-        - The input_ids and loss_mask will be expanded during model forward pass to account for
-          the variable-length audio segments that replace each audio_locator_tag token
-        - SOT speaker tags stay regular text tokens here; normalization and aliasing happen upstream.
-        - Auxiliary SOT mode (off by default) is opt-in via :meth:`configure_sot` /
-          :meth:`with_speaker_targets`; it adds RTTM-derived ``spk_targets`` to each batch
-          without changing the base constructor or the default single-speaker behavior.
-    """
-
-    def __init__(self, tokenizer: AutoTokenizer) -> None:
-        self.tokenizer = tokenizer
-        self.pad_id = get_pad_id(tokenizer)
-        # Setting USE_AIS_GET_BATCH=true makes the loader issue a single AIStore GetBatch
-        # call per minibatch, paired with URL-backed cuts produced by the multimodal
-        # conversation adapters (NeMoMultimodalConversation{Jsonl,ShareGPTJsonl}Adapter).
-        self.load_audio = AudioSamples(
-            fault_tolerant=True,
-            use_batch_loader=os.environ.get("USE_AIS_GET_BATCH", "False").lower() == "true",
-            mono_downmix=True,
-        )
-
-    @classmethod
-    def with_speaker_targets(cls, tokenizer: AutoTokenizer, sot_cfg: dict) -> "SALMDataset":
-        """Build a dataset with the auxiliary SOT speaker-activity mode enabled.
-
-        Args:
-            tokenizer (AutoTokenizer): Tokenizer passed through to ``__init__``.
-            sot_cfg (dict): Speaker-activity settings (see :meth:`configure_sot`).
-
-        Returns:
-            SALMDataset: a configured instance emitting ``spk_targets``.
-        """
-        return cls(tokenizer=tokenizer).configure_sot(sot_cfg)
-
-    def configure_sot(self, sot_cfg: dict) -> "SALMDataset":
-        """Opt into the auxiliary SOT mode (off by default; base ``__init__`` untouched).
-
-        When enabled, each batch additionally carries RTTM-derived speaker-activity
-        targets (``spk_targets`` / ``spk_target_length``).
-
-        Args:
-            sot_cfg (dict): Speaker-activity settings (``num_speakers``,
-                ``window_stride``, ``sample_rate``, ``subsampling_factor``, ...).
-
-        Returns:
-            SALMDataset: ``self``, for chaining.
-        """
-        self.sot_cfg = sot_cfg
-        self.emit_speaker_targets = True
-        self.num_speakers = sot_cfg.get('num_speakers', 4)
-        self.no_rttm_to_ones = sot_cfg.get('no_rttm_to_ones', True)
-        self.num_sample_per_mel_frame = int(sot_cfg.get('window_stride', 0.01) * sot_cfg.get('sample_rate', 16000))
-        self.num_mel_frame_per_target_frame = int(sot_cfg.get('subsampling_factor', 8))
-        return self
-
-    def __getitem__(self, conversations: CutSet) -> dict | None:
-        # Note: the function call below may filter out some or all conversations due to audio loading issues.
-        # If all conversations are filtered out, we'll return None, and expect users to wrap this dataset
-        # in ``nemo.collections.common.data.fallback.FallbackDataset`` to use the previous mini-batch instead.
-        try:
-            audios, audio_lens, conversations = collate_conversation_audio_fault_tolerant(
-                conversations, self.load_audio
-            )
-        except Exception as e:
-            logging.warning(f"Error collating conversations: {e}")
-            return None
-        if not conversations:
-            return None
-        batch = {
-            "audios": audios,
-            "audio_lens": audio_lens,
-            "input_ids": left_collate_vectors([c.input_ids for c in conversations], padding_value=self.pad_id),
-            "loss_mask": left_collate_vectors(
-                [getattr(c, "mask", torch.empty(0)) for c in conversations], padding_value=0
-            ).to(torch.bool),
-            "conversations": drop_in_memory_data(conversations),
-        }
-        if getattr(self, "emit_speaker_targets", False):
-            self._add_speaker_activity_targets(batch)
-        return batch
-
-    # --- Auxiliary SOT speaker-activity mode (active only when sot_cfg is set) ---
-    def _add_speaker_activity_targets(self, batch: dict) -> None:
+    def __call__(self, batch: dict, cfg: MultiSpeakerConfig) -> None:
         """Attach RTTM-derived ``spk_targets`` / ``spk_target_length`` to ``batch`` in place."""
-        speaker_activities = self._build_speaker_activities(batch["conversations"])
+        speaker_activities = self._build_speaker_activities(batch["conversations"], cfg)
         if not speaker_activities:
             return
         targets, target_length = collate_speaker_activity_targets(
             speaker_activities,
             batch["audio_lens"],
-            num_speakers=self.num_speakers,
-            num_sample_per_mel_frame=self.num_sample_per_mel_frame,
-            num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
+            num_speakers=cfg.num_speakers,
+            num_sample_per_mel_frame=cfg.num_sample_per_mel_frame,
+            num_mel_frame_per_target_frame=cfg.num_mel_frame_per_target_frame,
             dtype=batch["audios"].dtype,
         )
         batch["spk_targets"] = targets
         batch["spk_target_length"] = target_length
 
-    def _build_speaker_activities(self, conversations: CutSet) -> list[torch.Tensor]:
+    def _build_speaker_activities(self, conversations: CutSet, cfg: MultiSpeakerConfig) -> list[torch.Tensor]:
         speaker_activities = []
         for conversation in conversations:
             for turn in conversation.turns:
@@ -178,20 +83,21 @@ class SALMDataset(torch.utils.data.Dataset):
                 cut = self._prepare_audio_turn_cut(turn)
                 speaker_activity = speaker_activity_from_cut(
                     cut,
-                    num_speakers=self.num_speakers,
-                    num_sample_per_mel_frame=self.num_sample_per_mel_frame,
-                    num_mel_frame_per_target_frame=self.num_mel_frame_per_target_frame,
-                    no_rttm_to_ones=self.no_rttm_to_ones,
+                    num_speakers=cfg.num_speakers,
+                    num_sample_per_mel_frame=cfg.num_sample_per_mel_frame,
+                    num_mel_frame_per_target_frame=cfg.num_mel_frame_per_target_frame,
+                    no_rttm_to_ones=cfg.no_rttm_to_ones,
                 )
 
                 text = self._audio_turn_text(turn, cut)
                 new_text, _, _ = ensure_single_speaker_sot(text)
 
-                speaker_activity = fix_speaker_activity(new_text, speaker_activity, self.num_speakers)
+                speaker_activity = fix_speaker_activity(new_text, speaker_activity, cfg.num_speakers)
                 speaker_activities.append(speaker_activity)
         return speaker_activities
 
-    def _prepare_audio_turn_cut(self, turn: AudioTurn):
+    @staticmethod
+    def _prepare_audio_turn_cut(turn: AudioTurn):
         cut = turn.cut
         if isinstance(cut, MultiCut):
             cut = cut.to_mono(mono_downmix=True)
@@ -217,6 +123,94 @@ class SALMDataset(torch.utils.data.Dataset):
         if text:
             return text
         return " ".join(s.text for s in getattr(cut, "supervisions", []) if s.text)
+
+
+class SALMDataset(torch.utils.data.Dataset):
+    """
+    A dataset for Speech-Augmented Language Models (SALM) that processes multimodal conversations
+    containing both text and audio turns.
+
+    This dataset handles NeMoMultimodalConversation objects which combine text messages
+    and audio segments in a conversational format. It uses audio_locator_tag in the text,
+    where each such placeholder corresponds to an entire audio segment.
+
+    Args:
+        tokenizer (AutoTokenizer):
+            Tokenizer for converting text to token IDs and vice versa. Must have a special
+            audio_locator_tag token that will be replaced with audio embeddings during model's
+            training step.
+        multispeaker_cfg (dict | None):
+            Optional SOT speaker-activity settings. When provided, each batch additionally
+            includes RTTM-derived ``spk_targets`` / ``spk_target_length``.
+
+    Returns:
+        A dictionary with the following keys:
+            - audios: Tensor of audio waveform samples [B_audio, T_samples]
+            - audio_lens: Tensor of audio lengths [B_audio]
+            - input_ids: Tensor of text token IDs [B, T_tokens], including audio_locator_tag tokens
+            - loss_mask: Boolean tensor [B, T_tokens] indicating which tokens are part of the
+                assistant's responses (True) and should be used for computing loss
+
+    Notes:
+        - Each audio_locator_tag token in input_ids corresponds to an audio segment in audios
+        - The SALM model later replaces these audio_locator_tag tokens with encoded audio embeddings
+        - The loss_mask identifies which tokens are part of the target sequences (assistant responses)
+          and which are part of the source sequences (user prompts)
+        - The input_ids and loss_mask will be expanded during model forward pass to account for
+          the variable-length audio segments that replace each audio_locator_tag token
+        - SOT speaker tags stay regular text tokens here; normalization and aliasing happen upstream.
+        - Auxiliary SOT mode (off by default) is opt-in via ``multispeaker_cfg`` and does not
+          affect the default single-speaker behavior.
+    """
+
+    def __init__(self, tokenizer: AutoTokenizer, multispeaker_cfg: dict | None = None) -> None:
+        self.tokenizer = tokenizer
+        self.pad_id = get_pad_id(tokenizer)
+        # Setting USE_AIS_GET_BATCH=true makes the loader issue a single AIStore GetBatch
+        # call per minibatch, paired with URL-backed cuts produced by the multimodal
+        # conversation adapters (NeMoMultimodalConversation{Jsonl,ShareGPTJsonl}Adapter).
+        self.load_audio = AudioSamples(
+            fault_tolerant=True,
+            use_batch_loader=os.environ.get("USE_AIS_GET_BATCH", "False").lower() == "true",
+            mono_downmix=True,
+        )
+        self.multispeaker_processor = SALMMultiSpeakerProcessor()
+        self.multispeaker_cfg = None
+        if multispeaker_cfg is not None:
+            self.multispeaker_cfg = MultiSpeakerConfig(
+                num_speakers=int(multispeaker_cfg.get('num_speakers', 4)),
+                no_rttm_to_ones=multispeaker_cfg.get('no_rttm_to_ones', True),
+                num_sample_per_mel_frame=int(
+                    multispeaker_cfg.get('window_stride', 0.01) * multispeaker_cfg.get('sample_rate', 16000)
+                ),
+                num_mel_frame_per_target_frame=int(multispeaker_cfg.get('subsampling_factor', 8)),
+            )
+
+    def __getitem__(self, conversations: CutSet) -> dict | None:
+        # Note: the function call below may filter out some or all conversations due to audio loading issues.
+        # If all conversations are filtered out, we'll return None, and expect users to wrap this dataset
+        # in ``nemo.collections.common.data.fallback.FallbackDataset`` to use the previous mini-batch instead.
+        try:
+            audios, audio_lens, conversations = collate_conversation_audio_fault_tolerant(
+                conversations, self.load_audio
+            )
+        except Exception as e:
+            logging.warning(f"Error collating conversations: {e}")
+            return None
+        if not conversations:
+            return None
+        batch = {
+            "audios": audios,
+            "audio_lens": audio_lens,
+            "input_ids": left_collate_vectors([c.input_ids for c in conversations], padding_value=self.pad_id),
+            "loss_mask": left_collate_vectors(
+                [getattr(c, "mask", torch.empty(0)) for c in conversations], padding_value=0
+            ).to(torch.bool),
+            "conversations": drop_in_memory_data(conversations),
+        }
+        if self.multispeaker_cfg is not None:
+            self.multispeaker_processor(batch, self.multispeaker_cfg)
+        return batch
 
 
 def left_collate_vectors(
