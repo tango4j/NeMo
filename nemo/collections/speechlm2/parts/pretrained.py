@@ -234,7 +234,9 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
     # (from_pretrained -> restore_from, which checks the bundle target class).
     if pe_encoder_path.endswith(".nemo") and Path(pe_encoder_path).is_file():
         if not ParallelExpertEncoderPT.is_pe_nemo(pe_encoder_path):
-            raise ValueError(f"model.pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle.")
+            raise ValueError(
+                f"model.pe_encoder_path={pe_encoder_path!r} is not a ParallelExpertEncoderPT .nemo bundle."
+            )
 
     pe_encoder = ParallelExpertEncoderPT.load_from_nemo(
         pe_encoder_path,
