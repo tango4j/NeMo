@@ -161,26 +161,50 @@ class ParallelExpertEncoderPT(ModelPT):
     @classmethod
     def load_from_nemo(
         cls,
-        nemo_path: str,
+        model_path_or_name: str,
         *,
         map_location: Union[str, torch.device] = 'cpu',
         strict: bool = True,
     ) -> ParallelExpertEncoder:
-        """Load a self-contained PE ``.nemo`` bundle and return its inner encoder.
+        """Load a self-contained PE bundle and return its inner encoder.
+
+        Follows the standard NeMo :class:`~nemo.core.classes.common.Model`
+        convention for resolving a checkpoint reference:
+
+        * a local ``.nemo`` file is restored with :meth:`ModelPT.restore_from`;
+        * otherwise ``model_path_or_name`` is treated as a pretrained model
+          identifier -- a HuggingFace Hub repo id (``{repo}/{name}``) or an NGC
+          alias -- and resolved with :meth:`Model.from_pretrained`, which
+          downloads/caches the ``.nemo`` (honouring the HuggingFace cache and
+          ``HF_HUB_OFFLINE``, so a prefetched cache works on offline nodes).
+
+        This mirrors ``speechlm2.parts.pretrained.load_pretrained_nemo`` so PE
+        bundles load uniformly from local files or model cards.
 
         Args:
-            nemo_path (str): Path to a self-contained PE ``.nemo`` bundle.
+            model_path_or_name (str): Local ``.nemo`` path or pretrained model id.
             map_location (str | torch.device): Device to map weights onto.
             strict (bool): Enforce exact state-dict match.
 
         Returns:
             The restored :class:`ParallelExpertEncoder`.
         """
-        bundle = cls.restore_from(
-            restore_path=nemo_path,
-            map_location=map_location,
-            strict=strict,
-        )
+        if (
+            isinstance(model_path_or_name, str)
+            and model_path_or_name.endswith('.nemo')
+            and os.path.isfile(model_path_or_name)
+        ):
+            bundle = cls.restore_from(
+                restore_path=model_path_or_name,
+                map_location=map_location,
+                strict=strict,
+            )
+        else:
+            bundle = cls.from_pretrained(
+                model_name=model_path_or_name,
+                map_location=map_location,
+                strict=strict,
+            )
         return bundle.encoder
 
     @classmethod
