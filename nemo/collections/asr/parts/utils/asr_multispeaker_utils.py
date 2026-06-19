@@ -337,7 +337,8 @@ def read_rttm_supervisions_lenient(rttm_filepath: Union[str, list]) -> Supervisi
                 parts = line.strip().split()
                 if not parts:
                     continue
-                assert len(parts) >= 8, f"Invalid RTTM line in file {file}: {line}"
+                if len(parts) < 8:
+                    raise ValueError(f"Invalid RTTM line in file {file}: {line}")
                 recording_id = parts[1]
                 if float(parts[4]) == 0:  # skip empty segments
                     continue
