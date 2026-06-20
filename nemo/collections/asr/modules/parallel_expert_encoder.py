@@ -378,6 +378,26 @@ class ParallelExpertEncoder(nn.Module):
             for p in self.asr_encoder.parameters():
                 p.requires_grad = False
 
+    def train(self, mode: bool = True) -> "ParallelExpertEncoder":
+        """Set training mode, but keep frozen sub-branches in eval.
+
+        The parent ``model.train()`` recurses into every sub-module, which would re-enable
+        dropout / BatchNorm stat updates in a frozen branch. This re-asserts ``eval()`` on
+        the frozen Sortformer (and ASR encoder) so their outputs stay deterministic.
+
+        Args:
+            mode (bool): Whether to set training mode (``True``) or eval mode (``False``).
+
+        Returns:
+            ParallelExpertEncoder: ``self``, matching ``nn.Module.train``.
+        """
+        super().train(mode)
+        if self.freeze_diar:
+            self.diarization_model.eval()
+        if self.freeze_asr:
+            self.asr_encoder.eval()
+        return self
+
     # ConformerEncoder-compatible properties (drop-in for SALM perception).
     @property
     def d_model(self) -> int:
