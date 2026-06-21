@@ -389,7 +389,7 @@ class ParallelExpertEncoder(nn.Module):
             mode (bool): Whether to set training mode (``True``) or eval mode (``False``).
 
         Returns:
-            ParallelExpertEncoder: ``self``, matching ``nn.Module.train``.
+            ParallelExpertEncoder: ``self``, matching ``nn.Module.train``d.
         """
         super().train(mode)
         if self.freeze_diar:

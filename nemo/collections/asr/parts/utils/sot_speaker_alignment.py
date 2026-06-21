@@ -379,7 +379,9 @@ def collate_speaker_activity_targets(
         if n_spk > num_speakers:
             activity = activity[:, :num_speakers]
         elif n_spk < num_speakers:
-            activity = torch.nn.functional.pad(activity, (0, num_speakers - n_spk), mode="constant", value=0.0)
+            activity = torch.nn.functional.pad(
+                activity, (0, num_speakers - n_spk), mode="constant", value=0.0
+            )
         normalized.append(activity)
 
     targets = collate_matrices(normalized).to(dtype)
