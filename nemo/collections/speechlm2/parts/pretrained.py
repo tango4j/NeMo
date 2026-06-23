@@ -287,6 +287,11 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
         # featurizer.normalize disabling above is the functional change that matters.
         pass
 
+    # SALM serves single-speaker ASR by default: treat audio as one speaker at inference
+    # (the encoder's own default is False; this scopes the True default to the SALM pipeline).
+    # Never affects training -- the encoder applies it only in eval mode.
+    pe_encoder.force_single_speaker = bool(model.cfg.get("force_single_speaker", True))
+
     model.perception.encoder = pe_encoder
     logging.info(
         "Mounted ParallelExpertEncoder from %s onto model.perception.encoder "

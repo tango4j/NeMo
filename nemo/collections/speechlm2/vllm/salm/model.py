@@ -109,6 +109,10 @@ class NeMoSpeechLMForConditionalGeneration(
             _maybe_mount_pe_encoder(self.perception, getattr(config, "pe_encoder_path", None))
 
         self._uses_pe_encoder = isinstance(getattr(self.perception, "encoder", None), ParallelExpertEncoder)
+        if self._uses_pe_encoder:
+            # SALM serves single-speaker ASR by default; the all-ones substitution and the
+            # training-safety guard live inside ParallelExpertEncoder.
+            self.perception.encoder.force_single_speaker = bool(getattr(config, "force_single_speaker", True))
 
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
@@ -159,6 +163,8 @@ class NeMoSpeechLMForConditionalGeneration(
         # inference over the full audio, so it bypasses the chunking helper.
         with torch.no_grad():
             if self._uses_pe_encoder:
+                # The PE encoder handles single-speaker mode internally (force_single_speaker
+                # set at init) and runs its own long-form online inference.
                 audio_embs, audio_emb_lens = self.perception(
                     input_signal=audio_signal, input_signal_length=audio_lengths
                 )

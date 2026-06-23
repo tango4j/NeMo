@@ -573,6 +573,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
         spk_targets: torch.Tensor = None,
+        force_single_speaker: bool | None = None,
         generation_config: GenerationConfig = None,
         enable_thinking: bool | None = None,
         **generation_kwargs,
@@ -642,6 +643,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 encoder is a ``ParallelExpertEncoder`` (i.e. ``model.pe_encoder_path`` was set); it
                 overrides the encoder's embedded Sortformer prediction for this call. When ``None``
                 (default), the encoder runs its embedded Sortformer as usual.
+            force_single_speaker: Per-call override for the ``ParallelExpertEncoder``'s
+                single-speaker mode. When True, the encoder treats the audio as a single
+                speaker (all-ones speaker-0 activity) instead of predicting speaker activity,
+                avoiding over-counting speakers on single-speaker audio. ``None`` (default)
+                keeps the encoder's configured setting (SALM default True). No effect on
+                non-PE encoders, and never applied during training (enforced inside the
+                encoder).
             generation_config: Optional HuggingFace GenerationConfig object.
             enable_thinking: Optional prompt-formatter hint forwarded to ``encode_dialog``.
                 Relevant for prompt formats that support thinking/reasoning mode.
@@ -677,6 +685,11 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             # Prepare token embeddings and audio embeddings.
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
+            # Per-call override of the encoder's single-speaker behavior (the all-ones
+            # substitution + training-safety guard live in ParallelExpertEncoder). ``None``
+            # keeps whatever the mounted encoder was configured with at load time.
+            if force_single_speaker is not None and self._uses_parallel_expert_encoder():
+                self.perception.encoder.force_single_speaker = force_single_speaker
             if self._uses_parallel_expert_encoder() and spk_targets is None:
                 # This is only used for inference when ``spk_targets`` is None.
                 # PEE needs to produce ``spk_targets`` itself through recursive encoding.

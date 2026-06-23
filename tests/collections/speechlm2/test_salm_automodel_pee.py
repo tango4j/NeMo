@@ -283,6 +283,34 @@ def test_salm_automodel_pee_generation(model):
     assert (answer < model.text_vocab_size).all()
 
 
+@requires_cuda
+@pytest.mark.parametrize("force_single_speaker", [True, False, None])
+def test_salm_automodel_pee_generation_force_single_speaker_override(model, force_single_speaker):
+    # generate()'s thin per-call override flips the mounted PE encoder's flag;
+    # None leaves it untouched. Pin a known baseline and restore it afterwards so
+    # the session-scoped model doesn't leak state into other tests.
+    original = model.perception.encoder.force_single_speaker
+    model.perception.encoder.force_single_speaker = False
+    try:
+        answer = model.generate(
+            prompts=[
+                [
+                    {"role": "user", "slots": {"message": f"Repeat after me: {AUDIO_LOCATOR_TAG}"}},
+                ]
+            ],
+            audios=torch.randn(1, 16000, device=model.device),
+            audio_lens=torch.tensor([16000], device=model.device),
+            max_new_tokens=4,
+            force_single_speaker=force_single_speaker,
+        )
+        assert answer.shape == (1, 4)
+        # None -> keep the baseline (False); True/False -> applied onto the encoder.
+        expected = False if force_single_speaker is None else force_single_speaker
+        assert model.perception.encoder.force_single_speaker is expected
+    finally:
+        model.perception.encoder.force_single_speaker = original
+
+
 # ----------------------------------------------------------------------------- #
 # CPU-only: spk_targets -> spk_targets routing in prepare_inputs.
 #

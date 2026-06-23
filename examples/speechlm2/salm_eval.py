@@ -82,6 +82,9 @@ class SalmEvalConfig:
     enable_thinking: Optional[bool] = None
     use_asr_decoder: bool = False  # set this to True if using SALMWithAsrDecoder
     use_nemo_automodel: Optional[bool] = None  # None = auto-detect from config.json
+    # When True, treat the audio as a single speaker (all-ones spk0 target). None = fall back
+    # to the model config's force_single_speaker.
+    force_single_speaker: Optional[bool] = None
     # Parallelism sizes for distributed inference (launch with torchrun)
     tp_size: int = 1
     ep_size: int = 1
@@ -157,6 +160,12 @@ def main(cfg: SalmEvalConfig):
             content = f"{content} {model.audio_locator_tag}"
     prompt.append({"role": "user", "content": content})
 
+    # ``force_single_speaker`` is a SALMAutomodel-only knob; only forward it when explicitly
+    # set so the base SALM path (which routes unknown kwargs to HF generate) is unaffected.
+    extra_generate_kwargs = {}
+    if cfg.force_single_speaker is not None:
+        extra_generate_kwargs["force_single_speaker"] = cfg.force_single_speaker
+
     refs = []
     hyps = []
     input_durations = []
@@ -174,6 +183,7 @@ def main(cfg: SalmEvalConfig):
                 pad_token_id=model.text_pad_id,
             ),
             enable_thinking=cfg.enable_thinking,
+            **extra_generate_kwargs,
         )
         answer_ids = answer_ids.cpu()
         batch_infer_duration = perf_counter() - ts

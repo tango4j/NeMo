@@ -118,6 +118,7 @@ class ParallelExpertEncoderPT(ModelPT):
             diar_fifo_len=self._cfg.get('diar_fifo_len', 40),
             diar_spkcache_update_period=self._cfg.get('diar_spkcache_update_period', 300),
             diar_spkcache_len=self._cfg.get('diar_spkcache_len', 188),
+            force_single_speaker=self._cfg.get('force_single_speaker', False),
         )
 
     @classmethod
@@ -318,6 +319,7 @@ class ParallelExpertEncoder(nn.Module):
         diar_fifo_len: int = 40,
         diar_spkcache_update_period: int = 300,
         diar_spkcache_len: int = 188,
+        force_single_speaker: bool = False,
     ):
         super().__init__()
 
@@ -357,6 +359,11 @@ class ParallelExpertEncoder(nn.Module):
         self.diar_fifo_len = int(diar_fifo_len)
         self.diar_spkcache_update_period = int(diar_spkcache_update_period)
         self.diar_spkcache_len = int(diar_spkcache_len)
+        # Inference-only: feed an all-ones speaker-0 target instead of predicting speaker
+        # activity (single-speaker condition). Structurally never applied in training mode
+        # (see _maybe_single_speaker_targets). Defaults to False for the general-purpose
+        # encoder; the SALM / vLLM pipelines turn it on.
+        self.force_single_speaker = bool(force_single_speaker)
 
         self.n_spk = int(self.diarization_model.sortformer_modules.n_spk)
         self.asr_d_model = self.asr_encoder.d_model
@@ -516,6 +523,24 @@ class ParallelExpertEncoder(nn.Module):
             spk_targets=spk_targets,
         )
 
+    def _maybe_single_speaker_targets(self, spk_targets, audio_signal):
+        """Return an all-ones speaker-0 target for single-speaker inference, else ``spk_targets``.
+
+        Only substitutes when (a) no targets were supplied, (b) ``force_single_speaker`` is
+        enabled, and (c) the module is in eval mode. The ``not self.training`` guard makes it
+        **structurally impossible** for this single-speaker override to affect any
+        gradient-bearing (training) forward pass; training always runs the speaker expert (or
+        uses dataloader-provided targets) unchanged.
+
+        A single time frame ``(B, 1, n_spk)`` is enough: :meth:`_align_diar_frames` repeats it
+        to the ASR frame count during fusion.
+        """
+        if spk_targets is not None or not self.force_single_speaker or self.training:
+            return spk_targets
+        spk_targets = audio_signal.new_zeros(audio_signal.shape[0], 1, self.n_spk)
+        spk_targets[:, :, 0] = 1.0
+        return spk_targets
+
     def _forward(
         self,
         audio_signal,
@@ -523,6 +548,7 @@ class ParallelExpertEncoder(nn.Module):
         spk_targets=None,
     ):
         """Offline (non-chunked) forward pass. See :meth:`forward` for argument semantics."""
+        spk_targets = self._maybe_single_speaker_targets(spk_targets, audio_signal)
         if spk_targets is None:
             # Cast fp32 mels to the diarizer's device/dtype before its conv subsampling.
             diar_signal = self._match_module_io(audio_signal, self.diarization_model)
@@ -598,6 +624,10 @@ class ParallelExpertEncoder(nn.Module):
         # Match the ASR encoder's device/dtype (mels arrive fp32, encoder runs bf16).
         asr_audio_signal = self._match_module_io(asr_audio_signal, self.asr_encoder)
         length = length.to(device=asr_audio_signal.device)
+
+        # Single-speaker inference override (never in training; see _maybe_single_speaker_targets).
+        # When active, this returns an all-ones target so the streaming diarizer is skipped below.
+        spk_targets = self._maybe_single_speaker_targets(spk_targets, audio_signal)
 
         run_streaming_diar = spk_targets is None
         if run_streaming_diar:

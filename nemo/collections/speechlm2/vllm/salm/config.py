@@ -77,6 +77,7 @@ class NeMoSpeechLMConfig(PretrainedConfig):
         pretrained_weights: bool | None = None,
         lora: dict | None = None,
         encoder_chunk_size_seconds: float | None = None,
+        force_single_speaker: bool = True,
         **kwargs,
     ):
         required_fields = {
@@ -115,6 +116,7 @@ class NeMoSpeechLMConfig(PretrainedConfig):
             self.pretrained_weights = None
             self.lora = None
             self.encoder_chunk_size_seconds = None
+            self.force_single_speaker = True
             return
 
         for name, value in required_fields.items():
@@ -141,6 +143,10 @@ class NeMoSpeechLMConfig(PretrainedConfig):
         self.pretrained_weights = pretrained_weights
         self.lora = lora
         self.encoder_chunk_size_seconds = encoder_chunk_size_seconds
+        # Inference toggle: treat the audio as a single speaker (all-ones speaker-0 target).
+        # Read from the checkpoint's config.json; override at serve time with
+        # ``--hf-overrides '{"force_single_speaker": false}'``.
+        self.force_single_speaker = bool(force_single_speaker)
 
         self.text_config = AutoConfig.from_pretrained(pretrained_llm, trust_remote_code=True)
 
@@ -219,6 +225,7 @@ class NeMoSpeechLMConfig(PretrainedConfig):
             "lora",
             "is_hybrid",
             "encoder_chunk_size_seconds",
+            "force_single_speaker",
         ):
             raise AttributeError(name)
         alias = self._ATTR_ALIASES.get(name, name) if self.is_hybrid else name

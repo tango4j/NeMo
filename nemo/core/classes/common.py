@@ -103,6 +103,7 @@ ALLOWED_CLASS_PREFIXES_WITH_OPTIONAL_DEPENDENCIES = [
 ]
 
 ALLOWED_EXACT_CLASS_TARGETS = {
+    "nemo.collections.asr.modules.parallel_expert_encoder.ParallelExpertEncoderPT",
     "nemo_text_processing.text_normalization.normalize.Normalizer",
 }
 

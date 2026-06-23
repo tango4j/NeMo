@@ -530,6 +530,128 @@ def test_pe_encoder_online_forward_matches_conformer_io_with_real_encoders():
 
 
 # ----------------------------------------------------------------------------- #
+# force_single_speaker: single-speaker inference override (never in training)
+# ----------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_force_single_speaker_constructor_default_and_override():
+    # Default is False (general-purpose encoder); SALM/vLLM turn it on at mount time.
+    assert build_toy_pe_encoder().force_single_speaker is False
+    assert build_toy_pe_encoder(force_single_speaker=True).force_single_speaker is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "force, training, provide_targets, expect_substitute",
+    [
+        (True, False, False, True),  # eval + enabled + no targets -> all-ones spk0
+        (False, False, False, False),  # disabled -> untouched (diarizer will run)
+        (True, True, False, False),  # TRAINING GUARD: never substitute while training
+        (True, False, True, False),  # explicit targets always pass through unchanged
+    ],
+)
+def test_maybe_single_speaker_targets(force, training, provide_targets, expect_substitute):
+    # Bare instance: exercise the single chokepoint helper in isolation.
+    enc = _PEE.__new__(_PEE)
+    nn.Module.__init__(enc)
+    enc.force_single_speaker = force
+    enc.n_spk = _N_SPK
+    # Set the flag directly (the class overrides train() to manage frozen sub-experts,
+    # which a bare instance doesn't have); the helper only reads self.training.
+    enc.training = training
+
+    audio_signal = torch.zeros(2, 8, 16)
+    provided = torch.rand(2, 3, _N_SPK) if provide_targets else None
+    out = enc._maybe_single_speaker_targets(provided, audio_signal)
+
+    if expect_substitute:
+        assert out.shape == (2, 1, _N_SPK)
+        assert torch.equal(out[:, :, 0], torch.ones(2, 1))  # speaker 0 active
+        assert torch.equal(out[:, :, 1:], torch.zeros(2, 1, _N_SPK - 1))  # rest silent
+    else:
+        # No substitution: the input is returned unchanged (None or the provided tensor).
+        assert out is provided
+
+
+@pytest.mark.unit
+def test_force_single_speaker_never_substitutes_in_training_mode():
+    # The structural training-safety guarantee on a real encoder: even with the flag
+    # enabled and no targets supplied, train() mode must keep targets None so the
+    # speaker expert (not an all-ones override) drives any gradient-bearing forward.
+    enc = build_toy_pe_encoder(force_single_speaker=True).train()
+    mels = torch.randn(2, _MEL_FEATURES, 160)
+    assert enc._maybe_single_speaker_targets(None, mels) is None
+
+
+@pytest.mark.unit
+def test_pe_encoder_offline_force_single_speaker_matches_explicit_all_ones():
+    enc = build_toy_pe_encoder().eval()
+    batch_size, n_frames = 2, 160
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+
+    # Explicit all-ones speaker-0 target (single time frame; aligned internally).
+    ones = torch.zeros(batch_size, 1, _N_SPK)
+    ones[:, :, 0] = 1.0
+
+    with torch.no_grad():
+        out_explicit, _ = enc(mels, length, spk_targets=ones)
+        enc.force_single_speaker = True
+        out_forced, _ = enc(mels, length)  # spk_targets=None -> all-ones substituted
+        enc.force_single_speaker = False
+        out_diar, _ = enc(mels, length)  # spk_targets=None -> Sortformer predicts
+
+    # Forcing single speaker is exactly equivalent to feeding an all-ones spk0 target...
+    assert torch.allclose(out_forced, out_explicit)
+    # ...and differs from letting the embedded Sortformer predict speaker activity.
+    assert not torch.allclose(out_forced, out_diar)
+
+
+@pytest.mark.unit
+def test_pe_encoder_online_force_single_speaker_matches_explicit_all_ones():
+    # Compare within the online path itself: at forward()-dispatch time an explicit
+    # spk_targets would route to the offline branch, so call _forward_online directly
+    # to verify the in-branch substitution equals feeding an explicit all-ones target.
+    enc = build_toy_pe_encoder(
+        online_inference_length=10,
+        chunk_left_context=2,
+        chunk_right_context=2,
+        diar_fifo_len=10,
+        diar_spkcache_update_period=20,
+        diar_spkcache_len=20,
+    ).eval()
+    enc._suppress_online_pbar = True
+
+    batch_size, n_frames = 1, 320  # crosses onto the long-form online path
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+
+    ones = torch.zeros(batch_size, 1, _N_SPK)
+    ones[:, :, 0] = 1.0
+
+    with torch.no_grad():
+        out_explicit, _ = enc._forward_online(audio_signal=mels, length=length, spk_targets=ones)
+        enc.force_single_speaker = True
+        out_forced, _ = enc._forward_online(audio_signal=mels, length=length, spk_targets=None)
+
+    assert out_forced.shape == out_explicit.shape
+    assert torch.isfinite(out_forced).all()
+    assert torch.allclose(out_forced, out_explicit)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("force_single_speaker", [True, False])
+def test_force_single_speaker_preserves_online_dispatch(force_single_speaker):
+    # force_single_speaker must NOT collapse long-form audio onto the offline path:
+    # forward() still dispatches long eval audio to _forward_online (the all-ones
+    # substitution happens inside that branch, after the routing decision).
+    enc = dispatch_stub(online_inference_length=500, chunk_feat_len=100, training=False)
+    enc.force_single_speaker = force_single_speaker
+    audio = torch.zeros(1, 8, 200)  # longer than one window -> online
+    length = torch.tensor([200])
+    assert enc.forward(audio, length) == "online"
+
+
+# ----------------------------------------------------------------------------- #
 # GPU end-to-end fusion with real toy encoders
 #
 # These mirror the CPU end-to-end tests but run on CUDA. They additionally
