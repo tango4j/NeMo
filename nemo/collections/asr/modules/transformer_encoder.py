@@ -1,519 +1,623 @@
-from torch import nn
-import torch
-from torch.nn import Conv1d
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math
 from dataclasses import dataclass
 from typing import Optional
-from torch.nn import GELU as TorchGELU
-from torch.nn.functional import scaled_dot_product_attention
-@dataclass
-class GPTConfig():
-    vocab_size: int = 50257
-    context_length: int = 1024
-    emb_dim: int = 768
-    n_heads: int = 12
-    n_layers: int = 12
-    drop_rate: int = 0.1
-    qkv_bias: bool = False
-    theta_base: int = 10_000
+
+import torch
+import torch.nn as nn
+from torch.nn.attention.flex_attention import and_masks, create_block_mask, flex_attention
+
+from nemo.collections.asr.parts.submodules.multi_head_attention import (
+    PositionalEncoding,
+    RelPositionalEncoding,
+    RelPositionMultiHeadAttention,
+    RotaryPositionalEncoding,
+)
+from nemo.collections.asr.parts.submodules.subsampling import FeatureStacking, StackingSubsampling
+from nemo.core.classes.module import freeze, unfreeze
+from nemo.utils.decorators import experimental
+
+flex_attention_compiled = torch.compile(flex_attention, dynamic=True)
+
 
 @dataclass
-class TransformerEncoderConfig():
-    n_mels: int = 80
-    d_model: int = 512
-    n_heads: int = 12
-    n_layers: int = 12
-    drop_rate: float = 0.1
-    qkv_bias: bool = False
-    causal_mask: bool = False
-    theta_base: int = 10_000
-    context_length: int = 4096
-    qk_norm: bool = False
-    # FFN inner dimension. If None, FeedForward defaults to 4 * d_model
-    # (preserves legacy behavior).
-    hidden_size: Optional[int] = None
+class TransformerEncoderConfig:
+    """Configuration for ``TransformerEncoder`` and its sub-blocks.
 
-class FeedForward(nn.Module):
-    """Two-layer MLP with GELU. ``hidden_size`` controls the inner dim.
+    Args:
+        feat_in: Input feature dimension (e.g. number of mel bins).
+        d_model: Transformer encoder state dimension, i.e. the size of the residual stream that flows
+            through every block (token/frame embedding size, attention input/output size, and
+            feed-forward input/output size). Also known as ``hidden_size`` in HuggingFace
+            ``transformers`` configs and ``embed_dim``/``d_model`` in PyTorch's
+            ``nn.TransformerEncoderLayer``.
+        n_heads: Number of attention heads.
+        n_layers: Number of Transformer blocks.
+        drop_rate: Dropout probability applied inside attention and feed-forward sublayers.
+        qkv_bias: If True, add a learnable bias to the fused Q/K/V projection. Many modern ASR/LM
+            Transformers (e.g. HuggingFace Whisper) drop the bias on the K projection because a
+            constant K bias adds the same scalar to every key and is wiped out by softmax's
+            shift-invariance, making it a redundant parameter. Default ``False`` matches that style.
+        qk_norm: If True, apply per-head ``LayerNorm`` to Q and K before the dot product. Stabilizes
+            training by preventing exponential Q/K-norm growth and "attention entropy collapse"
+            (Henry et al. 2020; used in OLMo 2, Gemma 3, Qwen 3). Cheap, ~no-op for inference.
+        ff_expansion: Multiplier for the per-block FFN inner hidden size:
+            ``ffn_hidden_size = int(ff_expansion * d_model)``. Only widens the intermediate FFN
+            projection; FFN input/output stays at ``d_model``. Typical value ``4.0``; ``float``
+            allows sub-1x experts for MoE. Equivalent to ``intermediate_size / hidden_size`` in
+            HuggingFace and ``dim_feedforward / d_model`` in PyTorch's ``nn.TransformerEncoderLayer``.
+        pre_block_norm: If True, apply ``LayerNorm`` to embeddings before the first Transformer block
+            (BERT/ViT-style). Set False to match pre-norm Transformers such as Whisper or GPT-2.
+        subsampling_factor: Frame-level subsampling factor performed by the pre-encoder.
+        attn_mode: Attention pattern. Currently only ``"full"`` (bidirectional) is supported.
+            Future modes: ``"causal"``, ``"lookahead"``, ``"local"``, ``"sliding_window"``.
+        self_attention_model: Positional encoding / attention scoring scheme.
 
-    If ``hidden_size`` is None, defaults to ``4 * dim`` to preserve the original
-    (pre-`ff_expansion_factor`) behavior. Pass an explicit ``hidden_size`` to
-    decouple FFN width from ``d_model`` (e.g. for fine-grained MoE).
+            - ``"rel_pos"`` (default): Transformer-XL relative positional encoding
+              (https://arxiv.org/abs/1901.02860). The (b)+(d) cross/positional bias is computed
+              from the relative-position embedding and injected into FlexAttention via a
+              ``score_mod`` closure; the (c) global-content bias is folded into the query as
+              ``Q + pos_bias_u``.
+            - ``"abs_pos"``: sinusoidal absolute positional encoding added to embeddings
+              before the first block; standard scaled dot-product attention.
+            - ``"no_pos"`` (or ``None``): no positional encoding at all. The pre-encoder output
+              is consumed directly by the Transformer blocks. ``xscaling``, ``pos_emb_max_len``,
+              ``dropout_pre_encoder`` and ``dropout_emb`` are unused in this mode.
+            - ``"rope"``: rotary position embedding applied to Q and K inside attention. No
+              additive positional embedding is added to the embeddings; the standard scaled
+              dot-product attention runs through FlexAttention with ``score_mod=None``.
+        rope_base: Theta base for the rotary position embedding. Only used when
+            ``self_attention_model='rope'``.
+        rotary_fraction: Fraction of the per-head dim to rotate. Only used when
+            ``self_attention_model='rope'``.
     """
 
-    def __init__(self, dim, hidden_size: Optional[int] = None):
+    feat_in: int = 128
+    d_model: int = 512
+    n_heads: int = 8
+    n_layers: int = 17
+    drop_rate: float = 0.1
+    qkv_bias: bool = False
+    qk_norm: bool = False
+    ff_expansion: float = 4.0
+    pre_block_norm: bool = True
+    subsampling_factor: int = 4
+    # Attention mode: "full" (bidirectional) or "causal" (each token only attends to itself and earlier tokens).
+    # Future: "lookahead", "local", "sliding_window".
+    attn_mode: str = "full"
+    self_attention_model: str = "rel_pos"
+    rope_base: float = 10000.0
+    rotary_fraction: float = 1.0
+
+
+def _make_padding_mod(lengths):
+    """Mask out padding positions based on per-sample lengths."""
+
+    def pad_mask(b, h, q_idx, kv_idx):
+        return kv_idx < lengths[b]
+
+    return pad_mask
+
+
+def _make_causal_mod():
+    """Strictly causal — each query only attends to its own and earlier kv positions."""
+
+    def causal(b, h, q_idx, kv_idx):
+        return q_idx >= kv_idx
+
+    return causal
+
+
+_SUPPORTED_ATTENTION_MODES = ("full", "causal")
+_SUPPORTED_SELF_ATTENTION_MODELS = ("abs_pos", "rel_pos", "no_pos", "rope")
+
+
+class FeedForward(nn.Module):
+    def __init__(self, cfg: TransformerEncoderConfig):
         super().__init__()
-        self.dim = dim
-        self.hidden_size = int(hidden_size) if hidden_size is not None else 4 * dim
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, self.hidden_size),
-            TorchGELU(),
-            nn.Linear(self.hidden_size, dim),
+        ff_hidden = int(cfg.ff_expansion * cfg.d_model)
+        self.net = nn.Sequential(
+            nn.Linear(cfg.d_model, ff_hidden),
+            nn.GELU(),
+            nn.Dropout(cfg.drop_rate),
+            nn.Linear(ff_hidden, cfg.d_model),
+            nn.Dropout(cfg.drop_rate),
         )
 
     def forward(self, x):
-        return self.ffn(x)
+        return self.net(x)
 
-class GELU(nn.Module):
-    def __init__(self):
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, cfg: TransformerEncoderConfig, pos_enc=None):
         super().__init__()
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.d_model // cfg.n_heads
+        self.d_model = cfg.d_model
+        self.self_attention_model = cfg.self_attention_model
+        self._uses_rel_pos = self.self_attention_model == "rel_pos"
+        self._uses_rope = self.self_attention_model == "rope"
+        if self.self_attention_model not in _SUPPORTED_SELF_ATTENTION_MODELS:
+            raise ValueError(
+                f"self_attention_model='{self.self_attention_model}' is not supported. "
+                f"Supported modes: {_SUPPORTED_SELF_ATTENTION_MODELS}."
+            )
+        if self.head_dim < 16:
+            raise ValueError(
+                "PyTorch FlexAttention CUDA backend requires per-head embedding dimension >= 16, "
+                f"but got head_dim={self.head_dim} from d_model={self.d_model}, n_heads={self.n_heads}."
+            )
 
-    def forward(self, x):
-        return 0.5 * x * (1 + torch.tanh(
-            torch.sqrt(torch.tensor(2.0 / torch.pi)) * 
-            (x + 0.044715 * torch.pow(x, 3))
-        ))
+        # Rotary position embedding shared across layers; rotates Q/K before the attention
+        # kernel. The shared module owns the cos/sin buffers (see ``TransformerEncoder``).
+        if self._uses_rope:
+            if pos_enc is None:
+                raise ValueError("'rope' attention requires a RotaryPositionalEncoding via pos_enc.")
+            self.rope = pos_enc
+        else:
+            self.rope = None
 
-class LayerNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.scale = nn.Parameter(torch.ones(dim))
-        self.shift = nn.Parameter(torch.zeros(dim))
+        self.w_qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=cfg.qkv_bias)
+        self.out_proj = nn.Linear(cfg.d_model, cfg.d_model)
 
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased = False)
-        with torch.autocast('cuda', dtype=torch.float32):
-            norm = (x-mean)/ torch.sqrt(var + self.eps)
-            output = self.scale * norm + self.shift
-
-        return output
-
-def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=torch.float32):
-    assert head_dim % 2 == 0, "Embedding dimension must be even"
-
-    # Compute the inverse frequencies
-    inv_freq = 1.0 / (theta_base ** (torch.arange(0, head_dim, 2, dtype=dtype)[: (head_dim // 2)].float() / head_dim))
-
-    # Generate position indices
-    positions = torch.arange(context_length, dtype=dtype)
-
-    # Compute the angles
-    angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0) # Shape: (context_length, head_dim // 2)
-
-    # Expand angles to match the head_dim
-    angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
-
-    # Precompute sine and cosine
-    cos = torch.cos(angles)
-    sin = torch.sin(angles)
-
-    return cos, sin
-
-def apply_rope(x, cos, sin):
-    # x: (batch_size, num_heads, seq_len, head_dim)
-    batch_size, num_heads, seq_len, head_dim = x.shape
-    assert head_dim % 2 == 0, "Head dimension must be even"
-
-    # Split x into first half and second half
-    x1 = x[..., : head_dim // 2]  # First half
-    x2 = x[..., head_dim // 2:]  # Second half
-
-    # Adjust sin and cos shapes
-    cos = cos[:seq_len, :].unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, seq_len, head_dim)
-    sin = sin[:seq_len, :].unsqueeze(0).unsqueeze(0)
-
-    # Apply the rotary transformation
-    rotated = torch.cat((-x2, x1), dim=-1)
-    x_rotated = (x * cos) + (rotated * sin)
-
-    # It's ok to use lower-precision after applying cos and sin rotation
-    return x_rotated.to(dtype=x.dtype)
-
-
-class MultiHeadAttentionWithFA(nn.Module):
-    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
-        super().__init__()
-        self.d_out = dim_out
-        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.num_heads = num_heads
-        self.head_dim = dim_out // num_heads
-        self.dropout = dropout
-        self.causal_mask = causal_mask
-        self.out_proj = nn.Linear(self.d_out, self.d_out)
-
-
-    def forward(self, x):
-        
-        B, num_tokens, d_in  = x.shape
-        H = self.num_heads
-
-        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
-        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
-        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
-        
-        dropout = 0 if self.training == False else self.dropout        
-        output = flash_attn_func(queries,keys,values, dropout_p=dropout, causal=self.causal_mask)
-
-        # Bxnum_tokens x Hx head_dim
-
-        output = output.contiguous().view(B,num_tokens,self.d_out)
-
-        output = self.out_proj(output)
-
-        return output
-class MultiHeadAttentionWithSDPA(nn.Module):
-    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False, qk_norm=False):
-        super().__init__()
-        self.d_out = dim_out
-        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.num_heads = num_heads
-        self.head_dim = dim_out // num_heads
-        self.dropout = dropout
-        self.causal_mask = causal_mask
-        self.out_proj = nn.Linear(self.d_out, self.d_out)
-        self.qk_norm = qk_norm
-        if self.qk_norm:
+        self.qk_norm = cfg.qk_norm
+        if cfg.qk_norm:
             self.q_norm = nn.LayerNorm(self.head_dim)
             self.k_norm = nn.LayerNorm(self.head_dim)
 
-    def forward(self, x, attn_mask=None, use_cache=False):
+        # Transformer-XL relative-position parameters (matrix b and matrix d from
+        # https://arxiv.org/abs/1901.02860 Section 3.3). The "matrix c" term `u @ K^T` is
+        # absorbed by passing `Q + pos_bias_u` as the query to FlexAttention.
+        if self._uses_rel_pos:
+            self.linear_pos = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
+            self.pos_bias_u = nn.Parameter(torch.zeros(self.n_heads, self.head_dim))
+            self.pos_bias_v = nn.Parameter(torch.zeros(self.n_heads, self.head_dim))
+        else:
+            self.linear_pos = None
+            self.pos_bias_u = None
+            self.pos_bias_v = None
 
-        B, num_tokens, d_in  = x.shape
-        H = self.num_heads
+    def _rel_shift(self, x):
+        """Transformer-XL relative-position shift.
 
-        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
-        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
-        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
+        Delegates to ``RelPositionMultiHeadAttention.rel_shift`` (which does not reference
+        ``self``) so the logic lives in a single place — NeMo's existing reference
+        implementation in ``parts/submodules/multi_head_attention.py``.
+        """
+        return RelPositionMultiHeadAttention.rel_shift(None, x)
 
-        keys = keys.transpose(1,2) # BxHxnum_tokens,head_dim
-        queries = queries.transpose(1,2)
-        values = values.transpose(1,2)
+    def _build_rel_pos_score_mod(self, q, pos_emb):
+        """Build the FlexAttention inputs that realize Transformer-XL relative attention.
+
+        Implements the (b), (c), (d) terms of Transformer-XL Section 3.3
+        (https://arxiv.org/abs/1901.02860) on top of FlexAttention:
+
+        - Matrices (b) + (d) — the position-dependent score bias ``(Q + v) @ R^T`` rel-
+          shifted into ``(q_idx, kv_idx)`` coordinates — are precomputed into a
+          ``(B, H, T, T)`` tensor, scaled by ``1/sqrt(D)`` (to match FlexAttention's
+          already-scaled ``QK^T`` scores), and captured by a local ``score_mod`` closure.
+          FlexAttention's ``score_mod`` API fixes the callable signature, so the per-forward
+          tensor is threaded in via closure capture rather than as an explicit argument.
+          Keeping it local (instead of on ``self``) lets the ``(B, H, T, T)`` bias be freed
+          as soon as the layer's attention call returns, so peak memory holds at most one
+          layer's bias rather than all layers' biases at once.
+        - Matrix (c) — the global-content bias ``u @ K^T`` — is folded into FlexAttention
+          by rewriting the query as ``Q + pos_bias_u``, which is returned.
+
+        Args:
+            q: Query tensor with shape ``(B, H, T, D)``.
+            pos_emb: Relative positional embedding ``(1, 2T - 1, d_model)`` produced by
+                ``RelPositionalEncoding``.
+
+        Returns:
+            score_mod: Callable to pass as ``flex_attention(..., score_mod=...)``.
+            q_with_bias_u: ``Q + pos_bias_u`` — the (c) "matrix c" query rewrite.
+        """
+        H, D = self.n_heads, self.head_dim
+        T = q.size(-2)
+        # pos_emb: (1, 2T - 1, d_model) -> p: (1, H, 2T - 1, D)
+        p = self.linear_pos(pos_emb).view(pos_emb.size(0), -1, H, D).transpose(1, 2)
+        # pos_bias_{u,v}: (H, D) -> (1, H, 1, D) so they broadcast over the (B, H, T, D)
+        # Q tensor against the head/depth axes rather than (incorrectly) against time.
+        bias_u = self.pos_bias_u.view(1, H, 1, D).to(q.dtype)
+        bias_v = self.pos_bias_v.view(1, H, 1, D).to(q.dtype)
+        # Matrix b + d: ((Q + v) @ R^T) shifted into (q_idx, kv_idx) space, then scaled
+        # by 1/sqrt(D) so it can be added directly to FlexAttention's already-scaled scores.
+        q_with_bias_v = q + bias_v
+        matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))  # (B, H, T, 2T - 1)
+        # rel_shift converts absolute-relative-position columns into (query, key) columns;
+        # keep the first T to land in (B, H, T, T) bias space.
+        rel_pos_bias = self._rel_shift(matrix_bd)[..., :T] * (D**-0.5)
+
+        def score_mod(score, b, h, q_idx, kv_idx):
+            return score + rel_pos_bias[b, h, q_idx, kv_idx]
+
+        # Matrix c: fold u @ K^T into FlexAttention by rewriting Q as (Q + u).
+        return score_mod, q + bias_u
+
+    def forward(self, x, block_mask=None, pos_emb=None):
+        B, T, _ = x.shape
+        H, D = self.n_heads, self.head_dim
+
+        qkv = self.w_qkv(x).view(B, T, 3, H, D).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
 
         if self.qk_norm:
-            queries = self.q_norm(queries)
-            keys = self.k_norm(keys)
+            q = self.q_norm(q).to(v.dtype)
+            k = self.k_norm(k).to(v.dtype)
 
-        dropout = 0 if self.training == False else self.dropout
-        output = scaled_dot_product_attention(queries,keys,values, attn_mask=attn_mask, is_causal=self.causal_mask, dropout_p=dropout)
+        if self._uses_rope:
+            # RoPE rotates Q/K in place; it is orthogonal to FlexAttention's score_mod.
+            q, k = self.rope(q, k)
 
-         # B xH x num_tokens x head_dim
+        score_mod = None
+        if self._uses_rel_pos:
+            score_mod, q = self._build_rel_pos_score_mod(q, pos_emb)
 
-        output = output.transpose(1,2) # Bxnum_tokens x Hx head_dim
-
-        output = output.contiguous().view(B,num_tokens,self.d_out)
-
-        output = self.out_proj(output)
-
-        return output
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, dim_in, dim_out, dropout=0.0, qkv_bias=False, context_length=1024, num_heads=8, causal_mask=False):
-        super().__init__()
-        self.d_out = dim_out
-        self.w_query = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_key = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.w_value = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.num_heads = num_heads
-        self.head_dim = dim_out // num_heads
-        self.dropout = nn.Dropout(dropout)
-        self.causal_mask = causal_mask
-        self.out_proj = nn.Linear(self.d_out, self.d_out)
-
-        self.register_buffer(
-            "mask",
-            torch.triu(torch.ones(context_length, context_length), diagonal=1) if self.causal_mask else torch.zeros(context_length, context_length)
-        )
-        
-        self.register_buffer(
-            "cache_k", None, persistent=False
-        )
-        self.register_buffer(
-            "cache_v", None, persistent=False
-        )
-
-
-    def forward(self, x, use_cache=False):
-        
-        B, num_tokens, d_in  = x.shape
-        H = self.num_heads
-
-        keys = self.w_key(x).view(B,num_tokens,H, self.head_dim) # Bxnum_tokens x Hx head_dim
-        queries = self.w_query(x).view(B,num_tokens,H, self.head_dim)
-        values = self.w_value(x).view(B,num_tokens,H, self.head_dim)
-
-        if use_cache:
-            if self.cache_k is None:
-                self.cache_k  = keys
-                self.cache_v = values
-            else:
-                self.cache_k = torch.cat((self.cache_k, keys), dim=1)
-                self.cache_v = torch.cat((self.cache_v, values), dim=1)
-            keys, values = self.cache_k, self.cache_v
-
-
-        keys = keys.transpose(1,2) # BxHxnum_tokens,head_dim
-        queries = queries.transpose(1,2)
-        values = values.transpose(1,2)
-
-        attn_scores = torch.matmul(queries, keys.transpose(-1,-2)) # We need to transpose head_dim and num_tokens for keys. alpha = BxNxTqxTk
-        d_k = keys.shape[-1]
-
-        # Masking 
-        T = attn_scores.shape[-1]
-        mask = self.mask[:num_tokens, :num_tokens]
-        masked = attn_scores.masked_fill(mask.bool(), -torch.inf)
-
-        attn_weights = torch.softmax(masked/d_k**0.5, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        output = torch.matmul(attn_weights, values) # B xH x num_tokens x head_dim
-
-        output = output.transpose(1,2) # Bxnum_tokens x Hx head_dim
-
-        output = output.contiguous().view(B,num_tokens,self.d_out)
-
-        output = self.out_proj(output)
-
-        return output
-    
-    def reset_cache(self,):
-        self.cache_k = None
-        self.cache_v = None
-
+        attn_fn = flex_attention_compiled if q.is_cuda else flex_attention
+        out = attn_fn(q, k, v, block_mask=block_mask, score_mod=score_mod)
+        out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
+        return self.out_proj(out)
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: TransformerEncoderConfig):
+    def __init__(self, cfg: TransformerEncoderConfig, pos_enc=None):
         super().__init__()
-        self.cfg = cfg
-        self.pre_norm = LayerNorm(self.cfg.d_model)
-        self.mha = MultiHeadAttentionWithSDPA(
-            dim_in=self.cfg.d_model,
-            dim_out=self.cfg.d_model,
-            dropout=self.cfg.drop_rate,
-            qkv_bias=self.cfg.qkv_bias,
-            num_heads=self.cfg.n_heads,
-            causal_mask=self.cfg.causal_mask,
-            qk_norm=self.cfg.qk_norm
-            )
-        self.dropout = nn.Dropout(self.cfg.drop_rate)
-        self.post_norm = LayerNorm(self.cfg.d_model)
-        self.ffn = FeedForward(self.cfg.d_model, hidden_size=self.cfg.hidden_size)
+        self.norm1 = nn.LayerNorm(cfg.d_model)
+        self.attn = MultiHeadAttention(cfg, pos_enc=pos_enc)
+        self.drop = nn.Dropout(cfg.drop_rate)
+        self.norm2 = nn.LayerNorm(cfg.d_model)
+        self.ffn = FeedForward(cfg)
 
-    def forward(self, x, attn_mask=None, use_cache=False):
-        pre_norm = self.pre_norm(x)
+    def forward(self, x, block_mask=None, pos_emb=None):
+        x = x + self.drop(self.attn(self.norm1(x), block_mask=block_mask, pos_emb=pos_emb))
+        x = x + self.drop(self.ffn(self.norm2(x)))
+        return x
 
-        attn_output = self.mha(pre_norm, attn_mask=attn_mask, use_cache=use_cache)
-        attn_output = x + self.dropout(attn_output)
 
-        post_norm = self.post_norm(attn_output)
-        ffn = self.ffn(post_norm)
-        output = attn_output + self.dropout(ffn)
-        return output
+@experimental
+class TransformerEncoder(nn.Module):
+    """Pre-norm Transformer encoder for ASR.
 
-class ConvSubsampling(nn.Module):
-    def __init__(self, n_mels: int = 80, d_model: int = 512):
-        super().__init__()
-        self.conv1 = Conv1d(n_mels, d_model, kernel_size=3, padding=1)
-        self.conv2 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1) # Decreases the temporal dimension by 2
-        self.conv3 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1) # Decreases the temporal dimension by 2
-        self.gelu = TorchGELU()
+    Architecture: PreEncode -> PositionalEncoding -> LayerNorm -> N x TransformerBlock -> FinalNorm
 
-    def forward(self, x, length):
-        x = self.conv1(x)
-        x = self.gelu(x)
-        x = self.conv2(x)
-        x = self.gelu(x)
-        length = length // 2
-        x = self.conv3(x)
-        x = self.gelu(x)
-        length = length // 2
-        x = x.transpose(1, 2)  # (B, d_model, T) -> (B, T, d_model)
-        return x, length
+    Uses PyTorch FlexAttention for attention computation. On CUDA, mask functions
+    are compiled into fused Triton kernels with block-sparse optimization. On CPU,
+    FlexAttention falls back to an unfused implementation automatically.
 
-class DepthwiseConvSubsampling(nn.Module):
-    """Depthwise separable conv subsampling: reduces params by replacing standard Conv1d
-    with depthwise (groups=channels) + pointwise (1x1) convolutions for the strided layers.
-    """
-    def __init__(self, n_mels: int = 80, d_model: int = 512):
-        super().__init__()
-        # Standard conv to project from n_mels to d_model
-        self.conv1 = Conv1d(n_mels, d_model, kernel_size=3, padding=1)
-        # Depthwise separable conv block 1 (stride=2)
-        self.dw_conv2 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1, groups=d_model)
-        self.pw_conv2 = Conv1d(d_model, d_model, kernel_size=1)
-        # Depthwise separable conv block 2 (stride=2)
-        self.dw_conv3 = Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1, groups=d_model)
-        self.pw_conv3 = Conv1d(d_model, d_model, kernel_size=1)
-        self.gelu = TorchGELU()
-
-    def forward(self, x, length):
-        x = self.conv1(x)
-        x = self.gelu(x)
-        x = self.dw_conv2(x)
-        x = self.pw_conv2(x)
-        x = self.gelu(x)
-        length = length // 2
-        x = self.dw_conv3(x)
-        x = self.pw_conv3(x)
-        x = self.gelu(x)
-        length = length // 2
-        x = x.transpose(1, 2)  # (B, d_model, T) -> (B, T, d_model)
-        return x, length
-
-class NGPTStackingSubsampling(torch.nn.Module):
-    """Stacking subsampling which simply stacks consecutive frames to reduce the sampling rate
     Args:
-        subsampling_factor (int): The subsampling factor
-        feat_in (int): size of the input features
-        feat_out (int): size of the output features
+        feat_in: Input feature dimension (number of mel bins).
+        d_model: Transformer encoder state dimension, i.e. the size of the residual stream that flows
+            through every block (token/frame embedding size, attention input/output size, and
+            feed-forward input/output size). Also known as ``hidden_size`` in HuggingFace
+            ``transformers`` configs and ``embed_dim``/``d_model`` in PyTorch's
+            ``nn.TransformerEncoderLayer``.
+
+        n_heads: Number of attention heads.
+        n_layers: Number of Transformer blocks.
+        feat_out: Output feature dimension. Defaults to ``d_model``.
+        subsampling: Subsampling method. Supports ``feature_stacking`` for the
+            Transformer-native ``FeatureStacking`` module, plus ``stacking`` and
+            ``stacking_norm`` for linear frame stacking.
+        subsampling_factor: Subsampling factor for the pre-encoder.
+        drop_rate: Dropout probability.
+        dropout_pre_encoder: Dropout probability after positional encoding. Defaults to ``drop_rate``.
+        dropout_emb: Dropout probability for positional embeddings.
+        qkv_bias: If True, add a learnable bias to the fused Q/K/V projection. Many modern ASR/LM
+            Transformers (e.g. HuggingFace Whisper) drop the bias on the K projection because a
+            constant K bias adds the same scalar to every key and is wiped out by softmax's
+            shift-invariance, making it a redundant parameter. Default ``False`` matches that style.
+        qk_norm: If True, apply per-head ``LayerNorm`` to Q and K before the dot product. Stabilizes
+            training by preventing exponential Q/K-norm growth and "attention entropy collapse"
+            (Henry et al. 2020; used in OLMo 2, Gemma 3, Qwen 3). Cheap, ~no-op for inference.
+        ff_expansion: Multiplier for the per-block FFN inner hidden size:
+            ``ffn_hidden_size = int(ff_expansion * d_model)``. Only widens the intermediate FFN
+            projection; FFN input/output stays at ``d_model``. Typical value ``4.0``; ``float``
+            allows sub-1x experts for MoE. Equivalent to ``intermediate_size / hidden_size`` in
+            HuggingFace and ``dim_feedforward / d_model`` in PyTorch's ``nn.TransformerEncoderLayer``.
+        pre_block_norm: If True (default), apply LayerNorm to embeddings before the first
+            Transformer block (BERT/ViT-style). Set False to match pre-norm Transformers
+            such as Whisper or GPT-2 — required when loading pretrained weights from those
+            checkpoints.
+        self_attention_model: Type of positional encoding and attention scoring scheme. Mirrors
+            the Conformer encoder's ``self_attention_model`` choices, plus a ``"no_pos"`` option:
+
+            - ``"rel_pos"`` (default): Transformer-XL relative positional encoding
+              (https://arxiv.org/abs/1901.02860). The relative-position bias is computed in each
+              layer and injected into FlexAttention via a ``score_mod`` closure (the (b)+(d)
+              terms) plus a ``Q + pos_bias_u`` query rewrite (the (c) term), so the kernel stays
+              FlexAttention.
+            - ``"abs_pos"``: sinusoidal absolute positional encoding added to the embeddings
+              before the first block; standard ``Q @ K^T`` attention via FlexAttention.
+            - ``"no_pos"`` (or ``None``): no positional encoding at all — pre-encoder output
+              flows straight into ``embed_norm`` and the Transformer blocks. ``xscaling``,
+              ``pos_emb_max_len``, ``dropout_pre_encoder`` and ``dropout_emb`` have no effect
+              in this mode. ``None`` is accepted as a YAML-friendly alias for ``"no_pos"``
+              (an unset field in a config maps to ``None``).
+            - ``"rope"``: rotary position embedding applied to Q/K inside attention. No additive
+              positional embedding is added to the embeddings; ``dropout_pre_encoder`` (and
+              ``xscaling`` if set) are still applied to the pre-encoder output, and ``dropout_emb``
+              has no effect in this mode.
+
+            ``"rel_pos_local_attn"`` is not implemented yet.
+        rope_base: Theta base for the rotary position embedding. Only used when
+            ``self_attention_model='rope'``. Defaults to 10000.0.
+        rotary_fraction: Fraction of the per-head dim to rotate. Only used when
+            ``self_attention_model='rope'``. Defaults to 1.0.
+        pos_emb_max_len: Initial maximum length for sinusoidal positional embeddings.
+        xscaling: If True, scale embeddings by ``sqrt(d_model)`` before adding positional encodings,
+            following "Attention Is All You Need" article. Originally intended to balance the magnitude
+            of small-variance token embeddings against unit-bounded sinusoidal positions and to keep
+            tied input/pre-softmax logits well-scaled. With modern unit-variance ``nn.Linear``
+            pre-encoders and the LayerNorm directly after the positional sum, this scaling is
+            largely a no-op for activation magnitudes. Only meaningful when ``pre_block_norm=False``
+            or when matching pretrained checkpoints that expect this scaling.
+        attn_mode: Attention pattern — currently only "full" (bidirectional) is supported.
+        sync_max_audio_length: When true, sync positional encoding allocation length across distributed ranks.
     """
 
     def __init__(
         self,
-        subsampling_factor: int,
-        feat_in: int,
-        feat_out: int,
-        use_bias: bool = False
+        feat_in: int = 128,
+        d_model: int = 512,
+        n_heads: int = 8,
+        n_layers: int = 17,
+        feat_out: int = -1,
+        subsampling: str = 'feature_stacking',
+        subsampling_factor: int = 4,
+        drop_rate: float = 0.1,
+        dropout_pre_encoder: float = None,
+        dropout_emb: float = 0.0,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        ff_expansion: float = 4.0,
+        pre_block_norm: bool = True,
+        self_attention_model: Optional[str] = "rel_pos",
+        rope_base: float = 10000.0,
+        rotary_fraction: float = 1.0,
+        pos_emb_max_len: int = 5000,
+        xscaling: bool = False,
+        attn_mode: str = "full",
+        sync_max_audio_length: bool = True,
     ):
         super().__init__()
-        self.subsampling_factor = subsampling_factor
-        self.proj_out = torch.nn.Linear(subsampling_factor * feat_in, feat_out, bias=use_bias)
-        self.pad_frame = nn.Parameter(torch.ones(feat_in, dtype=torch.float32))
-
-    def forward(self, x, length):
-        """
-        Args:
-            x (torch.Tensor): (B, C, T)
-            length (torch.Tensor): (B,)
-        Returns:
-            x (torch.Tensor): (B, T', D_model)
-            length (torch.Tensor): (B,)
-        """
-        x = x.transpose(1, 2) # BxCxT -> BxTxC
-        b, t, h = x.size()
-        pad_size = (self.subsampling_factor - (t % self.subsampling_factor)) % self.subsampling_factor
-        length = torch.div(length + pad_size, self.subsampling_factor, rounding_mode='floor')
-
-        # Pad and fill padding frames (all-zero) with a learnable padding 'embedding'
-        x = torch.nn.functional.pad(x, (0, 0, 0, pad_size))
-        x[(x == 0).all(dim=-1)] = self.pad_frame.to(x.dtype)
-
-        _, t, _ = x.size()
-        x = torch.reshape(x, (b, t // self.subsampling_factor, h * self.subsampling_factor))
-        x = self.proj_out(x)
-
-        return x, length
-class TransformerEncoder(nn.Module):
-    def __init__(self,
-                n_mels: int = 80,
-                d_model: int = 512,
-                n_heads: int = 8,
-                n_layers: int = 17,
-                drop_rate: float = 0.1,
-                qkv_bias: bool = False,
-                causal_mask: bool = False,
-                pre_encode: str = "conv", # "conv" or "stacking"
-                nan_debug: bool = True,
-                qk_norm: bool = False,
-                subsampling_factor: int = 4,
-                hidden_size: Optional[int] = None,
-                ff_expansion_factor: Optional[float] = None,
-    ):
-        """Transformer encoder for ASR.
-
-        Args:
-            hidden_size: Inner dimension of every per-layer FFN. If None and
-                ``ff_expansion_factor`` is given, computed as
-                ``int(d_model * ff_expansion_factor)``. If both are None,
-                falls back to the legacy ``4 * d_model``.
-            ff_expansion_factor: Multiplier on ``d_model`` to derive
-                ``hidden_size``. Ignored if ``hidden_size`` is given explicitly.
-        """
-        super().__init__()
-        self.d_model = d_model
-        self.nan_debug = nan_debug
-        if pre_encode == "conv":
-            self.pre_encode = ConvSubsampling(n_mels, d_model)
-        elif pre_encode == "depth_conv":
-            self.pre_encode = DepthwiseConvSubsampling(n_mels, d_model)
-        elif pre_encode == "stacking":
-            self.pre_encode = NGPTStackingSubsampling(subsampling_factor=subsampling_factor, feat_in=n_mels, feat_out=d_model)
-        else:
-            raise ValueError(f"Invalid pre_encode: {pre_encode}. Choose from: conv, depth_conv, stacking")
-
-        # Resolve FFN inner dimension. Explicit hidden_size > derived from
-        # ff_expansion_factor > legacy default of 4 * d_model.
-        if hidden_size is None and ff_expansion_factor is not None:
-            hidden_size = int(d_model * ff_expansion_factor)
-        if hidden_size is None:
-            hidden_size = 4 * d_model
-        self.ff_hidden_size = int(hidden_size)
-        self.ff_expansion_factor = ff_expansion_factor
+        if d_model % n_heads != 0:
+            raise ValueError(f"d_model ({d_model}) must be divisible by n_heads ({n_heads}).")
+        if attn_mode not in _SUPPORTED_ATTENTION_MODES:
+            raise ValueError(
+                f"attn_mode='{attn_mode}' is not yet supported. Supported modes: {_SUPPORTED_ATTENTION_MODES}."
+            )
+        # ``None`` is accepted as a YAML-friendly alias for ``"no_pos"`` (an unset field in a
+        # config simply maps to None) — normalize here so the rest of the module only deals with
+        # the string form.
+        if self_attention_model is None:
+            self_attention_model = "no_pos"
+        if self_attention_model not in _SUPPORTED_SELF_ATTENTION_MODELS:
+            raise ValueError(
+                f"self_attention_model='{self_attention_model}' is not supported. "
+                "Currently only 'abs_pos', 'rel_pos', 'rope', and 'no_pos' (or None) are available."
+            )
+        if dropout_pre_encoder is None:
+            dropout_pre_encoder = drop_rate
 
         cfg = TransformerEncoderConfig(
+            feat_in=feat_in,
             d_model=d_model,
             n_heads=n_heads,
             n_layers=n_layers,
             drop_rate=drop_rate,
             qkv_bias=qkv_bias,
-            causal_mask=causal_mask,
             qk_norm=qk_norm,
-            hidden_size=self.ff_hidden_size,
+            ff_expansion=ff_expansion,
+            pre_block_norm=pre_block_norm,
+            subsampling_factor=subsampling_factor,
+            attn_mode=attn_mode,
+            self_attention_model=self_attention_model,
+            rope_base=rope_base,
+            rotary_fraction=rotary_fraction,
         )
-        self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
-        self.layer_norm = nn.LayerNorm(d_model)
-        self.final_norm = nn.LayerNorm(d_model)
+        self.d_model = d_model
+        self.n_layers = n_layers
+        self._feat_in = feat_in
+        self.subsampling = subsampling
+        self.subsampling_factor = subsampling_factor
+        self.sync_max_audio_length = sync_max_audio_length
+        self.self_attention_model = self_attention_model
+        self.attn_mode = attn_mode
 
-    def forward(self, audio_signal, length):
+        if subsampling == 'feature_stacking':
+            self.pre_encode = FeatureStacking(subsampling_factor, feat_in, d_model)
+        elif subsampling and subsampling_factor > 1:
+            if subsampling in ['stacking', 'stacking_norm']:
+                self.pre_encode = StackingSubsampling(
+                    subsampling_factor=subsampling_factor,
+                    feat_in=feat_in,
+                    feat_out=d_model,
+                    norm=True if subsampling == 'stacking_norm' else False,
+                )
+            else:
+                raise ValueError(
+                    f"subsampling='{subsampling}' is not supported. "
+                    "Currently only 'feature_stacking', 'stacking', and 'stacking_norm' are available."
+                )
+        else:
+            self.pre_encode = nn.Linear(feat_in, d_model)
+
+        self._feat_out = d_model
+        if xscaling:
+            self.xscale = math.sqrt(d_model)
+        else:
+            self.xscale = None
+        self.pos_emb_max_len = pos_emb_max_len
+        if self_attention_model == "rel_pos":
+            self.pos_enc = RelPositionalEncoding(
+                d_model=d_model,
+                dropout_rate=dropout_pre_encoder,
+                max_len=pos_emb_max_len,
+                xscale=self.xscale,
+                dropout_rate_emb=dropout_emb,
+            )
+        elif self_attention_model == "abs_pos":
+            self.pos_enc = PositionalEncoding(
+                d_model=d_model,
+                dropout_rate=dropout_pre_encoder,
+                max_len=pos_emb_max_len,
+                xscale=self.xscale,
+                dropout_rate_emb=dropout_emb,
+            )
+        elif self_attention_model == "rope":
+            # 'rope' adds no additive positional embedding to the signal; rotation is applied to
+            # Q/K inside each attention layer. The pre-encoder dropout (normally inside the
+            # positional encoding) is applied separately in forward_internal.
+            self.dropout_pre_encoder = nn.Dropout(dropout_pre_encoder)
+            self.pos_enc = RotaryPositionalEncoding(
+                d_k=d_model // n_heads,
+                rotary_fraction=rotary_fraction,
+                rope_base=rope_base,
+                max_len=pos_emb_max_len,
+            )
+        else:  # "no_pos"
+            self.pos_enc = None
+        self.embed_norm = nn.LayerNorm(d_model) if pre_block_norm else nn.Identity()
+        # For 'rope', the shared RotaryPositionalEncoding is passed into each block so the
+        # cos/sin buffers are computed once and reused across all attention modules.
+        layer_pos_enc = self.pos_enc if self_attention_model == "rope" else None
+        self.layers = nn.ModuleList([TransformerBlock(cfg, pos_enc=layer_pos_enc) for _ in range(n_layers)])
+        self.final_norm = nn.LayerNorm(d_model)
+        if feat_out > 0 and feat_out != self._feat_out:
+            self.out_proj = nn.Linear(self._feat_out, feat_out)
+            self._feat_out = feat_out
+        else:
+            self.out_proj = None
+
+        self.set_max_audio_length(self.pos_emb_max_len)
+
+    def forward(self, audio_signal, length, bypass_pre_encode=False):
         """
         Args:
-            audio_signal (torch.Tensor): (B, C, T)
-            length (torch.Tensor): (B,)
+            audio_signal: ``(B, C, T)`` mel spectrogram when ``bypass_pre_encode=False``,
+                or ``(B, T, D)`` pre-encoded embeddings when ``bypass_pre_encode=True``.
+            length: (B,) — valid frame counts per sample.
+            bypass_pre_encode: If true, skip the pre-encoder and consume frame-level embeddings.
+                               This option is used when pre-encoded embeddings are used as speaker cache
+                               such as speaker diarization models.
+
         Returns:
-            x (torch.Tensor): (B, T', D_model)
-            length (torch.Tensor): (B,)
+            x: (B, D, T') — encoded representation (channels-first).
+            length: (B,) — output lengths after subsampling.
         """
-        x = audio_signal
-        x, length = self.pre_encode(x, length)
-        if self.nan_debug:
-            self._check_nan(x, "pre_encode")
-        x = x * (self.d_model ** 0.5)
-        if self.nan_debug:
-            self._check_nan(x, "embedding_scale")
-        x = self.layer_norm(x)
-        if self.nan_debug:
-            self._check_nan(x, "layer_norm")
+        if not bypass_pre_encode and audio_signal.shape[-2] != self._feat_in:
+            raise ValueError(
+                f"If bypass_pre_encode is False, audio_signal should have shape "
+                f"(batch, {self._feat_in}, n_frame) but got last dimension {audio_signal.shape[-2]}."
+            )
+        if bypass_pre_encode and audio_signal.shape[-1] != self.d_model:
+            raise ValueError(
+                f"If bypass_pre_encode is True, audio_signal should have shape "
+                f"(batch, n_frame, {self.d_model}) but got last dimension {audio_signal.shape[-1]}."
+            )
 
-        # Create padding mask: True for valid positions, False for padding
-        max_len = x.shape[1]
-        pad_mask = torch.arange(max_len, device=x.device).unsqueeze(0) < length.unsqueeze(1)
-        # Convert to attention mask for SDPA: (B, 1, 1, T) broadcastable to (B, H, T, T)
-        # SDPA treats True as "attend" for boolean masks
-        attn_mask = pad_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T) - masks key positions
+        if bypass_pre_encode:
+            self.update_max_seq_length(seq_length=audio_signal.size(1), device=audio_signal.device)
+        else:
+            self.update_max_seq_length(seq_length=audio_signal.size(2), device=audio_signal.device)
+        return self.forward_internal(audio_signal, length, bypass_pre_encode=bypass_pre_encode)
 
-        for idx, layer in enumerate(self.layers):
-            x = layer(x, attn_mask=attn_mask)
-            if self.nan_debug:
-                self._check_nan(x, f"layer_{idx}")
+    def forward_internal(self, audio_signal, length, bypass_pre_encode=False):
+        if length is None:
+            length = audio_signal.new_full(
+                (audio_signal.size(0),),
+                audio_signal.size(1) if bypass_pre_encode else audio_signal.size(-1),
+                dtype=torch.int64,
+                device=audio_signal.device,
+            )
+
+        if not bypass_pre_encode:
+            if isinstance(self.pre_encode, FeatureStacking):
+                x, length = self.pre_encode(audio_signal, length)
+            else:
+                x = torch.transpose(audio_signal, 1, 2)
+            if isinstance(self.pre_encode, nn.Linear):
+                x = self.pre_encode(x)
+            elif not isinstance(self.pre_encode, FeatureStacking):
+                x, length = self.pre_encode(x=x, lengths=length)
+            length = length.to(torch.int64)
+        else:
+            x = audio_signal
+            length = length.to(torch.int64)
+
+        if self.self_attention_model == "rope":
+            # 'rope' adds no additive positional embedding; Q/K are rotated inside attention.
+            # Apply xscale (if set) and the pre-encoder dropout to the pre-encoder output here.
+            if self.xscale:
+                x = x * self.xscale
+            x = self.dropout_pre_encoder(x)
+            pos_emb = None
+        elif self.pos_enc is not None:
+            x, pos_emb = self.pos_enc(x=x)
+        else:  # "no_pos": pre-encoder output flows in unchanged
+            pos_emb = None
+        x = self.embed_norm(x)
+
+        B, T, _ = x.shape
+        if self.attn_mode == "causal":
+            mask_mod = and_masks(_make_causal_mod(), _make_padding_mod(length))
+        else:
+            mask_mod = _make_padding_mod(length)
+        block_mask = create_block_mask(mask_mod, B=B, H=1, Q_LEN=T, KV_LEN=T, device=x.device)
+        # For ``abs_pos`` the positional information is already baked into ``x``, so we don't
+        # need to thread ``pos_emb`` through each layer; only ``rel_pos`` consumes it.
+        layer_pos_emb = pos_emb if self.self_attention_model == "rel_pos" else None
+        for layer in self.layers:
+            x = layer(x, block_mask=block_mask, pos_emb=layer_pos_emb)
+
         x = self.final_norm(x)
-        if self.nan_debug:
-            self._check_nan(x, "final_norm")
-        x = x.transpose(1, 2) # BxT'xD_model -> BxD_modelxT'
+        if self.out_proj is not None:
+            x = self.out_proj(x)
+        x = x.transpose(1, 2)  # (B, T, D) -> (B, D, T)
+        length = length.to(dtype=torch.int64)
         return x, length
 
-    def _check_nan(self, x, name):
-        has_nan = torch.isnan(x).any().item()
-        has_inf = torch.isinf(x).any().item()
-        if has_nan or has_inf:
-            nan_count = torch.isnan(x).sum().item()
-            inf_count = torch.isinf(x).sum().item()
-            valid = x[~(torch.isnan(x) | torch.isinf(x))]
-            abs_max = valid.abs().max().item() if valid.numel() > 0 else float('nan')
-            print(f"[NaN DEBUG] {name}: NaN={nan_count}, Inf={inf_count}, abs_max={abs_max:.6f}, shape={list(x.shape)}", flush=True)
-            raise RuntimeError(f"[NaN DEBUG] NaN/Inf detected at '{name}'. Stopping training.")
-    
-    def freeze(self):
-        for param in self.parameters():
-            param.requires_grad = False
-    
-    def unfreeze(self, partial=False):
-        for param in self.parameters():
-            param.requires_grad = True
+    def update_max_seq_length(self, seq_length: int, device):
+        """
+        Updates the maximum sequence length for positional encodings.
 
+        Args:
+            seq_length: New maximum sequence length.
+            device: Device to use for computations.
+        """
+        if self.sync_max_audio_length and torch.distributed.is_initialized():
+            global_max_len = torch.tensor([seq_length], dtype=torch.float32, device=device)
+            torch.distributed.all_reduce(global_max_len, op=torch.distributed.ReduceOp.MAX)
+            seq_length = global_max_len.int().item()
 
+        if seq_length > self.max_audio_length:
+            self.set_max_audio_length(seq_length)
+
+    def set_max_audio_length(self, max_audio_length):
+        """Sets maximum input length and extends positional encodings if needed."""
+        self.max_audio_length = max_audio_length
+        if self.pos_enc is None:  # "no_pos" mode has no buffer to extend
+            return
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        self.pos_enc.extend_pe(max_audio_length, device, dtype)
+
+    def freeze(self) -> None:
+        freeze(self)
+
+    def unfreeze(self, partial: bool = False) -> None:
+        unfreeze(self, partial=partial)

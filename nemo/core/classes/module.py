@@ -20,7 +20,50 @@ from torch.nn import Module
 from nemo.core.classes.common import FileIO, Serialization, Typing
 from nemo.utils import logging
 
-__all__ = ['NeuralModule']
+__all__ = ['NeuralModule', 'freeze', 'unfreeze']
+
+
+def freeze(module: Module) -> None:
+    """Freeze all parameters of ``module`` and snapshot their prior ``requires_grad`` state.
+
+    The snapshot is stored on ``module._frozen_grad_map`` so a later call to ``unfreeze(..., partial=True)``
+    can restore the pre-freeze state instead of unconditionally enabling gradients.
+    """
+    grad_map = {pname: param.requires_grad for pname, param in module.named_parameters()}
+    for param in module.parameters():
+        param.requires_grad = False
+    if not hasattr(module, '_frozen_grad_map'):
+        module._frozen_grad_map = grad_map
+    else:
+        module._frozen_grad_map.update(grad_map)
+    module.eval()
+
+
+def unfreeze(module: Module, partial: bool = False) -> None:
+    """Unfreeze parameters of ``module``.
+
+    If ``partial=True``, restore each parameter's ``requires_grad`` from the snapshot recorded by
+    ``freeze(module)``; otherwise enable gradients on every parameter. The snapshot is cleared in
+    both cases and ``module.train()`` is called.
+    """
+    if partial and not hasattr(module, '_frozen_grad_map'):
+        raise ValueError("Cannot unfreeze partially without first freezing the module with `freeze()`")
+
+    for pname, param in module.named_parameters():
+        if not partial:
+            param.requires_grad = True
+        elif pname in module._frozen_grad_map:
+            param.requires_grad = module._frozen_grad_map[pname]
+        else:
+            logging.warning(
+                f"Parameter {pname} not found in list of previously frozen parameters. Unfreezing this parameter."
+            )
+            param.requires_grad = True
+
+    if hasattr(module, '_frozen_grad_map'):
+        delattr(module, '_frozen_grad_map')
+
+    module.train()
 
 
 class NeuralModule(Module, Typing, Serialization, FileIO):

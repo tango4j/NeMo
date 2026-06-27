@@ -1145,3 +1145,99 @@ class LocalAttRelPositionalEncoding(PositionalEncoding):
         if self.dropout_emb:
             pos_emb = self.dropout_emb(pos_emb)
         return self.dropout(x), pos_emb
+
+
+class RotaryPositionalEncoding(torch.nn.Module):
+    """Rotary position embedding.
+
+    Args:
+        d_k (int): per-head feature dim
+        rotary_fraction (float): fraction of d_k to rotate
+        rope_base (float): theta base
+        max_len (int): maximum input length
+    """
+
+    def __init__(self, d_k, rotary_fraction=1.0, rope_base=10000.0, max_len=5000):
+        """Construct a RotaryPositionalEncoding object."""
+        super(RotaryPositionalEncoding, self).__init__()
+        if not 0 < rotary_fraction <= 1.0:
+            raise ValueError(f"rotary_fraction must be in (0, 1], got {rotary_fraction}")
+        d_k_rot = int(d_k * rotary_fraction)
+        if d_k_rot < 2 or d_k_rot % 2 != 0:
+            raise ValueError(
+                f"Effective rotary dim (d_k * rotary_fraction) must be a positive even number, "
+                f"got {d_k_rot} from d_k={d_k} and rotary_fraction={rotary_fraction}"
+            )
+        self.d_k = d_k
+        self.d_k_rot = d_k_rot
+        self.rope_base = rope_base
+        self.max_len = max_len
+
+        inv_freq = 1.0 / (rope_base ** (torch.arange(0, d_k_rot, 2, dtype=torch.float32) / d_k_rot))
+        self.register_buffer('inv_freq', inv_freq, persistent=False)
+
+    def _rotate_half(self, x):
+        """Split the last dim of x in half and rotate: (x1, x2) -> (-x2, x1)."""
+        half = x.shape[-1] // 2
+        return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+    def _apply_rotary(self, t, cos, sin):
+        """Apply RoPE to the first d_k_rot dims of the last axis of t."""
+        if self.d_k_rot == t.shape[-1]:
+            return t * cos + self._rotate_half(t) * sin
+        t_rot = t[..., : self.d_k_rot]
+        t_pass = t[..., self.d_k_rot :]
+        t_rot = t_rot * cos + self._rotate_half(t_rot) * sin
+        return torch.cat((t_rot, t_pass), dim=-1)
+
+    def create_pe(self, positions, dtype):
+        """Build cos/sin buffers covering ``positions`` (1D fp32 tensor).
+
+        Frequencies are computed in fp32 for numerical stability and cast to
+        ``dtype`` for storage. The final cast to Q/K runtime dtype happens in
+        ``forward``.
+        """
+        freqs = torch.outer(positions, self.inv_freq.to(device=positions.device, dtype=torch.float32))
+        # Duplicate to align with `_rotate_half`: tail half mirrors the head half.
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos().to(dtype)
+        sin = emb.sin().to(dtype)
+        if hasattr(self, 'cos'):
+            self.cos = cos
+            self.sin = sin
+        else:
+            self.register_buffer('cos', cos, persistent=False)
+            self.register_buffer('sin', sin, persistent=False)
+
+    def extend_pe(self, length, device, dtype):
+        """Reset and extend the cos/sin buffers if needed."""
+        if hasattr(self, 'cos') and self.cos.size(0) >= length:
+            return
+        positions = torch.arange(0, length, dtype=torch.float32, device=device)
+        self.create_pe(positions=positions, dtype=dtype)
+
+    def forward(self, q, k):
+        """Rotate Q and K.
+
+        Args:
+            q (torch.Tensor): (batch, head, time1, d_k)
+            k (torch.Tensor): (batch, head, time2, d_k); time2 >= time1.
+
+        When time2 > time1 (streaming with KV cache), Q is rotated starting at
+        ``offset = time2 - time1`` and K from offset 0, so the position difference
+        seen inside attention scores remains correct.
+        """
+        t_q = q.size(2)
+        t_k = k.size(2)
+        cache_len = t_k - t_q
+
+        cos_k = self.cos[:t_k].view(1, 1, t_k, self.d_k_rot)
+        sin_k = self.sin[:t_k].view(1, 1, t_k, self.d_k_rot)
+        cos_q = self.cos[cache_len:t_k].view(1, 1, t_q, self.d_k_rot)
+        sin_q = self.sin[cache_len:t_k].view(1, 1, t_q, self.d_k_rot)
+
+        # Buffers are stored in model dtype; cast to Q/K runtime dtype (which may have
+        # been upgraded to fp32 by autocast handling in MultiHeadAttention.forward).
+        q = self._apply_rotary(q, cos_q.to(q.dtype), sin_q.to(q.dtype))
+        k = self._apply_rotary(k, cos_k.to(k.dtype), sin_k.to(k.dtype))
+        return q, k

@@ -21,8 +21,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nemo.collections.asr.modules.transformer_encoder import (
-    TransformerEncoder,
     FeedForward,
+    TransformerEncoder,
+    TransformerEncoderConfig,
 )
 
 __all__ = ['SwitchGate', 'MoEFeedForward', 'MoETransformerEncoder']
@@ -70,9 +71,15 @@ class SwitchGate(nn.Module):
 class MoEFeedForward(nn.Module):
     """Mixture-of-Experts Feed-Forward module -- drop-in replacement for FeedForward.
 
-    Contains N expert FFNs (each a ``FeedForward``) and a router (``SwitchGate``).
-    For each input token, the router selects the top-k experts and computes a
-    weighted combination of their outputs.
+    Contains N expert FFNs (each a ``FeedForward`` built from the encoder
+    ``TransformerEncoderConfig``) and a router (``SwitchGate``). For each input
+    token, the router selects the top-k experts and computes a weighted
+    combination of their outputs.
+
+    Each expert mirrors the base ``FeedForward(cfg)`` exactly, so the per-expert
+    inner dimension is ``int(cfg.ff_expansion * cfg.d_model)`` -- expert width is
+    controlled through ``ff_expansion`` (e.g. a sub-1x value for fine-grained
+    experts), matching the NeMo Transformer encoder interface.
 
     Computes an auxiliary load-balancing loss (GShard-style) stored in
     ``self._aux_loss`` and also stashes the per-expert dispatch counts in
@@ -81,41 +88,36 @@ class MoEFeedForward(nn.Module):
     router. Both attributes are reset on every ``forward`` call.
 
     Args:
-        d_model: Input and output feature dimension.
+        cfg: Encoder config; each expert is a ``FeedForward(cfg)`` and the
+            router projects from ``cfg.d_model``.
         num_experts: Number of expert FFNs.
         top_k: Number of experts activated per token. Defaults to 1.
         router: External router (for omni-router sharing). If None, an internal
             router is created. Defaults to None.
         jitter_eps: Jitter noise for the internal router (ignored if an
             external router is provided). Defaults to 0.0.
-        hidden_size: Inner dimension of each expert FFN. Forwarded to
-            :class:`FeedForward`. If None, defaults to ``4 * d_model``
-            (legacy behavior).
     """
 
     def __init__(
         self,
-        d_model: int,
+        cfg: TransformerEncoderConfig,
         num_experts: int,
         top_k: int = 1,
         router: Optional[SwitchGate] = None,
         jitter_eps: float = 0.0,
-        hidden_size: Optional[int] = None,
     ):
         super().__init__()
-        self.d_model = d_model
+        self.d_model = cfg.d_model
         self.num_experts = num_experts
         self.top_k = top_k
-        self.hidden_size = hidden_size
+        self.hidden_size = int(cfg.ff_expansion * cfg.d_model)
 
-        self.experts = nn.ModuleList(
-            [FeedForward(d_model, hidden_size=hidden_size) for _ in range(num_experts)]
-        )
+        self.experts = nn.ModuleList([FeedForward(cfg) for _ in range(num_experts)])
 
         if router is not None:
             self.router = router
         else:
-            self.router = SwitchGate(d_model=d_model, num_experts=num_experts, jitter_eps=jitter_eps)
+            self.router = SwitchGate(d_model=cfg.d_model, num_experts=num_experts, jitter_eps=jitter_eps)
 
         self._aux_loss = None
         # Detached per-step routing diagnostics, populated on every forward.
@@ -301,19 +303,27 @@ class MoETransformerEncoder(TransformerEncoder):
 
     def __init__(
         self,
-        n_mels: int = 80,
+        feat_in: int = 128,
         d_model: int = 512,
         n_heads: int = 8,
         n_layers: int = 17,
-        drop_rate: float = 0.1,
-        qkv_bias: bool = False,
-        causal_mask: bool = False,
-        pre_encode: str = "conv",
-        nan_debug: bool = True,
-        qk_norm: bool = False,
+        feat_out: int = -1,
+        subsampling: str = 'feature_stacking',
         subsampling_factor: int = 4,
-        hidden_size: Optional[int] = None,
-        ff_expansion_factor: Optional[float] = None,
+        drop_rate: float = 0.1,
+        dropout_pre_encoder: float = None,
+        dropout_emb: float = 0.0,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        ff_expansion: float = 4.0,
+        pre_block_norm: bool = True,
+        self_attention_model: Optional[str] = "rel_pos",
+        rope_base: float = 10000.0,
+        rotary_fraction: float = 1.0,
+        pos_emb_max_len: int = 5000,
+        xscaling: bool = False,
+        attn_mode: str = "full",
+        sync_max_audio_length: bool = True,
         # MoE parameters
         moe_num_experts: int = 8,
         moe_top_k: int = 1,
@@ -324,20 +334,51 @@ class MoETransformerEncoder(TransformerEncoder):
         moe_init_from_ffn: bool = True,
     ):
         super().__init__(
-            n_mels=n_mels,
+            feat_in=feat_in,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            feat_out=feat_out,
+            subsampling=subsampling,
+            subsampling_factor=subsampling_factor,
+            drop_rate=drop_rate,
+            dropout_pre_encoder=dropout_pre_encoder,
+            dropout_emb=dropout_emb,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            ff_expansion=ff_expansion,
+            pre_block_norm=pre_block_norm,
+            self_attention_model=self_attention_model,
+            rope_base=rope_base,
+            rotary_fraction=rotary_fraction,
+            pos_emb_max_len=pos_emb_max_len,
+            xscaling=xscaling,
+            attn_mode=attn_mode,
+            sync_max_audio_length=sync_max_audio_length,
+        )
+
+        # Rebuild the (already-validated) per-block config so MoE experts are
+        # built identically to the base FeedForward modules created by
+        # ``super().__init__()``. ``self.self_attention_model`` has been
+        # normalized by the base encoder (e.g. None -> "no_pos").
+        cfg = TransformerEncoderConfig(
+            feat_in=feat_in,
             d_model=d_model,
             n_heads=n_heads,
             n_layers=n_layers,
             drop_rate=drop_rate,
             qkv_bias=qkv_bias,
-            causal_mask=causal_mask,
-            pre_encode=pre_encode,
-            nan_debug=nan_debug,
             qk_norm=qk_norm,
+            ff_expansion=ff_expansion,
+            pre_block_norm=pre_block_norm,
             subsampling_factor=subsampling_factor,
-            hidden_size=hidden_size,
-            ff_expansion_factor=ff_expansion_factor,
+            attn_mode=attn_mode,
+            self_attention_model=self.self_attention_model,
+            rope_base=rope_base,
+            rotary_fraction=rotary_fraction,
         )
+        self._block_cfg = cfg
+        self.ff_hidden_size = int(ff_expansion * d_model)
 
         self.moe_num_experts = moe_num_experts
         self.moe_top_k = moe_top_k
@@ -378,12 +419,11 @@ class MoETransformerEncoder(TransformerEncoder):
 
             router = self.omni_router if moe_router_type == 'omni' else None
             moe_ffn = MoEFeedForward(
-                d_model=d_model,
+                cfg=cfg,
                 num_experts=moe_num_experts,
                 top_k=moe_top_k,
                 router=router,
                 jitter_eps=moe_jitter_eps,
-                hidden_size=self.ff_hidden_size,
             )
 
             if original_ffn_state is not None:
@@ -418,7 +458,7 @@ class MoETransformerEncoder(TransformerEncoder):
         self._cum_prob_sum: Optional[torch.Tensor] = None
         self._cum_tokens: Optional[torch.Tensor] = None
 
-    def forward(self, audio_signal, length):
+    def forward(self, audio_signal, length, bypass_pre_encode=False):
         """Forward pass identical to :class:`TransformerEncoder.forward`,
         plus an automatic call to :meth:`accumulate_moe_stats` after the
         encoder has run when in training mode.
@@ -426,7 +466,7 @@ class MoETransformerEncoder(TransformerEncoder):
         Validation / inference paths skip the accumulation so the MoE
         diagnostic window only reflects training-time routing.
         """
-        out = super().forward(audio_signal, length)
+        out = super().forward(audio_signal, length, bypass_pre_encode=bypass_pre_encode)
         if self.training:
             self.accumulate_moe_stats()
         return out
@@ -653,11 +693,11 @@ class MoETransformerEncoder(TransformerEncoder):
         When loading from a pretrained TransformerEncoder checkpoint, the FFN
         keys have the form::
 
-            layers.{i}.ffn.ffn.0.weight
+            layers.{i}.ffn.net.0.weight
 
         but the MoE encoder expects::
 
-            layers.{i}.ffn.experts.{j}.ffn.0.weight
+            layers.{i}.ffn.experts.{j}.net.0.weight
 
         This method detects such mismatches and duplicates the pretrained FFN
         weights into all expert slots, so every expert starts from the pretrained

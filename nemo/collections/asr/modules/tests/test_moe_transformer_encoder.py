@@ -16,7 +16,11 @@ import copy
 import pytest
 import torch
 
-from nemo.collections.asr.modules.transformer_encoder import TransformerEncoder, FeedForward
+from nemo.collections.asr.modules.transformer_encoder import (
+    FeedForward,
+    TransformerEncoder,
+    TransformerEncoderConfig,
+)
 from nemo.collections.asr.modules.moe_transformer_encoder import (
     MoETransformerEncoder,
     MoEFeedForward,
@@ -37,6 +41,13 @@ BATCH = 2
 SEQ_LEN = 200  # raw audio frames (pre-subsampling)
 
 
+def _make_cfg(d_model=D_MODEL, ff_expansion=4.0, n_heads=N_HEADS, **kwargs):
+    """Build a TransformerEncoderConfig for unit-testing FeedForward / MoEFeedForward."""
+    return TransformerEncoderConfig(
+        d_model=d_model, n_heads=n_heads, ff_expansion=ff_expansion, drop_rate=0.0, **kwargs
+    )
+
+
 def _make_input(batch=BATCH, seq_len=SEQ_LEN, n_mels=N_MELS, device=DEVICE):
     """Create a dummy audio input and corresponding lengths."""
     audio = torch.randn(batch, n_mels, seq_len, device=device)
@@ -46,9 +57,9 @@ def _make_input(batch=BATCH, seq_len=SEQ_LEN, n_mels=N_MELS, device=DEVICE):
 
 def _make_base_encoder(**kwargs):
     defaults = dict(
-        n_mels=N_MELS, d_model=D_MODEL, n_heads=N_HEADS, n_layers=N_LAYERS,
-        drop_rate=0.0, qkv_bias=False, causal_mask=False, pre_encode="conv",
-        nan_debug=False, qk_norm=False,
+        feat_in=N_MELS, d_model=D_MODEL, n_heads=N_HEADS, n_layers=N_LAYERS,
+        drop_rate=0.0, qkv_bias=False, attn_mode="full", subsampling="feature_stacking",
+        qk_norm=False,
     )
     defaults.update(kwargs)
     return TransformerEncoder(**defaults).to(DEVICE)
@@ -56,9 +67,9 @@ def _make_base_encoder(**kwargs):
 
 def _make_moe_encoder(**kwargs):
     defaults = dict(
-        n_mels=N_MELS, d_model=D_MODEL, n_heads=N_HEADS, n_layers=N_LAYERS,
-        drop_rate=0.0, qkv_bias=False, causal_mask=False, pre_encode="conv",
-        nan_debug=False, qk_norm=False,
+        feat_in=N_MELS, d_model=D_MODEL, n_heads=N_HEADS, n_layers=N_LAYERS,
+        drop_rate=0.0, qkv_bias=False, attn_mode="full", subsampling="feature_stacking",
+        qk_norm=False,
         moe_num_experts=4, moe_top_k=1, moe_router_type='omni',
         moe_layer_indices=None, moe_load_balance_loss_weight=0.01,
         moe_jitter_eps=0.0, moe_init_from_ffn=True,
@@ -359,7 +370,7 @@ class TestStateDictRemapping:
                         continue
                     for expert in moe_ffn.experts:
                         expert_param = dict(expert.named_parameters())
-                        # The FeedForward has params like ffn.0.weight, ffn.0.bias, ffn.2.weight, ffn.2.bias
+                        # The FeedForward has params like net.0.weight, net.0.bias, net.3.weight, net.3.bias
                         flat_params = {}
                         for n, p in expert.named_parameters():
                             flat_params[n] = p
@@ -456,14 +467,14 @@ class TestSwitchGate:
 
 class TestMoEFeedForward:
     def test_output_shape(self):
-        moe_ff = MoEFeedForward(d_model=32, num_experts=4, top_k=1).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(32), num_experts=4, top_k=1).to(DEVICE)
         x = torch.randn(2, 10, 32, device=DEVICE)
         out = moe_ff(x)
         assert out.shape == (2, 10, 32)
 
     def test_top_k_2(self):
         """Top-k=2 should also work correctly."""
-        moe_ff = MoEFeedForward(d_model=32, num_experts=4, top_k=2).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(32), num_experts=4, top_k=2).to(DEVICE)
         x = torch.randn(2, 10, 32, device=DEVICE)
         out = moe_ff(x)
         assert out.shape == (2, 10, 32)
@@ -472,7 +483,7 @@ class TestMoEFeedForward:
     def test_external_router(self):
         """MoEFeedForward should accept an external router."""
         router = SwitchGate(d_model=32, num_experts=4).to(DEVICE)
-        moe_ff = MoEFeedForward(d_model=32, num_experts=4, router=router).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(32), num_experts=4, router=router).to(DEVICE)
         assert moe_ff.router is router
 
     def test_expert_counts_recorded(self):
@@ -480,7 +491,7 @@ class TestMoEFeedForward:
         whose total equals num_tokens * top_k.
         """
         E, K = 5, 2
-        moe_ff = MoEFeedForward(d_model=16, num_experts=E, top_k=K).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(16), num_experts=E, top_k=K).to(DEVICE)
         x = torch.randn(3, 7, 16, device=DEVICE)
         with torch.no_grad():
             moe_ff(x)
@@ -493,7 +504,7 @@ class TestMoEFeedForward:
     def test_gate_prob_sum_recorded(self):
         """After forward, _gate_prob_sum / _num_tokens should sum to ~1."""
         E = 4
-        moe_ff = MoEFeedForward(d_model=16, num_experts=E, top_k=1).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(16), num_experts=E, top_k=1).to(DEVICE)
         x = torch.randn(2, 5, 16, device=DEVICE)
         with torch.no_grad():
             moe_ff(x)
@@ -508,98 +519,65 @@ class TestMoEFeedForward:
 
 
 # ---------------------------------------------------------------------------
-# Test 10: Configurable FFN inner dim (hidden_size / ff_expansion_factor)
+# Test 10: Configurable FFN inner dim via ff_expansion
 # ---------------------------------------------------------------------------
 
-class TestConfigurableFFNHiddenSize:
+class TestConfigurableFFNExpansion:
     def test_feedforward_default_is_4x(self):
-        """With no hidden_size, FeedForward defaults to 4x dim (legacy)."""
-        ff = FeedForward(64)
-        assert ff.hidden_size == 256
-        # First Linear: in=64, out=256
-        first = ff.ffn[0]
-        assert first.weight.shape == (256, 64)
+        """ff_expansion=4.0 -> inner dim = 4 * d_model; net[0]/net[3] are the Linears."""
+        ff = FeedForward(_make_cfg(64, ff_expansion=4.0))
+        # net = [Linear(d, h), GELU, Dropout, Linear(h, d), Dropout]
+        assert ff.net[0].weight.shape == (256, 64)
+        assert ff.net[3].weight.shape == (64, 256)
 
-    def test_feedforward_explicit_hidden_size(self):
-        """Explicit hidden_size sets both Linear shapes."""
-        ff = FeedForward(64, hidden_size=32)
-        assert ff.hidden_size == 32
-        assert ff.ffn[0].weight.shape == (32, 64)
-        assert ff.ffn[2].weight.shape == (64, 32)
+    def test_feedforward_thin_ff_expansion(self):
+        """Sub-1x ff_expansion produces a thin FFN (e.g. 0.5 -> 32)."""
+        ff = FeedForward(_make_cfg(64, ff_expansion=0.5))
+        assert ff.net[0].weight.shape == (32, 64)
+        assert ff.net[3].weight.shape == (64, 32)
 
-    def test_encoder_legacy_default_unchanged(self):
-        """With no hidden_size / ff_expansion_factor, encoder builds 4x FFN."""
-        enc = _make_base_encoder()
-        assert enc.ff_hidden_size == 4 * D_MODEL
+    def test_encoder_ff_expansion(self):
+        """ff_expansion=0.5 -> every block FFN inner dim = int(d_model * 0.5)."""
+        enc = _make_base_encoder(ff_expansion=0.5)
+        h = int(D_MODEL * 0.5)
         for layer in enc.layers:
-            assert layer.ffn.hidden_size == 4 * D_MODEL
+            assert layer.ffn.net[0].out_features == h
+            assert layer.ffn.net[0].weight.shape == (h, D_MODEL)
 
-    def test_encoder_ff_expansion_factor(self):
-        """ff_expansion_factor=0.5 -> hidden_size = int(d_model * 0.5)."""
-        enc = _make_base_encoder(ff_expansion_factor=0.5)
-        assert enc.ff_hidden_size == int(D_MODEL * 0.5)
-        for layer in enc.layers:
-            assert layer.ffn.hidden_size == int(D_MODEL * 0.5)
-
-    def test_encoder_explicit_hidden_size_wins_over_factor(self):
-        """When both are given, explicit hidden_size takes precedence."""
-        enc = _make_base_encoder(hidden_size=24, ff_expansion_factor=2.0)
-        assert enc.ff_hidden_size == 24
-        for layer in enc.layers:
-            assert layer.ffn.hidden_size == 24
-
-    def test_moe_encoder_threads_hidden_size(self):
-        """MoETransformerEncoder must propagate hidden_size to per-expert FFNs."""
+    def test_moe_encoder_experts_ff_expansion(self):
+        """MoETransformerEncoder sizes each expert FFN via ff_expansion."""
         moe = _make_moe_encoder(
-            hidden_size=24, moe_init_from_ffn=False, moe_num_experts=3
-        )
-        assert moe.ff_hidden_size == 24
-        for layer_idx in moe.moe_layer_indices:
-            moe_ffn = moe.layers[layer_idx].ffn
-            assert isinstance(moe_ffn, MoEFeedForward)
-            for expert in moe_ffn.experts:
-                assert expert.hidden_size == 24
-                assert expert.ffn[0].weight.shape == (24, D_MODEL)
-
-    def test_moe_encoder_ff_expansion_factor(self):
-        moe = _make_moe_encoder(
-            ff_expansion_factor=0.5,
-            moe_init_from_ffn=False,
-            moe_num_experts=2,
+            ff_expansion=0.5, moe_init_from_ffn=False, moe_num_experts=3
         )
         h = int(D_MODEL * 0.5)
         assert moe.ff_hidden_size == h
         for layer_idx in moe.moe_layer_indices:
-            for expert in moe.layers[layer_idx].ffn.experts:
-                assert expert.hidden_size == h
+            moe_ffn = moe.layers[layer_idx].ffn
+            assert isinstance(moe_ffn, MoEFeedForward)
+            for expert in moe_ffn.experts:
+                assert expert.net[0].weight.shape == (h, D_MODEL)
 
     def test_moe_thin_param_count(self):
         """Sanity-check parameter count for a thin MoE configuration."""
-        d, h, E, n = D_MODEL, 24, 3, N_LAYERS
+        d, E, n = D_MODEL, 3, N_LAYERS
+        ff_expansion = 24.0 / d  # int(ff_expansion * d) = 24
+        h = int(ff_expansion * d)
         moe = _make_moe_encoder(
-            hidden_size=h,
+            ff_expansion=ff_expansion,
             moe_init_from_ffn=False,
             moe_num_experts=E,
             moe_router_type='omni',
         )
+        assert moe.ff_hidden_size == h
 
         # Per-expert FFN: Linear(d, h) + Linear(h, d), both with bias
         per_expert = (d * h + h) + (h * d + d)
-        # MHA per layer (qkv_bias=False, qk_norm=False default in fixture):
-        # 3 * d^2  (Q, K, V)  + d^2 + d  (out_proj) = 4*d^2 + d
-        per_block_mha = 4 * d * d + d
-        # Custom LayerNorm: 2 * d (scale + shift), pre + post = 4 * d
-        per_block_ln = 4 * d
-        per_block = per_block_mha + per_block_ln + E * per_expert
-
-        encoder_total = n * per_block
-        # Top-level: pre_encode (ConvSubsampling), 2 nn.LayerNorms (2*d each)
-        # We don't want to be too brittle on pre_encode sizes; instead verify
-        # that the encoder param count is at least encoder_total + 2 * 2 * d
-        # (for the two LayerNorms we know exist).
+        encoder_total = n * E * per_expert
+        # Lower bound only -- attention, layernorms, router, pre-encoder and
+        # positional params all add on top of the expert FFN params.
         actual = sum(p.numel() for p in moe.parameters())
-        assert actual >= encoder_total + 4 * d, (
-            f"Expected at least {encoder_total + 4 * d} params, got {actual}"
+        assert actual >= encoder_total, (
+            f"Expected at least {encoder_total} expert-FFN params, got {actual}"
         )
 
 
@@ -638,7 +616,7 @@ class TestOptimizedDispatchEquivalence:
     def test_top_k_1_matches_reference(self):
         """Optimized dispatch (top_k=1) matches the naive reference."""
         torch.manual_seed(0)
-        moe_ff = MoEFeedForward(d_model=16, num_experts=4, top_k=1).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(16), num_experts=4, top_k=1).to(DEVICE)
         moe_ff.eval()
         x = torch.randn(2, 9, 16, device=DEVICE)
         with torch.no_grad():
@@ -649,7 +627,7 @@ class TestOptimizedDispatchEquivalence:
     def test_top_k_2_matches_reference(self):
         """Optimized dispatch (top_k=2) matches the naive reference."""
         torch.manual_seed(1)
-        moe_ff = MoEFeedForward(d_model=16, num_experts=4, top_k=2).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(16), num_experts=4, top_k=2).to(DEVICE)
         moe_ff.eval()
         x = torch.randn(2, 9, 16, device=DEVICE)
         with torch.no_grad():
@@ -660,7 +638,7 @@ class TestOptimizedDispatchEquivalence:
     def test_top_k_4_of_8_matches_reference(self):
         """Higher top_k of more experts also matches the reference."""
         torch.manual_seed(2)
-        moe_ff = MoEFeedForward(d_model=16, num_experts=8, top_k=4).to(DEVICE)
+        moe_ff = MoEFeedForward(cfg=_make_cfg(16), num_experts=8, top_k=4).to(DEVICE)
         moe_ff.eval()
         x = torch.randn(2, 9, 16, device=DEVICE)
         with torch.no_grad():

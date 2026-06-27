@@ -118,15 +118,19 @@ model:
 
   encoder:
     _target_: nemo.collections.asr.modules.TransformerEncoder
-    n_mels: ${model.preprocessor.features}
+    feat_in: ${model.preprocessor.features}
     d_model: 1280
     n_heads: 16
     n_layers: 32
     drop_rate: 0.1
-    qkv_bias: False
-    causal_mask: False
-    pre_encode: "depth_conv"  # Options: conv, depth_conv, stacking
-    subsampling_factor: 4  # Subsampling factor for stacking pre-encoder (4 or 8)
+    qkv_bias: false
+    qk_norm: true
+    ff_expansion: 4
+    pre_block_norm: true
+    subsampling: feature_stacking   # frame stacking; alt: stacking, stacking_norm
+    subsampling_factor: 8
+    # rel_pos (default) | abs_pos | rope | no_pos. RoPE rotates Q/K inside attention.
+    self_attention_model: rel_pos
 
   decoder:
     _target_: nemo.collections.asr.modules.RNNTDecoder
