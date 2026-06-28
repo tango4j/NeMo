@@ -25,7 +25,8 @@ from nemo.collections.asr.modules.conformer_encoder import (  # noqa: F401
     ConformerEncoderAdapter,
     ConformerMultiLayerFeatureExtractor,
 )
-from nemo.collections.asr.modules.conv_asr import (  # noqa: F401
+from nemo.collections.asr.modules.moe_transformer_encoder import MoETransformerEncoder  # noqa: F401
+from nemo.collections.asr.modules.conv_asr import (
     ConvASRDecoder,
     ConvASRDecoderClassification,
     ConvASRDecoderReconstruction,
@@ -65,6 +66,7 @@ __all__ = [
     'ConformerEncoder',
     'ConformerEncoderAdapter',
     'ConformerMultiLayerFeatureExtractor',
+    'MoETransformerEncoder',
     'ParallelExpertEncoder',
     'ConvASRDecoder',
     'ConvASRDecoderClassification',

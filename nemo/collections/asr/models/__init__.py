@@ -28,6 +28,8 @@ from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (  # n
 )
 from nemo.collections.asr.models.hybrid_rnnt_ctc_models import EncDecHybridRNNTCTCModel  # noqa: F401
 from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel  # noqa: F401
+from nemo.collections.asr.models.moe_hybrid_rnnt_ctc_bpe_models import EncDecMoEHybridRNNTCTCBPEModel  # noqa: F401
+from nemo.collections.asr.models.moe_rnnt_bpe_models import EncDecMoERNNTBPEModel  # noqa: F401
 from nemo.collections.asr.models.multitalker_asr_models import EncDecMultiTalkerRNNTBPEModel  # noqa: F401
 from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel  # noqa: F401
 from nemo.collections.asr.models.rnnt_bpe_models_prompt import EncDecRNNTBPEModelWithPrompt  # noqa: F401
@@ -53,6 +55,8 @@ __all__ = [
     'EncDecHybridRNNTCTCBPEModelWithPrompt',
     'EncDecHybridRNNTCTCModel',
     'EncDecMaskedTokenPredModel',
+    'EncDecMoEHybridRNNTCTCBPEModel',
+    'EncDecMoERNNTBPEModel',
     'EncDecMultiTaskModel',
     'EncDecMultiTalkerRNNTBPEModel',
     'EncDecRNNTBPEModel',

@@ -70,8 +70,23 @@ class LhotseSpeechToTextBpeDataset(torch.utils.data.Dataset):
 
         self.return_cuts = return_cuts
 
-    def __getitem__(self, cuts) -> Tuple[torch.Tensor, ...]:
+    def __getitem__(self, cuts) -> Optional[Tuple[torch.Tensor, ...]]:
         audio, audio_lens, cuts = self.load_audio(cuts)
+        # `self.load_audio = AudioSamples(fault_tolerant=True)` silently drops
+        # cuts whose audio cannot be read (e.g. AIS ChunkedEncodingError /
+        # IncompleteRead). If EVERY cut in the mini-batch failed, `cuts` is
+        # empty and the downstream `collate_vectors(tokens, ...)` would crash
+        # with `IndexError: list index out of range` on the first index access.
+        # That crash kills the worker / rank and deadlocks the next NCCL
+        # ALLREDUCE (other ranks finished their forward and wait forever on
+        # the missing peer). Returning None here lets the upstream
+        # `FallbackDataset` wrapper (see nemo/collections/common/data/fallback.py)
+        # substitute the previous good batch, so the rank keeps making forward
+        # progress and DDP stays in lock-step. This is especially important
+        # for any `bucket_batch_size == 1` configurations where a single bad
+        # cut empties the whole batch.
+        if len(cuts) == 0:
+            return None
         tokens = [
             torch.cat(
                 [

@@ -30,6 +30,7 @@ from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTBPEDecoding, RNNTBPEDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
+from nemo.collections.common.data.fallback import FallbackDataset
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging, model_utils
@@ -444,9 +445,17 @@ class EncDecRNNTBPEModel(EncDecRNNTModel, ASRBPEMixin):
                 # these values must be passed from the configuration.
                 global_rank=self.global_rank if not config.get("do_transcribe", False) else config.get("global_rank"),
                 world_size=self.world_size if not config.get("do_transcribe", False) else config.get("world_size"),
-                dataset=LhotseSpeechToTextBpeDataset(
-                    tokenizer=self.tokenizer,
-                    return_cuts=config.get("do_transcribe", False),
+                # Wrap with FallbackDataset (NeMo-common) so a mini-batch whose
+                # cuts ALL failed AIS reads -- LhotseSpeechToTextBpeDataset now
+                # returns None in that case -- is silently replaced with the
+                # previous good batch instead of crashing the worker / rank /
+                # NCCL ALLREDUCE. Pattern adopted from speechlm2's datamodule
+                # (nemo/collections/speechlm2/data/datamodule.py:78).
+                dataset=FallbackDataset(
+                    LhotseSpeechToTextBpeDataset(
+                        tokenizer=self.tokenizer,
+                        return_cuts=config.get("do_transcribe", False),
+                    )
                 ),
                 tokenizer=self.tokenizer,
             )

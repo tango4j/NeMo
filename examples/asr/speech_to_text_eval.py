@@ -80,6 +80,9 @@ from nemo.collections.asr.parts.utils.transcribe_utils import (
 from nemo.collections.common.metrics.punct_er import DatasetPunctuationErrorRate
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
+import sys
+sys.path.append("/disk1/NVIDIA/repos/open_asr_leaderboard/")
+from normalizer import data_utils
 
 
 @dataclass
@@ -196,6 +199,8 @@ def main(cfg: EvaluationConfig):
         )
 
     # Compute the WER
+    predicted_text = [data_utils.normalizer(text) for text in predicted_text]
+    ground_truth_text = [data_utils.normalizer(text) for text in ground_truth_text]
     cer = word_error_rate(hypotheses=predicted_text, references=ground_truth_text, use_cer=True)
     wer = word_error_rate(hypotheses=predicted_text, references=ground_truth_text, use_cer=False)
 
