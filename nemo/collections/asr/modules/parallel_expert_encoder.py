@@ -39,6 +39,7 @@ from tqdm import tqdm
 
 from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder
 from nemo.collections.asr.parts.preprocessing.features import normalize_batch
+from nemo.collections.asr.parts.submodules.subsampling import calc_length
 from nemo.core.classes import ModelPT
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.core.classes.module import freeze, unfreeze
@@ -119,6 +120,8 @@ class ParallelExpertEncoderPT(ModelPT):
             diar_spkcache_update_period=self._cfg.get('diar_spkcache_update_period', 300),
             diar_spkcache_len=self._cfg.get('diar_spkcache_len', 188),
             force_single_speaker=self._cfg.get('force_single_speaker', False),
+            binarize_diar_preds=self._cfg.get('binarize_diar_preds', True),
+            diar_pred_threshold=self._cfg.get('diar_pred_threshold', 0.5),
         )
 
     @classmethod
@@ -304,6 +307,10 @@ class ParallelExpertEncoder(nn.Module):
         diar_fifo_len (int): Sortformer streaming ``fifo_len``. Default ``40``.
         diar_spkcache_update_period (int): Sortformer streaming ``spkcache_update_period``. Default ``300``.
         diar_spkcache_len (int): Sortformer streaming ``spkcache_len``. Default ``188``.
+        force_single_speaker (bool): During eval, skip diarization and use all-ones speaker-0 targets.
+        binarize_diar_preds (bool): During eval, hard-threshold Sortformer sigmoid predictions before fusion.
+            Defaults to ``True`` to match binary speaker-activity targets used during training.
+        diar_pred_threshold (float): Threshold for ``binarize_diar_preds``. Default ``0.5``.
     """
 
     def __init__(
@@ -320,6 +327,8 @@ class ParallelExpertEncoder(nn.Module):
         diar_spkcache_update_period: int = 300,
         diar_spkcache_len: int = 188,
         force_single_speaker: bool = False,
+        binarize_diar_preds: bool = True,
+        diar_pred_threshold: float = 0.5,
     ):
         super().__init__()
 
@@ -364,6 +373,10 @@ class ParallelExpertEncoder(nn.Module):
         # (see _maybe_single_speaker_targets). Defaults to False for the general-purpose
         # encoder; the SALM / vLLM pipelines turn it on.
         self.force_single_speaker = bool(force_single_speaker)
+        # Inference-only: Sortformer returns sigmoid speaker-activity probabilities.
+        # Threshold them by default so fusion sees the same binary target type as training.
+        self.binarize_diar_preds = bool(binarize_diar_preds)
+        self.diar_pred_threshold = float(diar_pred_threshold)
 
         self.n_spk = int(self.diarization_model.sortformer_modules.n_spk)
         self.asr_d_model = self.asr_encoder.d_model
@@ -465,6 +478,36 @@ class ParallelExpertEncoder(nn.Module):
             return tensor
         return tensor.to(device=param.device, dtype=param.dtype)
 
+    def _asr_output_length(self, feat_len: int) -> int:
+        """ASR-encoder output frames for ``feat_len`` input mel frames.
+
+        Uses the wrapped ConformerEncoder's own conv-subsampling arithmetic
+        (:func:`calc_length`) so the online path stays frame-consistent with a
+        single offline pass. The offline length is what SALM/vLLM reserve as
+        ``<|audio|>`` placeholders, so cumulative ``_asr_output_length`` deltas
+        must be used (instead of ``round(feat_len / subsampling_factor)``) to
+        avoid dropping a real boundary frame and mismatching the placeholder count.
+        """
+        pre = self.asr_encoder.pre_encode
+        if not hasattr(pre, "_kernel_size"):
+            # Non-conv subsampling: fall back to the nominal stride ratio.
+            return round(feat_len / self.subsampling_factor)
+        out = calc_length(
+            lengths=torch.tensor([feat_len], dtype=torch.float),
+            all_paddings=pre._left_padding + pre._right_padding,
+            kernel_size=pre._kernel_size,
+            stride=pre._stride,
+            ceil_mode=pre._ceil_mode,
+            repeat_num=pre._sampling_num,
+        )
+        return int(out.item())
+
+    def _maybe_binarize_diar_preds(self, spk_preds: torch.Tensor) -> torch.Tensor:
+        """Hard-threshold Sortformer speaker-activity predictions during inference."""
+        if self.training or not self.binarize_diar_preds:
+            return spk_preds
+        return (spk_preds >= self.diar_pred_threshold).to(spk_preds.dtype)
+
     def _fuse_diar_and_asr(self, asr_encoded: torch.Tensor, spk_targets: torch.Tensor) -> torch.Tensor:
         """Fuse ASR states with speaker-activity preds (LayerNorm + sinusoidal kernel + ADD).
 
@@ -563,6 +606,7 @@ class ParallelExpertEncoder(nn.Module):
                     emb_seq=emb_seq,
                     emb_seq_length=emb_seq_length,
                 )
+                spk_targets = self._maybe_binarize_diar_preds(spk_targets)
 
         if self.asr_normalize_type:
             asr_audio_signal, _, _ = normalize_batch(
@@ -666,9 +710,11 @@ class ParallelExpertEncoder(nn.Module):
             chunk_length = (length - enc_stt).clamp(min=0, max=enc_end - enc_stt)
             with torch.set_grad_enabled(not self.freeze_asr):
                 enc_ctx, _ = self.asr_encoder(audio_signal=asr_chunk, length=chunk_length)
-            # Trim context off in output-frame space using rounded cumulative positions.
+            # Trim context off in output-frame space. Core length is the cumulative
+            # calc_length delta (not round(end/f)-round(stt/f)) so the summed online
+            # length equals the offline single-pass length == reserved placeholder count.
             left_drop = left_offset // self.subsampling_factor
-            core_len = round(end / self.subsampling_factor) - round(stt / self.subsampling_factor)
+            core_len = self._asr_output_length(end) - self._asr_output_length(stt)
             core_len = max(0, min(core_len, enc_ctx.shape[-1] - left_drop))
             enc_chunk = enc_ctx[:, :, left_drop : left_drop + core_len]
             asr_chunks.append(enc_chunk)
@@ -701,6 +747,7 @@ class ParallelExpertEncoder(nn.Module):
         asr_encoded = torch.cat(asr_chunks, dim=2)  # (B, D, T_asr)
         if run_streaming_diar:
             spk_targets = torch.cat(diar_chunks, dim=1)  # (B, T_asr, n_spk)
+            spk_targets = self._maybe_binarize_diar_preds(spk_targets)
 
         if spk_targets is not None:
             outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
