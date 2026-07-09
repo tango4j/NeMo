@@ -142,6 +142,44 @@ class NeMoSpeechLMForConditionalGeneration(
             audio_signal_length=audio_signal_length,
         )
 
+    def _stash_pe_dump_keys(self, waveform: torch.Tensor, lengths: torch.Tensor) -> None:
+        """Stash reproducible per-item dump keys on the PE encoder (no-op if disabled).
+
+        Only runs when the diar-supervision dump is enabled (``$PEE_DIAR_DUMP_DIR``)
+        and the encoder is a :class:`ParallelExpertEncoder`. The key is a sha1 of the
+        unpadded float32 waveform for each batch item, taken before the device/dtype
+        cast so it equals ``soundfile.read(clip, dtype='float32')`` offline (the clips
+        vLLM serves are 16 kHz mono, so no resample is involved). The encoder consumes
+        ``_pending_dump_keys`` positionally (keys[b] <-> batch item b) and clears it.
+        Never raises into the audio path.
+        """
+        import os
+
+        if not os.environ.get("PEE_DIAR_DUMP_DIR"):
+            return
+        encoder = getattr(self.perception, "encoder", None)
+        if not isinstance(encoder, ParallelExpertEncoder):
+            return
+        try:
+            import hashlib
+
+            wav = waveform.detach().to(torch.float32).cpu()
+            if wav.dim() == 1:
+                wav = wav.unsqueeze(0)
+            lens = lengths.detach().cpu().tolist() if lengths is not None else [wav.shape[-1]] * wav.shape[0]
+            keys = []
+            for b in range(wav.shape[0]):
+                n = int(lens[b]) if b < len(lens) else wav.shape[-1]
+                n = max(1, min(n, wav.shape[-1]))
+                keys.append(hashlib.sha1(wav[b, :n].contiguous().numpy().tobytes()).hexdigest()[:16])
+            # Append to a FIFO queue rather than replace: the encoder pops the B keys it
+            # actually dumps per forward and keeps the rest, so sub-batched forwards after
+            # one stash still get their waveform keys (instead of falling back to a mel hash).
+            existing = getattr(encoder, "_pending_dump_keys", None) or []
+            encoder._pending_dump_keys = list(existing) + keys
+        except Exception:
+            pass
+
     def _process_audio(self, audio_input: NeMoSpeechLMAudioInputs) -> tuple[torch.Tensor, ...]:
         # Real device placement happens at init via _mark_tower_model +
         # get_mm_mapping; this .to() is a no-op guard kept for paranoia.
@@ -151,6 +189,11 @@ class NeMoSpeechLMForConditionalGeneration(
         audio_signal = audio_input.audio_signal
         if isinstance(audio_signal, list):
             audio_signal = torch.stack(audio_signal, dim=0)
+        # Diagnostic diar-supervision dump: key each session by a sha1 of the raw
+        # (unpadded) float32 waveform BEFORE any device/dtype cast, so an offline
+        # matcher can recompute it from the manifest via soundfile.read(clip). Stash
+        # it on the PE encoder, which consumes it when writing its RTTM/npy dump.
+        self._stash_pe_dump_keys(audio_signal, audio_input.audio_signal_length)
         audio_signal = audio_signal.to(device=device, dtype=_AUDIO_INPUT_DTYPE)
         audio_lengths = audio_input.audio_signal_length.to(device=device)
 

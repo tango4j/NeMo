@@ -113,7 +113,7 @@ class ParallelExpertEncoderPT(ModelPT):
             asr_normalize_type=self._cfg.get('asr_normalize_type', None),
             freeze_diar=self._cfg.get('freeze_diar', True),
             freeze_asr=self._cfg.get('freeze_asr', False),
-            online_inference_length=self._cfg.get('online_inference_length', 500),
+            online_inference_length=self._cfg.get('online_inference_length', 375),
             chunk_left_context=self._cfg.get('chunk_left_context', 50),
             chunk_right_context=self._cfg.get('chunk_right_context', 50),
             diar_fifo_len=self._cfg.get('diar_fifo_len', 40),
@@ -320,14 +320,14 @@ class ParallelExpertEncoder(nn.Module):
         asr_normalize_type: Optional[str] = None,
         freeze_diar: bool = True,
         freeze_asr: bool = False,
-        online_inference_length: int = 500,
+        online_inference_length: int = 375,
         chunk_left_context: int = 50,
         chunk_right_context: int = 50,
         diar_fifo_len: int = 40,
         diar_spkcache_update_period: int = 300,
         diar_spkcache_len: int = 188,
         force_single_speaker: bool = False,
-        binarize_diar_preds: bool = True,
+        binarize_diar_preds: bool = False,
         diar_pred_threshold: float = 0.5,
     ):
         super().__init__()
@@ -508,6 +508,94 @@ class ParallelExpertEncoder(nn.Module):
             return spk_preds
         return (spk_preds >= self.diar_pred_threshold).to(spk_preds.dtype)
 
+    @staticmethod
+    def _speaker_matrix_to_rttm_lines(mat, uniq_id: str, frame_dur: float, threshold: float) -> List[str]:
+        """Run-length-encode a ``(T, n_spk)`` activity matrix into RTTM SPEAKER lines.
+
+        Timestamps are clip-relative (start at 0, in seconds); one RTTM speaker
+        label ``spk{col}`` per matrix column. Soft activity is hard-thresholded at
+        ``threshold`` (RTTM segments are inherently binary).
+        """
+        lines: List[str] = []
+        hard = mat >= threshold
+        n_frames, n_spk = hard.shape
+        for spk in range(n_spk):
+            col = hard[:, spk]
+            start = None
+            for t in range(n_frames):
+                if col[t] and start is None:
+                    start = t
+                elif not col[t] and start is not None:
+                    stt, dur = start * frame_dur, (t - start) * frame_dur
+                    lines.append(f"SPEAKER {uniq_id} 1 {stt:.3f} {dur:.3f} <NA> <NA> spk{spk} <NA> <NA>")
+                    start = None
+            if start is not None:
+                stt, dur = start * frame_dur, (n_frames - start) * frame_dur
+                lines.append(f"SPEAKER {uniq_id} 1 {stt:.3f} {dur:.3f} <NA> <NA> spk{spk} <NA> <NA>")
+        return lines
+
+    def _maybe_dump_diar_supervision(self, audio_signal, spk_targets, length) -> None:
+        """Diagnostic: log the diarization speaker-activity matrix + a hypothesis RTTM per session.
+
+        Active only during inference and only when the env var ``PEE_DIAR_DUMP_DIR``
+        is set (otherwise a no-op). For every batch item it writes, into that dir:
+
+        * ``<key>.npy`` -- the raw ``(T, n_spk)`` speaker-activity matrix actually fused
+          (post-binarization if ``binarize_diar_preds`` is on; soft probabilities otherwise), and
+        * ``<key>.rttm`` -- a hypothesis RTTM (clip-relative, one ``spk{col}`` label per
+          column), thresholded at ``$PEE_DIAR_DUMP_THRESHOLD`` (default ``diar_pred_threshold``).
+
+        Each file is keyed by ``_pending_dump_keys`` when the vLLM plugin stashed one
+        (a sha1 of the raw float32 waveform, reproducible offline via
+        ``soundfile.read(clip)``); otherwise it falls back to a sha1 of the input mel
+        (not reproducible off-GPU). vLLM strips the audio path/sample_id before the
+        encoder runs, so a content hash is the only session-stable id available here.
+        Never raises into forward.
+        """
+        if self.training or spk_targets is None:
+            return
+        dump_dir = os.environ.get("PEE_DIAR_DUMP_DIR")
+        if not dump_dir:
+            return
+        wav_keys = getattr(self, "_pending_dump_keys", None)
+        try:
+            import hashlib
+
+            import numpy as np
+
+            os.makedirs(dump_dir, exist_ok=True)
+            frame_dur = self.subsampling_factor * 0.01  # output frame -> seconds (subsampling x 10ms hop)
+            threshold = float(os.environ.get("PEE_DIAR_DUMP_THRESHOLD", self.diar_pred_threshold))
+            preds = spk_targets.detach().to(torch.float32).cpu()
+            # Pop exactly the B keys this forward consumes (FIFO), keep the rest for the
+            # next forward. The plugin stashes keys in batch order; sub-batched forwards
+            # then stay aligned instead of losing keys after the first dump.
+            if wav_keys:
+                used_keys = list(wav_keys[: preds.shape[0]])
+                self._pending_dump_keys = list(wav_keys[preds.shape[0] :]) or None
+            else:
+                used_keys = None
+                self._pending_dump_keys = None
+            mel = audio_signal.detach().to(torch.float32).cpu()
+            if length is not None:
+                feat_lengths = length.detach().cpu().tolist()
+            else:
+                feat_lengths = [mel.shape[-1]] * mel.shape[0]
+            for b in range(preds.shape[0]):
+                if used_keys is not None and b < len(used_keys) and used_keys[b]:
+                    key = used_keys[b]
+                else:
+                    flen = int(feat_lengths[b]) if b < len(feat_lengths) else mel.shape[-1]
+                    flen = max(1, min(flen, mel.shape[-1]))
+                    key = hashlib.sha1(mel[b, :, :flen].contiguous().numpy().tobytes()).hexdigest()[:16]
+                mat = preds[b].numpy()  # (T, n_spk)
+                np.save(os.path.join(dump_dir, f"{key}.npy"), mat)
+                lines = self._speaker_matrix_to_rttm_lines(mat, key, frame_dur, threshold)
+                with open(os.path.join(dump_dir, f"{key}.rttm"), "w") as fout:
+                    fout.write("\n".join(lines) + ("\n" if lines else ""))
+        except Exception as exc:  # never break inference on a diagnostic dump
+            logging.warning("[ParallelExpertEncoder] diar supervision dump failed: %s", exc)
+
     def _fuse_diar_and_asr(self, asr_encoded: torch.Tensor, spk_targets: torch.Tensor) -> torch.Tensor:
         """Fuse ASR states with speaker-activity preds (LayerNorm + sinusoidal kernel + ADD).
 
@@ -627,6 +715,7 @@ class ParallelExpertEncoder(nn.Module):
             )
 
         if spk_targets is not None:
+            self._maybe_dump_diar_supervision(audio_signal, spk_targets, length)
             outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
         else:
             outputs = asr_encoded
@@ -710,11 +799,22 @@ class ParallelExpertEncoder(nn.Module):
             chunk_length = (length - enc_stt).clamp(min=0, max=enc_end - enc_stt)
             with torch.set_grad_enabled(not self.freeze_asr):
                 enc_ctx, _ = self.asr_encoder(audio_signal=asr_chunk, length=chunk_length)
-            # Trim context off in output-frame space. Core length is the cumulative
-            # calc_length delta (not round(end/f)-round(stt/f)) so the summed online
-            # length equals the offline single-pass length == reserved placeholder count.
+            # Trim context off in output-frame space. `left_drop` is a window-relative
+            # index, so the core count must be window-consistent too: interior windows are
+            # structurally identical and must be trimmed identically. `round(end/f)-round(stt/f)`
+            # is exactly `online_inference_length` for every full chunk, giving a uniform trim.
+            # (Computing core_len from a *cumulative* calc_length delta instead makes the trim
+            # boundary drift across otherwise-identical windows, duplicating right-context
+            # frames on some chunks and dropping real frames on others, which corrupts the
+            # embedding even though the summed length stays correct.)
             left_drop = left_offset // self.subsampling_factor
-            core_len = self._asr_output_length(end) - self._asr_output_length(stt)
+            core_len = round(end / self.subsampling_factor) - round(stt / self.subsampling_factor)
+            # Reconcile only the final cumulative length to the offline single-pass length
+            # (== reserved <|audio|> placeholder count) so vLLM sees no length mismatch. The
+            # discrepancy is a single boundary-rounding frame that appears only on the last
+            # (partial) chunk, so this leaves all interior chunk boundaries untouched.
+            if chunk_idx == num_chunks - 1:
+                core_len = self._asr_output_length(total_feat_len) - int(asr_encoded_len.max().item())
             core_len = max(0, min(core_len, enc_ctx.shape[-1] - left_drop))
             enc_chunk = enc_ctx[:, :, left_drop : left_drop + core_len]
             asr_chunks.append(enc_chunk)
@@ -750,6 +850,7 @@ class ParallelExpertEncoder(nn.Module):
             spk_targets = self._maybe_binarize_diar_preds(spk_targets)
 
         if spk_targets is not None:
+            self._maybe_dump_diar_supervision(audio_signal, spk_targets, length)
             outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
         else:
             outputs = asr_encoded
