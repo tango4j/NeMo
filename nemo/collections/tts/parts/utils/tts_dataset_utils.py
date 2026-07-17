@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import importlib
 import logging
 import os
 import random
@@ -944,6 +945,50 @@ class DefaultTextProcessor(TextProcessor):
         return text
 
 
+class NoSpaceTextProcessor(TextProcessor):
+    """WER text processor for languages where ASR/tokenization spaces should be ignored."""
+
+    def __init__(self):
+        super().__init__()
+        self.default_processor = DefaultTextProcessor()
+
+    def normalize_text(self, text: str) -> str:
+        return text
+
+    def process_text_for_wer(self, text: str) -> str:
+        text = self.default_processor.process_text_for_wer(text)
+        text = text.replace(" ", "")
+        return text
+
+
+class JapaneseTextProcessor(NoSpaceTextProcessor):
+    """Japanese WER text processor with Katakana reading conversion."""
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.pyopenjtalk = importlib.import_module("pyopenjtalk")
+        except ImportError as e:
+            raise ImportError(
+                "JapaneseTextProcessor requires pyopenjtalk for Katakana CER computation. "
+                "Install pyopenjtalk or do not request Japanese evaluation text processing."
+            ) from e
+
+    def text_to_katakana(self, text: str) -> str:
+        """Convert Japanese text to its Katakana reading via pyopenjtalk.
+
+        Used for an additional, reading-based Japanese CER metric that is robust to
+        kanji/kana spelling variation between the reference and the ASR hypothesis.
+        """
+        if not text:
+            return ""
+        try:
+            return self.pyopenjtalk.g2p(text, kana=True).strip()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"pyopenjtalk failed for '{text[:40]}': {e}")
+            return ""
+
+
 class EnglishTextProcessor(TextProcessor):
     """English text processing, which catches some edge cases not covered by normal text normalization.
 
@@ -980,8 +1025,13 @@ class EnglishTextProcessor(TextProcessor):
 
 
 def get_text_processor(language: str) -> TextProcessor:
+    language = (language or "").replace("_", "-").lower().split("-")[0]
     if language == "en":
         return EnglishTextProcessor()
+    if language == "ja":
+        return JapaneseTextProcessor()
+    elif language == "zh":
+        return NoSpaceTextProcessor()
     else:
         logging.info(f"Text processing not implemented for language {language}; using default processor")
         return DefaultTextProcessor()
