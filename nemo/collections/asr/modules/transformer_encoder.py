@@ -18,12 +18,14 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, create_block_mask, flex_attention
 
 from nemo.collections.asr.parts.submodules.multi_head_attention import (
     PositionalEncoding,
     RelPositionalEncoding,
     RelPositionMultiHeadAttention,
+    RotaryPositionalEncoding,
 )
 from nemo.collections.asr.parts.submodules.subsampling import FeatureStacking, StackingSubsampling
 from nemo.core.classes.module import freeze, unfreeze
@@ -75,6 +77,13 @@ class TransformerEncoderConfig:
             - ``"no_pos"`` (or ``None``): no positional encoding at all. The pre-encoder output
               is consumed directly by the Transformer blocks. ``xscaling``, ``pos_emb_max_len``,
               ``dropout_pre_encoder`` and ``dropout_emb`` are unused in this mode.
+            - ``"rope"``: rotary position embedding applied to Q and K inside attention. No
+              additive positional embedding is added to the embeddings; the standard scaled
+              dot-product attention uses PyTorch SDPA.
+        rope_base: Theta base for the rotary position embedding. Only used when
+            ``self_attention_model='rope'``.
+        rotary_fraction: Fraction of the per-head dim to rotate. Only used when
+            ``self_attention_model='rope'``.
     """
 
     feat_in: int = 128
@@ -91,6 +100,8 @@ class TransformerEncoderConfig:
     # Future: "lookahead", "local", "sliding_window".
     attn_mode: str = "full"
     self_attention_model: str = "rel_pos"
+    rope_base: float = 10000.0
+    rotary_fraction: float = 1.0
 
 
 def _make_padding_mod(lengths):
@@ -112,7 +123,7 @@ def _make_causal_mod():
 
 
 _SUPPORTED_ATTENTION_MODES = ("full", "causal")
-_SUPPORTED_SELF_ATTENTION_MODELS = ("abs_pos", "rel_pos", "no_pos")
+_SUPPORTED_SELF_ATTENTION_MODELS = ("abs_pos", "rel_pos", "no_pos", "rope")
 
 
 class FeedForward(nn.Module):
@@ -132,13 +143,14 @@ class FeedForward(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, cfg: TransformerEncoderConfig):
+    def __init__(self, cfg: TransformerEncoderConfig, pos_enc=None):
         super().__init__()
         self.n_heads = cfg.n_heads
         self.head_dim = cfg.d_model // cfg.n_heads
         self.d_model = cfg.d_model
         self.self_attention_model = cfg.self_attention_model
         self._uses_rel_pos = self.self_attention_model == "rel_pos"
+        self._uses_rope = self.self_attention_model == "rope"
         if self.self_attention_model not in _SUPPORTED_SELF_ATTENTION_MODELS:
             raise ValueError(
                 f"self_attention_model='{self.self_attention_model}' is not supported. "
@@ -149,6 +161,13 @@ class MultiHeadAttention(nn.Module):
                 "PyTorch FlexAttention CUDA backend requires per-head embedding dimension >= 16, "
                 f"but got head_dim={self.head_dim} from d_model={self.d_model}, n_heads={self.n_heads}."
             )
+
+        if self._uses_rope:
+            if pos_enc is None:
+                raise ValueError("'rope' attention requires a RotaryPositionalEncoding via pos_enc.")
+            self.rope = pos_enc
+        else:
+            self.rope = None
 
         self.w_qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=cfg.qkv_bias)
         self.out_proj = nn.Linear(cfg.d_model, cfg.d_model)
@@ -229,7 +248,7 @@ class MultiHeadAttention(nn.Module):
         # Matrix c: fold u @ K^T into FlexAttention by rewriting Q as (Q + u).
         return score_mod, q + bias_u
 
-    def forward(self, x, block_mask=None, pos_emb=None):
+    def forward(self, x, block_mask=None, pos_emb=None, attn_mask=None):
         B, T, _ = x.shape
         H, D = self.n_heads, self.head_dim
 
@@ -239,6 +258,12 @@ class MultiHeadAttention(nn.Module):
         if self.qk_norm:
             q = self.q_norm(q).to(v.dtype)
             k = self.k_norm(k).to(v.dtype)
+
+        if self._uses_rope:
+            q, k = self.rope(q, k)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0)
+            out = out.transpose(1, 2).contiguous().view(B, T, self.d_model)
+            return self.out_proj(out)
 
         score_mod = None
         if self._uses_rel_pos:
@@ -251,16 +276,16 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: TransformerEncoderConfig):
+    def __init__(self, cfg: TransformerEncoderConfig, pos_enc=None):
         super().__init__()
         self.norm1 = nn.LayerNorm(cfg.d_model)
-        self.attn = MultiHeadAttention(cfg)
+        self.attn = MultiHeadAttention(cfg, pos_enc=pos_enc)
         self.drop = nn.Dropout(cfg.drop_rate)
         self.norm2 = nn.LayerNorm(cfg.d_model)
         self.ffn = FeedForward(cfg)
 
-    def forward(self, x, block_mask=None, pos_emb=None):
-        x = x + self.drop(self.attn(self.norm1(x), block_mask=block_mask, pos_emb=pos_emb))
+    def forward(self, x, block_mask=None, pos_emb=None, attn_mask=None):
+        x = x + self.drop(self.attn(self.norm1(x), block_mask=block_mask, pos_emb=pos_emb, attn_mask=attn_mask))
         x = x + self.drop(self.ffn(self.norm2(x)))
         return x
 
@@ -324,8 +349,16 @@ class TransformerEncoder(nn.Module):
               ``pos_emb_max_len``, ``dropout_pre_encoder`` and ``dropout_emb`` have no effect
               in this mode. ``None`` is accepted as a YAML-friendly alias for ``"no_pos"``
               (an unset field in a config maps to ``None``).
+            - ``"rope"``: rotary position embedding applied to Q/K inside attention. No additive
+              positional embedding is added to the embeddings; ``dropout_pre_encoder`` (and
+              ``xscaling`` if set) are still applied to the pre-encoder output, and ``dropout_emb``
+              has no effect in this mode.
 
             ``"rel_pos_local_attn"`` is not implemented yet.
+        rope_base: Theta base for the rotary position embedding. Only used when
+            ``self_attention_model='rope'``. Defaults to 10000.0.
+        rotary_fraction: Fraction of the per-head dim to rotate. Only used when
+            ``self_attention_model='rope'``. Defaults to 1.0.
         pos_emb_max_len: Initial maximum length for sinusoidal positional embeddings.
         xscaling: If True, scale embeddings by ``sqrt(d_model)`` before adding positional encodings,
             following "Attention Is All You Need" article. Originally intended to balance the magnitude
@@ -355,6 +388,8 @@ class TransformerEncoder(nn.Module):
         ff_expansion: float = 4.0,
         pre_block_norm: bool = True,
         self_attention_model: Optional[str] = "rel_pos",
+        rope_base: float = 10000.0,
+        rotary_fraction: float = 1.0,
         pos_emb_max_len: int = 5000,
         xscaling: bool = False,
         attn_mode: str = "full",
@@ -375,7 +410,7 @@ class TransformerEncoder(nn.Module):
         if self_attention_model not in _SUPPORTED_SELF_ATTENTION_MODELS:
             raise ValueError(
                 f"self_attention_model='{self_attention_model}' is not supported. "
-                "Currently only 'abs_pos', 'rel_pos', and 'no_pos' (or None) are available."
+                "Currently only 'abs_pos', 'rel_pos', 'rope', and 'no_pos' (or None) are available."
             )
         if dropout_pre_encoder is None:
             dropout_pre_encoder = drop_rate
@@ -393,6 +428,8 @@ class TransformerEncoder(nn.Module):
             subsampling_factor=subsampling_factor,
             attn_mode=attn_mode,
             self_attention_model=self_attention_model,
+            rope_base=rope_base,
+            rotary_fraction=rotary_fraction,
         )
         self.d_model = d_model
         self.n_layers = n_layers
@@ -443,10 +480,19 @@ class TransformerEncoder(nn.Module):
                 xscale=self.xscale,
                 dropout_rate_emb=dropout_emb,
             )
+        elif self_attention_model == "rope":
+            self.dropout_pre_encoder = nn.Dropout(dropout_pre_encoder)
+            self.pos_enc = RotaryPositionalEncoding(
+                d_k=d_model // n_heads,
+                rotary_fraction=rotary_fraction,
+                rope_base=rope_base,
+                max_len=pos_emb_max_len,
+            )
         else:  # "no_pos"
             self.pos_enc = None
         self.embed_norm = nn.LayerNorm(d_model) if pre_block_norm else nn.Identity()
-        self.layers = nn.ModuleList([TransformerBlock(cfg) for _ in range(n_layers)])
+        layer_pos_enc = self.pos_enc if self_attention_model == "rope" else None
+        self.layers = nn.ModuleList([TransformerBlock(cfg, pos_enc=layer_pos_enc) for _ in range(n_layers)])
         self.final_norm = nn.LayerNorm(d_model)
         if feat_out > 0 and feat_out != self._feat_out:
             self.out_proj = nn.Linear(self._feat_out, feat_out)
@@ -515,23 +561,37 @@ class TransformerEncoder(nn.Module):
             x = audio_signal
             length = length.to(torch.int64)
 
-        if self.pos_enc is not None:
+        if self.self_attention_model == "rope":
+            if self.xscale:
+                x = x * self.xscale
+            x = self.dropout_pre_encoder(x)
+            pos_emb = None
+        elif self.pos_enc is not None:
             x, pos_emb = self.pos_enc(x=x)
         else:  # "no_pos": pre-encoder output flows in unchanged
             pos_emb = None
         x = self.embed_norm(x)
 
         B, T, _ = x.shape
-        if self.attn_mode == "causal":
-            mask_mod = and_masks(_make_causal_mod(), _make_padding_mod(length))
+        block_mask = None
+        attn_mask = None
+        if self.self_attention_model == "rope":
+            positions = torch.arange(T, device=x.device)
+            attn_mask = positions.view(1, 1, 1, T) < length.view(B, 1, 1, 1)
+            if self.attn_mode == "causal":
+                causal_mask = positions.view(1, 1, T, 1) >= positions.view(1, 1, 1, T)
+                attn_mask = attn_mask & causal_mask
         else:
-            mask_mod = _make_padding_mod(length)
-        block_mask = create_block_mask(mask_mod, B=B, H=1, Q_LEN=T, KV_LEN=T, device=x.device)
+            if self.attn_mode == "causal":
+                mask_mod = and_masks(_make_causal_mod(), _make_padding_mod(length))
+            else:
+                mask_mod = _make_padding_mod(length)
+            block_mask = create_block_mask(mask_mod, B=B, H=1, Q_LEN=T, KV_LEN=T, device=x.device)
         # For ``abs_pos`` the positional information is already baked into ``x``, so we don't
         # need to thread ``pos_emb`` through each layer; only ``rel_pos`` consumes it.
         layer_pos_emb = pos_emb if self.self_attention_model == "rel_pos" else None
         for layer in self.layers:
-            x = layer(x, block_mask=block_mask, pos_emb=layer_pos_emb)
+            x = layer(x, block_mask=block_mask, pos_emb=layer_pos_emb, attn_mask=attn_mask)
 
         x = self.final_norm(x)
         if self.out_proj is not None:
