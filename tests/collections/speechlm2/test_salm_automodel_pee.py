@@ -218,9 +218,9 @@ def training_cutset_batch():
 
 
 @requires_cuda
-def test_salm_automodel_pee_uses_parallel_expert_encoder(model):
+def test_salm_automodel_pee_uses_ext_spk_tgts(model):
     assert isinstance(model.perception.encoder, ParallelExpertEncoder)
-    assert model._uses_parallel_expert_encoder()
+    assert model._uses_ext_spk_tgts()
     # The mounted PE encoder is a drop-in: its d_model drives the perception output projection.
     assert model.perception.encoder.d_model == _ASR_D_MODEL
     assert model.perception.encoder.n_spk == _N_SPK
@@ -287,7 +287,7 @@ def test_salm_automodel_pee_generation(model):
 # CPU-only: spk_targets -> spk_targets routing in prepare_inputs.
 #
 # Uses a bare SALMAutomodel (no LLM/ASR download) with a stub perception whose
-# `.encoder` is the real dummy ParallelExpertEncoder, so `_uses_parallel_expert_encoder`
+# `.encoder` is the real dummy ParallelExpertEncoder, so `_uses_ext_spk_tgts`
 # takes the PEE branch and we can assert how speaker targets are forwarded.
 # ----------------------------------------------------------------------------- #
 class _PEETestTokenizer:
@@ -348,7 +348,7 @@ def dummy_pe_encoder():
 @pytest.mark.unit
 def test_pee_prepare_inputs_detects_parallel_expert_encoder(dummy_pe_encoder):
     model = _make_pee_routing_test_model(dummy_pe_encoder)
-    assert model._uses_parallel_expert_encoder()
+    assert model._uses_ext_spk_tgts()
 
 
 @pytest.mark.unit
@@ -370,6 +370,24 @@ def test_pee_prepare_inputs_routes_spk_targets_as_spk_targets(dummy_pe_encoder):
     # No spk_targets key means the embedded Sortformer predicts speaker activity.
     batch_without_spk_targets = {k: v for k, v in batch.items() if k != "spk_targets"}
     model.prepare_inputs(batch_without_spk_targets)
+    assert model.perception.spk_targets_calls[-1] is None
+
+
+@pytest.mark.unit
+def test_prepare_inputs_ignores_spk_targets_without_pee(dummy_pe_encoder):
+    model = _make_pee_routing_test_model(dummy_pe_encoder)
+    model.perception.encoder = torch.nn.Identity()
+    batch = {
+        "audios": torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]]),
+        "audio_lens": torch.tensor([5], dtype=torch.long),
+        "input_ids": torch.tensor([[model.audio_locator_tag_id, 10]], dtype=torch.long),
+        "loss_mask": torch.tensor([[False, True]], dtype=torch.bool),
+        "spk_targets": torch.rand(1, 4, _N_SPK),
+        "spk_target_length": torch.tensor([4], dtype=torch.long),
+    }
+
+    assert not model._uses_ext_spk_tgts()
+    model.prepare_inputs(batch)
     assert model.perception.spk_targets_calls[-1] is None
 
 

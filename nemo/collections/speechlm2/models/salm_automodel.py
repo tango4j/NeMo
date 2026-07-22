@@ -192,7 +192,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 ans["cache"] = out["past_key_values"]
         return ans
 
-    def _uses_parallel_expert_encoder(self) -> bool:
+    def _uses_ext_spk_tgts(self) -> bool:
         """Whether the mounted perception encoder is a ``ParallelExpertEncoder``.
 
         The PE encoder performs its own context-preserving long-form online inference
@@ -258,14 +258,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         # Source audio encoding.
         # Input audio: (B, T_samples)
         # Audio embeddings: (B, T, H)
-        # Encoder path by (PEE, spk_targets):
-        # PEE=true  & spk_targets=None  : Inference mode, uses recursive encoding in PEE, NO chunking/CP.
-        # PEE=true  & spk_targets!=None : Training mode, ``spk_targets`` injected into PEE with chunking/CP.
-        # PEE=false & spk_targets=None  : Training/Inference mode, plain encoder with chunking/CP.
-        # PEE=false & spk_targets!=None : Training/Inference mode, plain encoder with chunking/CP and
-        #                                 the provided ``spk_targets`` is ignored (no-op).
+        # Routing uses valid targets for RTTM rows, a -1 sentinel for non-RTTM training rows, and None when no batch targets exist.
+        # PEE=true,  RTTM exists: Valid RTTM targets use chunking/CP and offline PEE fusion.
+        # PEE=true,  RTTM absent: -1 rows use chunking/CP and offline PEE diarization.
+        # PEE=false, RTTM absent: The regular encoder runs through optional chunking/CP without speaker targets.
+        # PEE=false, RTTM exists: RTTM is ignored and the regular encoder runs through optional chunking/CP.
         dummy_audio_loss = None
-        if self._uses_parallel_expert_encoder() and spk_targets is None:
+        if self._uses_ext_spk_tgts() and spk_targets is None:
             self._warn_parallel_expert_encoder_inference_compatibility(cp_size)
             audio_embs, audio_emb_lens = self.perception(
                 input_signal=batch["audios"], input_signal_length=batch["audio_lens"]
@@ -279,8 +278,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
                 sampling_rate=self.sampling_rate,
                 cp_mesh=cp_mesh,
-                spk_targets=spk_targets,
-                spk_target_lengths=spk_target_lengths,
+                spk_targets=spk_targets if self._uses_ext_spk_tgts() else None,
+                spk_target_lengths=spk_target_lengths if self._uses_ext_spk_tgts() else None,
                 fsdp_sync_group=fsdp_sync_group,
                 return_dummy_loss=True,
             )
@@ -709,7 +708,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             # Prepare token embeddings and audio embeddings.
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
-            if self._uses_parallel_expert_encoder() and spk_targets is None:
+            if self._uses_ext_spk_tgts() and spk_targets is None:
                 # This is only used for inference when ``spk_targets`` is None.
                 # PEE needs to produce ``spk_targets`` itself through recursive encoding.
                 self._warn_parallel_expert_encoder_inference_compatibility(cp_size=1)
@@ -722,8 +721,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     audio_lens,
                     chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
                     sampling_rate=self.sampling_rate,
-                    spk_targets=spk_targets,
-                    spk_target_lengths=spk_target_lengths,
+                    spk_targets=spk_targets if self._uses_ext_spk_tgts() else None,
+                    spk_target_lengths=spk_target_lengths if self._uses_ext_spk_tgts() else None,
                 )
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(

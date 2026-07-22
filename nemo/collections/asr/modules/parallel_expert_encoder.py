@@ -478,7 +478,7 @@ class ParallelExpertEncoder(nn.Module):
         asr_encoded: torch.Tensor,
         spk_targets: torch.Tensor,
         *,
-        diarization_targets: Optional[torch.Tensor] = None,
+        diarization_preds: Optional[torch.Tensor] = None,
         use_diarization: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Fuse ASR states with speaker-activity preds (LayerNorm + sinusoidal kernel + ADD).
@@ -487,7 +487,7 @@ class ParallelExpertEncoder(nn.Module):
             asr_encoded (Tensor): ASR encoder output. Shape ``(B, D, T_asr)``.
             spk_targets (Tensor): RTTM or Sortformer speaker activity. Shape
                 ``(B, T_diar, n_spk)``.
-            diarization_targets (Tensor, optional): Diarization predictions used for
+            diarization_preds (Tensor, optional): Diarization predictions used for
                 rows selected by ``use_diarization``.
             use_diarization (Tensor, optional): Bool mask with shape ``(B,)``.
 
@@ -497,19 +497,19 @@ class ParallelExpertEncoder(nn.Module):
         asr_enc_states = asr_encoded.transpose(1, 2)  # (B, T, D)
         spk_targets = self._align_diar_frames(spk_targets, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
         if use_diarization is not None and bool(use_diarization.any()):
-            if diarization_targets is None:
-                raise ValueError("diarization_targets are required when use_diarization selects any rows.")
+            if diarization_preds is None:
+                raise ValueError("diarization_preds are required when use_diarization selects any rows.")
             if use_diarization.numel() != spk_targets.shape[0]:
                 raise ValueError(
                     f"use_diarization size ({use_diarization.numel()}) must match "
                     f"the speaker-target batch size ({spk_targets.shape[0]})."
                 )
-            diarization_targets = self._align_diar_frames(
-                diarization_targets, asr_enc_states.shape[1]
-            ).to(asr_enc_states.dtype)
+            diarization_preds = self._align_diar_frames(diarization_preds, asr_enc_states.shape[1]).to(
+                asr_enc_states.dtype
+            )
             spk_targets = torch.where(
                 use_diarization.to(device=spk_targets.device, dtype=torch.bool).view(-1, 1, 1),
-                diarization_targets,
+                diarization_preds,
                 spk_targets,
             )
 
@@ -576,7 +576,7 @@ class ParallelExpertEncoder(nn.Module):
             if spk_targets is None
             else (spk_targets <= self.missing_rttm_target).flatten(start_dim=1).any(dim=1)
         )
-        diarization_targets = None
+        diarization_preds = None
         if spk_targets is None or bool(use_diarization.any()):
             # Cast fp32 mels to the diarizer's device/dtype before its conv subsampling.
             diar_signal = self._match_module_io(audio_signal, self.diarization_model)
@@ -587,12 +587,12 @@ class ParallelExpertEncoder(nn.Module):
                     processed_signal_length=diar_length,
                     bypass_pre_encode=False,
                 )
-                diarization_targets = self.diarization_model.forward_infer(
+                diarization_preds = self.diarization_model.forward_infer(
                     emb_seq=emb_seq,
                     emb_seq_length=emb_seq_length,
                 )
             if spk_targets is None:
-                spk_targets = diarization_targets
+                spk_targets = diarization_preds
 
         if self.asr_normalize_type:
             asr_audio_signal, _, _ = normalize_batch(
@@ -616,7 +616,7 @@ class ParallelExpertEncoder(nn.Module):
             outputs = self._fuse_diar_and_asr(
                 asr_encoded,
                 spk_targets,
-                diarization_targets=diarization_targets,
+                diarization_preds=diarization_preds,
                 use_diarization=use_diarization,
             )
         else:
