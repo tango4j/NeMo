@@ -357,7 +357,7 @@ def test_salm_automodel_generation_prompts_as_tensor(model):
 
 
 @pytest.mark.parametrize("device", chunking_test_devices())
-def test_salm_automodel_prepare_inputs_chunks_long_audio(device):
+def test_salm_automodel_prepare_inputs_chunks_long_audio_and_ignores_spk_targets_without_pee(device):
     model = _make_chunking_test_model(encoder_chunk_size_seconds=1.0, sampling_rate=2, device=device)
     spk_targets = torch.arange(10, dtype=torch.float32, device=device).reshape(1, 5, 2)
     batch = {
@@ -373,10 +373,7 @@ def test_salm_automodel_prepare_inputs_chunks_long_audio(device):
     chunked_signal, chunked_lens = model.perception.calls[0]
     assert chunked_signal.shape == (2, 3)
     assert torch.equal(chunked_lens, torch.tensor([2, 3], dtype=torch.long, device=device))
-    assert torch.equal(
-        model.perception.spk_targets_calls[0],
-        torch.stack([torch.cat([spk_targets[0, :2], spk_targets[0, 1:2]]), spk_targets[0, 2:5]]),
-    )
+    assert model.perception.spk_targets_calls[0] is None
     assert torch.equal(inputs["input_embeds"][0, :, 0], torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], device=device))
     assert torch.equal(inputs["attention_mask"], torch.ones((1, 5), dtype=torch.bool, device=device))
 
@@ -447,7 +444,7 @@ def test_salm_automodel_prepare_inputs_preserves_chunked_audio_order(device):
 
 
 @pytest.mark.parametrize("device", chunking_test_devices())
-def test_salm_automodel_generate_chunks_audio_before_llm(device):
+def test_salm_automodel_generate_chunks_audio_and_ignores_spk_targets_without_pee(device):
     model = _make_chunking_test_model(encoder_chunk_size_seconds=1.0, sampling_rate=2, device=device)
     spk_targets = torch.arange(10, dtype=torch.float32, device=device).reshape(1, 5, 2)
 
@@ -462,10 +459,7 @@ def test_salm_automodel_generate_chunks_audio_before_llm(device):
     chunked_signal, chunked_lens = model.perception.calls[0]
     assert chunked_signal.shape == (2, 3)
     assert torch.equal(chunked_lens, torch.tensor([2, 3], dtype=torch.long, device=device))
-    assert torch.equal(
-        model.perception.spk_targets_calls[0],
-        torch.stack([torch.cat([spk_targets[0, :2], spk_targets[0, 1:2]]), spk_targets[0, 2:5]]),
-    )
+    assert model.perception.spk_targets_calls[0] is None
     assert torch.equal(
         model.llm.generate_kwargs["inputs_embeds"][0, :5, 0],
         torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], device=device),
