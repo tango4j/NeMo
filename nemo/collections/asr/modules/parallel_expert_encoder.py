@@ -118,6 +118,9 @@ class ParallelExpertEncoderPT(ModelPT):
             diar_fifo_len=self._cfg.get('diar_fifo_len', 40),
             diar_spkcache_update_period=self._cfg.get('diar_spkcache_update_period', 300),
             diar_spkcache_len=self._cfg.get('diar_spkcache_len', 188),
+            missing_rttm_target=self._cfg.get('missing_rttm_target', -1.0),
+            speaker_activity_threshold=self._cfg.get('speaker_activity_threshold', 0.5),
+            spk_kernel_scale=self._cfg.get('spk_kernel_scale', 1.0),
         )
 
     @classmethod
@@ -303,6 +306,12 @@ class ParallelExpertEncoder(nn.Module):
         diar_fifo_len (int): Sortformer streaming ``fifo_len``. Default ``40``.
         diar_spkcache_update_period (int): Sortformer streaming ``spkcache_update_period``. Default ``300``.
         diar_spkcache_len (int): Sortformer streaming ``spkcache_len``. Default ``188``.
+        missing_rttm_target (float): Sentinel marking rows that should use diarization predictions.
+            Defaults to ``-1.0``.
+        speaker_activity_threshold (float): Binarization threshold applied to RTTM and
+            diarization targets before speaker-kernel fusion. Defaults to ``0.5``.
+        spk_kernel_scale (float): Scale applied to the speaker-kernel contribution
+            before adding it to ASR encoder states. Defaults to ``1.0``.
     """
 
     def __init__(
@@ -318,6 +327,9 @@ class ParallelExpertEncoder(nn.Module):
         diar_fifo_len: int = 40,
         diar_spkcache_update_period: int = 300,
         diar_spkcache_len: int = 188,
+        missing_rttm_target: float = -1.0,
+        speaker_activity_threshold: float = 0.5,
+        spk_kernel_scale: float = 1.0,
     ):
         super().__init__()
 
@@ -357,6 +369,9 @@ class ParallelExpertEncoder(nn.Module):
         self.diar_fifo_len = int(diar_fifo_len)
         self.diar_spkcache_update_period = int(diar_spkcache_update_period)
         self.diar_spkcache_len = int(diar_spkcache_len)
+        self.missing_rttm_target = float(missing_rttm_target)
+        self.speaker_activity_threshold = float(speaker_activity_threshold)
+        self.spk_kernel_scale = float(spk_kernel_scale)
 
         self.n_spk = int(self.diarization_model.sortformer_modules.n_spk)
         self.asr_d_model = self.asr_encoder.d_model
@@ -458,23 +473,54 @@ class ParallelExpertEncoder(nn.Module):
             return tensor
         return tensor.to(device=param.device, dtype=param.dtype)
 
-    def _fuse_diar_and_asr(self, asr_encoded: torch.Tensor, spk_targets: torch.Tensor) -> torch.Tensor:
+    def _fuse_diar_and_asr(
+        self,
+        asr_encoded: torch.Tensor,
+        spk_targets: torch.Tensor,
+        *,
+        diarization_targets: Optional[torch.Tensor] = None,
+        use_diarization: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Fuse ASR states with speaker-activity preds (LayerNorm + sinusoidal kernel + ADD).
 
         Args:
             asr_encoded (Tensor): ASR encoder output. Shape ``(B, D, T_asr)``.
-            spk_targets (Tensor): Speaker-activity predictions. Shape ``(B, T_diar, n_spk)``.
+            spk_targets (Tensor): RTTM or Sortformer speaker activity. Shape
+                ``(B, T_diar, n_spk)``.
+            diarization_targets (Tensor, optional): Diarization predictions used for
+                rows selected by ``use_diarization``.
+            use_diarization (Tensor, optional): Bool mask with shape ``(B,)``.
 
         Returns:
             Fused encoder output. Shape ``(B, D, T_asr)``.
         """
         asr_enc_states = asr_encoded.transpose(1, 2)  # (B, T, D)
         spk_targets = self._align_diar_frames(spk_targets, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
+        if use_diarization is not None and bool(use_diarization.any()):
+            if diarization_targets is None:
+                raise ValueError("diarization_targets are required when use_diarization selects any rows.")
+            if use_diarization.numel() != spk_targets.shape[0]:
+                raise ValueError(
+                    f"use_diarization size ({use_diarization.numel()}) must match "
+                    f"the speaker-target batch size ({spk_targets.shape[0]})."
+                )
+            diarization_targets = self._align_diar_frames(
+                diarization_targets, asr_enc_states.shape[1]
+            ).to(asr_enc_states.dtype)
+            spk_targets = torch.where(
+                use_diarization.to(device=spk_targets.device, dtype=torch.bool).view(-1, 1, 1),
+                diarization_targets,
+                spk_targets,
+            )
+
+        # RTTM targets and Sortformer sigmoid outputs must produce the same
+        # binary speaker kernel at train and inference time.
+        spk_targets = (spk_targets > self.speaker_activity_threshold).to(asr_enc_states.dtype)
 
         asr_enc_states = self.asr_norm(asr_enc_states)
         spk_targets = self.diar_norm(spk_targets)
         speaker_infusion = torch.matmul(spk_targets, self.diar_kernel.to(spk_targets.dtype))
-        fused = speaker_infusion + asr_enc_states
+        fused = self.spk_kernel_scale * speaker_infusion + asr_enc_states
 
         return fused.transpose(1, 2)  # (B, D, T)
 
@@ -494,7 +540,9 @@ class ParallelExpertEncoder(nn.Module):
             audio_signal (Tensor): Un-normalised mel features. Shape ``(B, feat_in, n_frames)``.
             length (Tensor): Per-sample feature lengths. Shape ``(B,)``.
             spk_targets (Tensor, optional): ``(B, T, n_spk)`` speaker-activity override (RTTM/oracle);
-                when ``None`` the wrapped Sortformer is run.
+                when ``None`` the wrapped Sortformer is run. A row filled with the
+                reserved value ``-1`` also requests Sortformer output for that row,
+                allowing RTTM and non-RTTM examples in one training batch.
 
         Returns:
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
@@ -523,7 +571,13 @@ class ParallelExpertEncoder(nn.Module):
         spk_targets=None,
     ):
         """Offline (non-chunked) forward pass. See :meth:`forward` for argument semantics."""
-        if spk_targets is None:
+        use_diarization = (
+            None
+            if spk_targets is None
+            else (spk_targets <= self.missing_rttm_target).flatten(start_dim=1).any(dim=1)
+        )
+        diarization_targets = None
+        if spk_targets is None or bool(use_diarization.any()):
             # Cast fp32 mels to the diarizer's device/dtype before its conv subsampling.
             diar_signal = self._match_module_io(audio_signal, self.diarization_model)
             diar_length = length.to(device=diar_signal.device)
@@ -533,10 +587,12 @@ class ParallelExpertEncoder(nn.Module):
                     processed_signal_length=diar_length,
                     bypass_pre_encode=False,
                 )
-                spk_targets = self.diarization_model.forward_infer(
+                diarization_targets = self.diarization_model.forward_infer(
                     emb_seq=emb_seq,
                     emb_seq_length=emb_seq_length,
                 )
+            if spk_targets is None:
+                spk_targets = diarization_targets
 
         if self.asr_normalize_type:
             asr_audio_signal, _, _ = normalize_batch(
@@ -557,7 +613,12 @@ class ParallelExpertEncoder(nn.Module):
             )
 
         if spk_targets is not None:
-            outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
+            outputs = self._fuse_diar_and_asr(
+                asr_encoded,
+                spk_targets,
+                diarization_targets=diarization_targets,
+                use_diarization=use_diarization,
+            )
         else:
             outputs = asr_encoded
 

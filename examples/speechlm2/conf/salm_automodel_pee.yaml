@@ -46,6 +46,9 @@ model:
   # locally exported .nemo to enable PEE; null keeps the pretrained_asr encoder.
   pe_encoder_path: null  # Plug-in PEE nemo checkpoint.
 
+  # Scale the PEE speaker-kernel residual before adding it to ASR encoder states.
+  spk_kernel_scale: 1.0
+
   # Resolve the native <spk:N> speaker-token ids from the LLM tokenizer. Requires
   # the patched "-spk" tokenizer (e.g. from patch_nano_v3_speaker_tokens.py) where
   # <spk:0>..<spk:{max_speakers-1}> occupy contiguous ids starting at base_token_id.
@@ -55,14 +58,14 @@ model:
     max_speakers: 10        # number of contiguous <spk:N> entries to resolve
     base_token_id: 100      # expected token id of <spk:0>
 
-  # Auxiliary Latent Speaker Supervision (LSS) loss. Its mere presence enables it
-  # (no enable flag); speaker_token_ids is auto-injected from speaker_tokens above.
-  # include_ce_loss MUST stay False — SALM already computes CE in loss_parallel().
-  lss_loss:
-    _target_: nemo.collections.common.losses.latent_speaker_supervision_loss.LatentSpeakerSupervisionLoss
-    speaker_loss_weight: 1.0
-    speaker_label_smoothing: 0.0
-    per_speaker_normalization: true
+  # Auxiliary Latent Speaker Supervision (LSS) loss. Set to null to disable it.
+  lss_loss: null
+  # To enable it, replace null above with:
+  # lss_loss:
+  #   _target_: nemo.collections.common.losses.latent_speaker_supervision_loss.LatentSpeakerSupervisionLoss
+  #   speaker_loss_weight: 1.0
+  #   speaker_label_smoothing: 0.0
+  #   per_speaker_normalization: true
 
   # Uncomment the block below to enable LoRA on the LLM via Automodel.
   # LoRA parameters are kept trainable even when the LLM is frozen.

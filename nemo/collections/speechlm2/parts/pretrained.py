@@ -251,6 +251,8 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
         map_location="cpu",
         strict=True,
     )
+    if (spk_kernel_scale := model.cfg.get("spk_kernel_scale", None)) is not None:
+        pe_encoder.spk_kernel_scale = float(spk_kernel_scale)
 
     existing_encoder = model.perception.encoder
     existing_d_model = int(getattr(existing_encoder, "d_model", -1))
@@ -298,13 +300,14 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
     model.perception.encoder = pe_encoder
     logging.info(
         "Mounted ParallelExpertEncoder from %s onto model.perception.encoder "
-        "(d_model=%d, n_spk=%d, freeze_diar=%s, freeze_asr=%s); "
+        "(d_model=%d, n_spk=%d, freeze_diar=%s, freeze_asr=%s, spk_kernel_scale=%g); "
         "perception preprocessor normalization disabled (was %r).",
         pe_encoder_path,
         int(pe_encoder.d_model),
         int(pe_encoder.n_spk),
         bool(pe_encoder.freeze_diar),
         bool(pe_encoder.freeze_asr),
+        float(pe_encoder.spk_kernel_scale),
         prev_normalize,
     )
 
