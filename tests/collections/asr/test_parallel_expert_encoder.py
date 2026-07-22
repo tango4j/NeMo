@@ -540,6 +540,74 @@ def test_pe_encoder_mixed_rttm_and_missing_rows_use_their_requested_sources():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("missing_row", [0, 1])
+def test_pe_encoder_mixed_batch_replaces_only_missing_rows_with_mocked_diarization(missing_row):
+    class _MockDiarizationModel(nn.Module):
+        def __init__(self, predictions):
+            super().__init__()
+            self.anchor = nn.Parameter(torch.zeros(1), requires_grad=False)
+            self.register_buffer("predictions", predictions)
+            self.forward_infer_calls = 0
+
+        def frontend_encoder(self, processed_signal, processed_signal_length, bypass_pre_encode):
+            batch_size, _, num_frames = processed_signal.shape
+            embeddings = processed_signal.new_zeros(batch_size, num_frames, 2)
+            return embeddings, processed_signal_length
+
+        def forward_infer(self, emb_seq, emb_seq_length):
+            self.forward_infer_calls += 1
+            return self.predictions.to(device=emb_seq.device, dtype=emb_seq.dtype)
+
+    class _MockASREncoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = nn.Parameter(torch.zeros(1), requires_grad=False)
+
+        def forward(self, audio_signal, length):
+            batch_size, _, num_frames = audio_signal.shape
+            return audio_signal.new_zeros(batch_size, 2, num_frames), length
+
+    rttm_targets = torch.tensor(
+        [
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            [[0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],
+        ]
+    )
+    diarization_predictions = torch.tensor(
+        [
+            [[0.1, 0.9], [0.8, 0.2], [0.2, 0.7], [0.6, 0.4]],
+            [[0.9, 0.1], [0.2, 0.8], [0.7, 0.3], [0.4, 0.6]],
+        ]
+    )
+    mixed_targets = rttm_targets.clone()
+    mixed_targets[missing_row].fill_(-1.0)
+
+    enc = _PEE.__new__(_PEE)
+    nn.Module.__init__(enc)
+    enc.diarization_model = _MockDiarizationModel(diarization_predictions)
+    enc.asr_encoder = _MockASREncoder()
+    enc.asr_normalize_type = None
+    enc.freeze_diar = True
+    enc.freeze_asr = True
+    enc.missing_rttm_target = -1.0
+    enc.speaker_activity_threshold = 0.5
+    enc.spk_kernel_scale = 1.0
+    enc.asr_norm = nn.Identity()
+    enc.diar_norm = nn.Identity()
+    enc.register_buffer("diar_kernel", torch.eye(2))
+
+    audio_signal = torch.randn(2, 3, 4)
+    length = torch.tensor([4, 4], dtype=torch.long)
+    outputs, output_lengths = enc._forward(audio_signal, length, spk_targets=mixed_targets)
+
+    expected_targets = rttm_targets.clone()
+    expected_targets[missing_row] = (diarization_predictions[missing_row] > 0.5).to(rttm_targets.dtype)
+    assert enc.diarization_model.forward_infer_calls == 1
+    assert torch.equal(output_lengths, length)
+    assert torch.equal(outputs.transpose(1, 2), expected_targets)
+
+
+@pytest.mark.unit
 def test_pe_encoder_online_forward_matches_conformer_io_with_real_encoders():
     # Small window so a modest input crosses onto the long-form online path.
     enc = build_toy_pe_encoder(
