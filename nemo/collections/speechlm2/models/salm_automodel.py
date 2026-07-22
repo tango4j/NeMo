@@ -32,7 +32,6 @@ from nemo.collections.speechlm2.models.salm import _resolve_audios_in_prompt, re
 from nemo.collections.speechlm2.parts.automodel_lora import ensure_lora_trainable, make_peft_config, maybe_install_lora
 from nemo.collections.speechlm2.parts.encoder_chunking import encode_audio_with_optional_chunking
 from nemo.collections.speechlm2.parts.hf_hub import HFHubMixin
-from nemo.collections.speechlm2.parts.multispeaker import build_speaker_tokens, maybe_init_lss_loss
 from nemo.collections.speechlm2.parts.optim_setup import configure_optimizers, is_frozen
 from nemo.collections.speechlm2.parts.pretrained import (
     load_pretrained_automodel_llm,
@@ -60,8 +59,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             tokenizer_src, use_fast=True, trust_remote_code=self.cfg.get("trust_remote_code", False)
         )
         self.tokenizer.add_special_tokens({"additional_special_tokens": [self.audio_locator_tag]})
-        self.speaker_token_ids = build_speaker_tokens(self.cfg.get("speaker_tokens", None), self.tokenizer)
-        self.lss_loss = maybe_init_lss_loss(self.cfg.get("lss_loss", None), self.speaker_token_ids)
         self.llm = None  # populated by configure_model
         self.perception = None  # populated by configure_model
 
@@ -254,6 +251,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
 
         device_mesh = getattr(self, "_device_mesh", None)
         spk_targets = batch.get("spk_targets", None)
+        spk_target_lengths = batch.get("spk_target_length", None)
         cp_mesh, cp_size, _ = get_cp_mesh(device_mesh)
         fsdp_sync_group = get_perception_fsdp_group(device_mesh)
 
@@ -282,6 +280,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 sampling_rate=self.sampling_rate,
                 cp_mesh=cp_mesh,
                 spk_targets=spk_targets,
+                spk_target_lengths=spk_target_lengths,
                 fsdp_sync_group=fsdp_sync_group,
                 return_dummy_loss=True,
             )
@@ -424,13 +423,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         if (dummy_audio_loss := inputs.get("dummy_audio_loss")) is not None:
             loss = loss + dummy_audio_loss
 
-        # Latent speaker supervision loss (auxiliary, optional).
-        if self.lss_loss is not None and num_frames > 0:
-            if isinstance(logits, DTensor):
-                logits = logits.full_tensor()
-            log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
-            loss = loss + self.lss_loss(log_probs=log_probs, labels=inputs["target_ids"])
-
         # Display the local per-token CE so logged values stay on the same scale as before
         # this fix. The gradient-carrying ``loss`` above is the globally-normalized quantity.
         with torch.no_grad():
@@ -482,7 +474,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         self._partial_val_loss_sums = defaultdict(list)
         self._partial_val_corrects = defaultdict(list)
         self._partial_val_num_frames = defaultdict(list)
-        self._partial_val_lss = defaultdict(list)
 
     def on_validation_epoch_end(self) -> None:
         val_losses = []
@@ -508,19 +499,9 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         self.log("val_loss", torch.stack(val_losses).mean(), on_epoch=True, sync_dist=True)
         self.log("val_acc", torch.stack(accuracies).mean(), on_epoch=True, sync_dist=True)
 
-        if getattr(self, "lss_loss", None) is not None:
-            lss_vals = []
-            for name, vals in self._partial_val_lss.items():
-                val_lss = torch.stack(vals).mean()
-                self.log(f"val_lss_{name}", val_lss, on_epoch=True, sync_dist=True)
-                lss_vals.append(val_lss)
-            if lss_vals:
-                self.log("val_lss", torch.stack(lss_vals).mean(), on_epoch=True, sync_dist=True)
-
         self._partial_val_loss_sums.clear()
         self._partial_val_corrects.clear()
         self._partial_val_num_frames.clear()
-        self._partial_val_lss.clear()
 
     def _reduce_validation_metric_sums(self, metric_sums: Tensor, group) -> Tensor:
         if group is not None and dist.is_available() and dist.is_initialized():
@@ -547,13 +528,6 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     reduction="sum",
                     ignore_index=-100,
                 )
-
-            if self.lss_loss is not None and num_frames > 0:
-                if isinstance(logits, DTensor):
-                    logits = logits.full_tensor()
-                log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
-                lss_val = self.lss_loss(log_probs=log_probs, labels=inputs["target_ids"])
-                self._partial_val_lss[name].append(lss_val.detach())
 
             preds = forward_outputs["logits"].argmax(dim=-1).view(-1)
             refs = inputs["target_ids"].reshape(-1)
@@ -627,6 +601,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         audios: torch.Tensor = None,
         audio_lens: torch.Tensor = None,
         spk_targets: torch.Tensor = None,
+        spk_target_lengths: torch.Tensor = None,
         generation_config: GenerationConfig = None,
         enable_thinking: bool | None = None,
         **generation_kwargs,
@@ -696,6 +671,9 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                 encoder is a ``ParallelExpertEncoder`` (i.e. ``model.pe_encoder_path`` was set); it
                 overrides the encoder's embedded Sortformer prediction for this call. When ``None``
                 (default), the encoder runs its embedded Sortformer as usual.
+            spk_target_lengths: Optional ``(B,)`` valid frame counts for ``spk_targets``.
+                Required for exact target slicing when generation uses encoder chunking on a
+                padded, mixed-length speaker-target batch.
             generation_config: Optional HuggingFace GenerationConfig object.
             enable_thinking: Optional prompt-formatter hint forwarded to ``encode_dialog``.
                 Relevant for prompt formats that support thinking/reasoning mode.
@@ -745,6 +723,7 @@ class SALMAutomodel(LightningModule, HFHubMixin):
                     chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
                     sampling_rate=self.sampling_rate,
                     spk_targets=spk_targets,
+                    spk_target_lengths=spk_target_lengths,
                 )
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(

@@ -198,6 +198,9 @@ def online_stub(d_model, n_spk, sf, win, lc, rc):
     enc.asr_norm = nn.LayerNorm(d_model)
     enc.diar_norm = nn.LayerNorm(n_spk)
     enc.register_buffer("diar_kernel", torch.randn(n_spk, d_model))
+    enc.missing_rttm_target = -1.0
+    enc.speaker_activity_threshold = 0.5
+    enc.spk_kernel_scale = 1.0
     enc._suppress_online_pbar = True
     enc.eval()
     return enc
@@ -457,6 +460,9 @@ def test_pe_encoder_builds_and_wires_both_real_encoders():
     # Speaker count + fusion kernel come from the diar branch.
     assert enc.n_spk == _N_SPK
     assert enc.diar_kernel.shape == (_N_SPK, _ASR_D_MODEL)
+    assert enc.missing_rttm_target == -1.0
+    assert enc.speaker_activity_threshold == 0.5
+    assert enc.spk_kernel_scale == 1.0
     # freeze_diar defaults to True -> diar params are frozen, ASR params remain trainable.
     assert all(not p.requires_grad for p in enc.diarization_model.parameters())
     assert any(p.requires_grad for p in enc.asr_encoder.parameters())
@@ -493,14 +499,44 @@ def test_pe_encoder_offline_forward_accepts_diar_override_and_fuses_it():
     with torch.no_grad():
         out1, len1 = enc(mels, length, spk_targets=dp1)
         out2, len2 = enc(mels, length, spk_targets=dp2)
+        out1_binary, len1_binary = enc(mels, length, spk_targets=(dp1 > 0.5).to(dp1.dtype))
 
     expected_t = int(len1[0].item())
     assert out1.shape == (batch_size, _ASR_D_MODEL, expected_t)
     assert torch.equal(len1, len2)
+    assert torch.equal(len1, len1_binary)
+    torch.testing.assert_close(out1, out1_binary, rtol=0, atol=0)
     assert torch.isfinite(out1).all()
     # Same audio + same (dropout-free, eval) ASR branch, but different speaker
     # predictions must change the fused output -> proves the diar branch is fused in.
     assert not torch.allclose(out1, out2)
+
+    enc.spk_kernel_scale = 0.0
+    with torch.no_grad():
+        unscaled_out1, _ = enc(mels, length, spk_targets=dp1)
+        unscaled_out2, _ = enc(mels, length, spk_targets=dp2)
+    torch.testing.assert_close(unscaled_out1, unscaled_out2, rtol=0, atol=0)
+
+
+@pytest.mark.unit
+def test_pe_encoder_mixed_rttm_and_missing_rows_use_their_requested_sources():
+    enc = build_toy_pe_encoder().eval()
+    batch_size, n_frames = 2, 160
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+    rttm_targets = torch.rand(batch_size, 7, _N_SPK)
+    mixed_targets = rttm_targets.clone()
+    mixed_targets[1].fill_(-1.0)
+
+    with torch.no_grad():
+        mixed_out, mixed_len = enc(mels, length, spk_targets=mixed_targets)
+        rttm_out, rttm_len = enc(mels, length, spk_targets=rttm_targets)
+        sortformer_out, sortformer_len = enc(mels, length)
+
+    assert torch.equal(mixed_len, rttm_len)
+    assert torch.equal(mixed_len, sortformer_len)
+    torch.testing.assert_close(mixed_out[0], rttm_out[0], rtol=0, atol=0)
+    torch.testing.assert_close(mixed_out[1], sortformer_out[1], rtol=0, atol=0)
 
 
 @pytest.mark.unit

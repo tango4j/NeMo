@@ -98,7 +98,7 @@ class TransformerEncoderConfig:
     # Attention mode: "full" (bidirectional) or "causal" (each token only attends to itself and earlier tokens).
     # Future: "lookahead", "local", "sliding_window".
     attn_mode: str = "full"
-    self_attention_model: str = "rel_pos"
+    self_attention_model: str = "rope"
     rope_base: float = 10000.0
     rotary_fraction: float = 1.0
 

@@ -28,10 +28,25 @@ class _Tokenizer:
 
 
 @pytest.mark.unit
-def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
+@pytest.mark.parametrize(
+    ("rttm_filepath", "expected_targets"),
+    [
+        (
+            "/fake/example.rttm",
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+            ],
+        ),
+        (None, [[-1.0, -1.0]] * 4),
+    ],
+)
+def test_salm_dataset_routes_speaker_targets_by_rttm_presence(monkeypatch, rttm_filepath, expected_targets):
     text = "<spk:0> hello world <spk:1> yes now"
     cut = dummy_cut(0, duration=0.04, recording=dummy_recording(0, duration=0.04, with_data=True))
-    cut.custom = {}
+    cut.custom = {"rttm_filepath": rttm_filepath} if rttm_filepath is not None else {}
     cut.supervisions = [
         SupervisionSegment(id=cut.id, recording_id=cut.recording_id, start=0.0, duration=0.04, text=text)
     ]
@@ -84,15 +99,6 @@ def test_salm_dataset_builds_aligned_sot_targets(monkeypatch):
 
     assert torch.equal(
         batch["spk_targets"],
-        torch.tensor(
-            [
-                [
-                    [1.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 1.0],
-                ]
-            ]
-        ),
+        torch.tensor([expected_targets]),
     )
     assert torch.equal(batch["spk_target_length"], torch.tensor([4]))
