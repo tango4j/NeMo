@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from datetime import timedelta
 import os
+import pathlib as _pathlib
 
 # Compat shim: DCP checkpoints whose ``.metadata`` was pickled under Python 3.13
 # reference ``pathlib._local.PosixPath`` (pathlib was split into _local/_abc in
@@ -20,7 +20,7 @@ import os
 # makes ``pickle.load`` raise ModuleNotFoundError during dcp.load. The classes
 # are identical, so alias the missing submodule to ``pathlib`` when absent.
 import sys as _sys
-import pathlib as _pathlib
+from datetime import timedelta
 
 try:
     import pathlib._local  # noqa: F401

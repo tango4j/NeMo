@@ -38,7 +38,7 @@ class TestTransformerEncoderConfig:
         assert cfg.pre_block_norm is True
         assert cfg.subsampling_factor == 4
         assert cfg.attn_mode == "full"
-        assert cfg.self_attention_model == "rel_pos"
+        assert cfg.self_attention_model == "rope"
 
     @pytest.mark.unit
     def test_custom_config(self):
