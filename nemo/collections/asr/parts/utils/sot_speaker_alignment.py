@@ -354,6 +354,8 @@ def collate_speaker_activity_targets(
     Args:
         speaker_activities (list[torch.Tensor]): Per-example ``(T, N)`` activity tensors.
         audio_lens (torch.Tensor): Shape ``(B,)`` per-example audio sample lengths.
+            Retained for API compatibility; target lengths are taken from the
+            generated activity tensors themselves.
         num_speakers (int): Number of speaker columns to pad/truncate the targets to.
         num_sample_per_mel_frame (int): Audio samples per mel frame.
         num_mel_frame_per_target_frame (int): Mel frames per output target frame.
@@ -364,8 +366,6 @@ def collate_speaker_activity_targets(
             ``(B, T, num_speakers)`` and ``target_length`` is ``(B,)``.
     """
     from lhotse.dataset.collation import collate_matrices
-    from nemo.collections.asr.parts.utils.asr_multispeaker_utils import get_hidden_length_from_sample_length
-
     # `collate_matrices` pads the time axis (dim 0) to the batch max but requires a
     # uniform speaker axis (dim 1). `speaker_to_target` emits one column per speaker
     # found in each cut's RTTM -- e.g. a 5-speaker cut yields (T, 5) even when
@@ -383,10 +383,10 @@ def collate_speaker_activity_targets(
         normalized.append(activity)
 
     targets = collate_matrices(normalized).to(dtype)
-    target_length = torch.tensor(
-        [
-            get_hidden_length_from_sample_length(al, num_sample_per_mel_frame, num_mel_frame_per_target_frame)
-            for al in audio_lens
-        ]
-    )
+    # These tensors have already been generated on the target-frame grid. Their
+    # actual time dimensions are therefore the authoritative valid lengths.
+    # Recomputing them from loaded audio lengths can differ by a few frames after
+    # resampling/augmentation or duration rounding and can exceed the collated
+    # tensor's time dimension.
+    target_length = torch.tensor([activity.shape[0] for activity in normalized], dtype=torch.long)
     return targets, target_length

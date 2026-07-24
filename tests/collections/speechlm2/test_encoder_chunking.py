@@ -234,6 +234,28 @@ def test_split_spk_targets_into_chunks_preserves_realistic_mixed_batch(
         assert torch.equal(chunk[: expected.shape[0]], expected)
 
 
+def test_split_spk_targets_into_chunks_bounds_overestimated_lengths():
+    spk_targets = torch.arange(10, dtype=torch.float32).reshape(2, 5, 1)
+
+    chunked_spk_targets = _split_spk_targets_into_chunks(
+        spk_targets,
+        input_signal_lengths=[4, 5],
+        chunk_spans=[(0, 0, 4), (1, 0, 5)],
+        spk_target_lengths=torch.tensor([4, 6]),
+        spk_target_stride=1,
+    )
+
+    assert torch.equal(
+        chunked_spk_targets,
+        torch.tensor(
+            [
+                [[0.0], [1.0], [2.0], [3.0], [3.0]],
+                [[5.0], [6.0], [7.0], [8.0], [9.0]],
+            ]
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("audio_values", "audio_len", "expected_chunk_lens"),
     [

@@ -252,7 +252,8 @@ def _split_spk_targets_into_chunks(
             parallel to the chunks emitted by :func:`_split_audio_into_chunks`.
         spk_target_lengths: Optional valid target-frame counts with shape ``(B,)``.
             When omitted, each row is assumed to use the full padded target length
-            for backward compatibility.
+            for backward compatibility. Values above the available padded target
+            length are bounded to it.
         spk_target_stride: Number of input time units per target frame. When
             provided, chunk boundaries use this fixed frame grid instead of a
             proportional approximation.
@@ -280,11 +281,15 @@ def _split_spk_targets_into_chunks(
                 f"({len(input_signal_lengths)})."
             )
         target_lengths = [int(length) for length in spk_target_lengths.tolist()]
-        if any(length < 0 or length > max_target_len for length in target_lengths):
+        if any(length < 0 for length in target_lengths):
             raise ValueError(
-                f"spk_target_lengths values must be between 0 and the padded target length ({max_target_len}), "
-                f"got {target_lengths}."
+                f"spk_target_lengths values must be non-negative, got {target_lengths}."
             )
+        # The target tensor is the hard upper bound on available activity frames.
+        # Audio-derived length metadata can exceed it slightly because of duration
+        # rounding, resampling, or augmentation. Use every available frame instead
+        # of aborting an otherwise valid training batch.
+        target_lengths = [min(length, max_target_len) for length in target_lengths]
     if spk_target_stride is not None and spk_target_stride <= 0:
         raise ValueError(f"spk_target_stride must be positive, got {spk_target_stride}.")
 
