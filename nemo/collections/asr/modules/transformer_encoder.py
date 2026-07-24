@@ -387,7 +387,7 @@ class TransformerEncoder(nn.Module):
         qk_norm: bool = False,
         ff_expansion: float = 4.0,
         pre_block_norm: bool = True,
-        self_attention_model: Optional[str] = "rel_pos",
+        self_attention_model: Optional[str] = "rope",
         rope_base: float = 10000.0,
         rotary_fraction: float = 1.0,
         pos_emb_max_len: int = 5000,
