@@ -19,6 +19,7 @@ import os
 import random
 import re
 import tarfile
+import time
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from io import BytesIO
@@ -61,6 +62,58 @@ ShardKey = Union[int, tuple[int, int]]
 
 
 _MALFORMED_INDEXED_MANIFEST_WARNING_KEYS: set[tuple[str, str]] = set()
+
+
+def _is_global_rank_zero() -> bool:
+    try:
+        return int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0"))) == 0
+    except ValueError:
+        return True
+
+
+class _IndexLoadProgress:
+    """Rate-limited rank-0 progress for eager indexed-reader construction."""
+
+    _global_loaded = 0
+    _global_started_at: float | None = None
+    _last_log_at: float | None = None
+    _log_interval_seconds = 30.0
+
+    def __init__(self, label: str, total: int) -> None:
+        self.label = label
+        self.total = total
+        self.loaded = 0
+        self.started_at = time.monotonic()
+        if self.__class__._global_started_at is None:
+            self.__class__._global_started_at = self.started_at
+            self.__class__._last_log_at = self.started_at
+
+    def step(self, path: str | Path) -> None:
+        self.loaded += 1
+        cls = self.__class__
+        cls._global_loaded += 1
+        now = time.monotonic()
+        if not _is_global_rank_zero() or now - cls._last_log_at < cls._log_interval_seconds:
+            return
+
+        elapsed = max(now - cls._global_started_at, 1e-9)
+        source_pct = 100.0 * self.loaded / self.total if self.total else 100.0
+        logging.info(
+            "Index loading progress: "
+            f"source={self.label} loaded={self.loaded:,}/{self.total:,} ({source_pct:.1f}%) "
+            f"global_loaded={cls._global_loaded:,} elapsed={elapsed / 60:.1f}m "
+            f"rate={cls._global_loaded / elapsed:.1f} files/s current={path}"
+        )
+        cls._last_log_at = now
+
+    def finish(self) -> None:
+        elapsed = time.monotonic() - self.started_at
+        if _is_global_rank_zero() and elapsed >= self._log_interval_seconds:
+            logging.info(
+                "Index loading source complete: "
+                f"source={self.label} loaded={self.loaded:,}/{self.total:,} "
+                f"elapsed={elapsed / 60:.1f}m"
+            )
 
 
 def _warn_malformed_indexed_manifest_record(ex: BaseException, idx: int, path: str | Path) -> None:
@@ -173,16 +226,20 @@ class LazyNeMoIterator(IteratorNode):
             from lhotse.indexing import index_file_path
 
             seed = resolve_seed(shard_seed) if shard_seed not in (None, "trng", "randomized") else 0
-            indexed_sources = [
-                LazyIndexedManifestIterator(
-                    p,
-                    index_path=index_file_path(p, indexes_root),
-                    decode=GraphOriginDict,
-                    skip_decode_errors=skip_missing_manifest_entries,
-                    decode_error_callback=_warn_malformed_indexed_manifest_record,
+            progress = _IndexLoadProgress("NeMo manifests", len(paths))
+            indexed_sources = []
+            for p in paths:
+                indexed_sources.append(
+                    LazyIndexedManifestIterator(
+                        p,
+                        index_path=index_file_path(p, indexes_root),
+                        decode=GraphOriginDict,
+                        skip_decode_errors=skip_missing_manifest_entries,
+                        decode_error_callback=_warn_malformed_indexed_manifest_record,
+                    )
                 )
-                for p in paths
-            ]
+                progress.step(p)
+            progress.finish()
             if len(indexed_sources) == 1:
                 self.source = indexed_sources[0]
             else:
@@ -521,18 +578,26 @@ class LazyNeMoTarredIterator(IteratorNode):
 
         cum = 0
         cum_lens = [0]
+        readers_per_shard = 1 if self.use_ais_get_batch else 2
+        progress = _IndexLoadProgress(
+            "NeMo tarred manifests",
+            len(self._sorted_shard_ids) * readers_per_shard,
+        )
         for sid in self._sorted_shard_ids:
             jsonl_path = shard_id_to_manifest_path[sid]
             tar_path = self.shard_id_to_tar_path[sid]
             self._cuts_readers[sid] = IndexedJsonlReader(
                 jsonl_path, index_path=index_file_path(jsonl_path, self.indexes_root)
             )
+            progress.step(jsonl_path)
             if not self.use_ais_get_batch:
                 self._tar_readers[sid] = IndexedTarMemberReader(
                     tar_path, idx_path=index_file_path(tar_path, self.indexes_root)
                 )
+                progress.step(tar_path)
             cum += len(self._cuts_readers[sid])
             cum_lens.append(cum)
+        progress.finish()
         self._cum_lens = cum_lens
         self._total_len = cum
         self._iter_state = PartitionedIndexedIterator()

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from datetime import timedelta
 import os
 
 # Compat shim: DCP checkpoints whose ``.metadata`` was pickled under Python 3.13
@@ -40,11 +41,27 @@ if torch.cuda.is_available():
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 
+def _process_group_timeout(cfg):
+    """Resolve the NCCL collective timeout from Hydra, then the cluster environment."""
+    timeout_minutes = OmegaConf.select(cfg, "trainer.strategy.timeout_minutes", default=None)
+    if timeout_minutes is not None:
+        return timedelta(minutes=float(timeout_minutes))
+
+    timeout_seconds = os.environ.get("TORCH_NCCL_TIMEOUT_S") or os.environ.get("TORCH_NCCL_TIMEOUT_SEC")
+    if timeout_seconds is not None:
+        return timedelta(seconds=float(timeout_seconds))
+
+    return None
+
+
 @hydra_runner(config_path="conf", config_name="salm")
 def train(cfg):
     OmegaConf.resolve(cfg)
     if torch.cuda.is_available():
-        torch.distributed.init_process_group(backend="nccl")
+        init_kwargs = {}
+        if timeout := _process_group_timeout(cfg):
+            init_kwargs["timeout"] = timeout
+        torch.distributed.init_process_group(backend="nccl", **init_kwargs)
     seed_everything(cfg.data.train_ds.seed)
     torch.set_float32_matmul_precision("medium")
     trainer = Trainer(**resolve_trainer_cfg(cfg.trainer))

@@ -152,3 +152,21 @@ def test_collate_speaker_activity_targets_mixed_speaker_counts_and_lengths():
         get_hidden_length_from_sample_length(2560, 160, 8),
         get_hidden_length_from_sample_length(3840, 160, 8),
     ]
+
+
+@pytest.mark.unit
+def test_collate_speaker_activity_targets_uses_generated_frame_lengths():
+    activities = [torch.ones(3, 2), torch.ones(5, 2)]
+
+    _, target_length = collate_speaker_activity_targets(
+        activities,
+        # These loaded-audio-derived lengths map to 4 and 3 target frames,
+        # intentionally disagreeing with the generated target tensors.
+        audio_lens=torch.tensor([5120, 3840]),
+        num_speakers=2,
+        num_sample_per_mel_frame=160,
+        num_mel_frame_per_target_frame=8,
+        dtype=torch.float32,
+    )
+
+    assert target_length.tolist() == [3, 5]
