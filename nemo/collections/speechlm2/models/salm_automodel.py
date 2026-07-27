@@ -13,6 +13,7 @@
 # limitations under the License.
 import warnings
 from collections import defaultdict
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -202,6 +203,20 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
 
         return isinstance(getattr(self.perception, "encoder", None), ParallelExpertEncoder)
+
+    @contextmanager
+    def _perception_online_inference(self):
+        """Let the PE encoder use its windowed long-form path for the enclosed block.
+
+        Only :meth:`generate` opens this. Training and validation go through
+        ``prepare_inputs`` and must stay on the single-pass path, because the windowed loop
+        emits a number of collectives that tracks each rank's own audio length.
+        """
+        if not self._uses_ext_spk_tgts():
+            yield
+            return
+        with self.perception.encoder.online_inference():
+            yield
 
     def _warn_parallel_expert_encoder_inference_compatibility(self, cp_size: int) -> None:
         if not self.cfg.get("pe_encoder_path", None):
@@ -708,22 +723,25 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             # Prepare token embeddings and audio embeddings.
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
-            if self._uses_ext_spk_tgts() and spk_targets is None:
-                # This is only used for inference when ``spk_targets`` is None.
-                # PEE needs to produce ``spk_targets`` itself through recursive encoding.
-                self._warn_parallel_expert_encoder_inference_compatibility(cp_size=1)
-                audio_embeds, audio_embed_lens = self.perception(input_signal=audios, input_signal_length=audio_lens)
-                audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embeds, audio_embed_lens)]
-            else:
-                audio_embeds = encode_audio_with_optional_chunking(
-                    self.perception,
-                    audios,
-                    audio_lens,
-                    chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
-                    sampling_rate=self.sampling_rate,
-                    spk_targets=spk_targets if self._uses_ext_spk_tgts() else None,
-                    spk_target_lengths=spk_target_lengths if self._uses_ext_spk_tgts() else None,
-                )
+            with self._perception_online_inference():
+                if self._uses_ext_spk_tgts() and spk_targets is None:
+                    # This is only used for inference when ``spk_targets`` is None.
+                    # PEE needs to produce ``spk_targets`` itself through recursive encoding.
+                    self._warn_parallel_expert_encoder_inference_compatibility(cp_size=1)
+                    audio_embeds, audio_embed_lens = self.perception(
+                        input_signal=audios, input_signal_length=audio_lens
+                    )
+                    audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embeds, audio_embed_lens)]
+                else:
+                    audio_embeds = encode_audio_with_optional_chunking(
+                        self.perception,
+                        audios,
+                        audio_lens,
+                        chunk_size_seconds=self.cfg.get("encoder_chunk_size_seconds", None),
+                        sampling_rate=self.sampling_rate,
+                        spk_targets=spk_targets if self._uses_ext_spk_tgts() else None,
+                        spk_target_lengths=spk_target_lengths if self._uses_ext_spk_tgts() else None,
+                    )
             # Insert audio embeddings into relevant positions in text embeddings.
             input_embeds, _, attention_mask = replace_placeholders_and_build_targets(
                 input_ids=tokens,

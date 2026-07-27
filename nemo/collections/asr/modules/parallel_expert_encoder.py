@@ -88,6 +88,24 @@ def _disable_dist_feature_sync():
         dist.is_initialized = orig_is_initialized
 
 
+def _disable_max_seq_length_sync(module: nn.Module) -> None:
+    """Turn off ``sync_max_audio_length`` on every :class:`ConformerEncoder` under ``module``.
+
+    That flag makes ``ConformerEncoder.update_max_seq_length`` issue an ``all_reduce`` on the
+    **default** process group. Any such collective inside a data-dependent branch lets ranks
+    emit different numbers of default-PG collectives on the same step, which NCCL cannot
+    match positionally -- the run then deadlocks until the watchdog aborts it.
+
+    Dropping it is numerically neutral: the reduced value only sizes the positional-encoding
+    buffer (``set_max_audio_length`` -> ``extend_pe`` grows it on demand per rank, and both
+    absolute and relative encodings slice it length-relative), while attention masks are
+    always built from the local sequence length.
+    """
+    for submodule in module.modules():
+        if getattr(submodule, "sync_max_audio_length", False):
+            submodule.sync_max_audio_length = False
+
+
 def _clone_config(config: Optional[DictConfig]) -> Optional[DictConfig]:
     """Deep-copy a ``DictConfig`` without resolving interpolations.
 
@@ -121,6 +139,8 @@ class ParallelExpertEncoderPT(ModelPT):
             missing_rttm_target=self._cfg.get('missing_rttm_target', -1.0),
             speaker_activity_threshold=self._cfg.get('speaker_activity_threshold', 0.5),
             spk_kernel_scale=self._cfg.get('spk_kernel_scale', 1.0),
+            sync_max_audio_length=self._cfg.get('sync_max_audio_length', False),
+            always_run_diarization=self._cfg.get('always_run_diarization', True),
         )
 
     @classmethod
@@ -312,6 +332,14 @@ class ParallelExpertEncoder(nn.Module):
             diarization targets before speaker-kernel fusion. Defaults to ``0.5``.
         spk_kernel_scale (float): Scale applied to the speaker-kernel contribution
             before adding it to ASR encoder states. Defaults to ``1.0``.
+        sync_max_audio_length (bool): Let the wrapped Conformer encoders all-reduce their
+            maximum sequence length on the default process group. Defaults to ``False``;
+            leave it off unless every rank is guaranteed to run both encoders on every
+            step, since the reduction is emitted from inside a data-dependent branch.
+        always_run_diarization (bool): Run the diarization frontend on every offline
+            forward instead of only when some row requests predicted diarization.
+            Defaults to ``True`` so the collective schedule cannot depend on batch
+            content. Set to ``False`` only for single-process inference.
     """
 
     def __init__(
@@ -330,6 +358,8 @@ class ParallelExpertEncoder(nn.Module):
         missing_rttm_target: float = -1.0,
         speaker_activity_threshold: float = 0.5,
         spk_kernel_scale: float = 1.0,
+        sync_max_audio_length: bool = False,
+        always_run_diarization: bool = True,
     ):
         super().__init__()
 
@@ -354,11 +384,23 @@ class ParallelExpertEncoder(nn.Module):
 
         self.diarization_model = SortformerEncLabelModel.from_config_dict(_clone_config(diarization_model_cfg))
 
+        # Both branches wrap a ConformerEncoder whose `update_max_seq_length` all-reduces on the
+        # default process group. Neither is reached unconditionally by every rank -- the
+        # diarization frontend sits behind a batch-content branch and `_forward_online` calls the
+        # ASR encoder a data-dependent number of times -- so these must not emit collectives.
+        self.sync_max_audio_length = bool(sync_max_audio_length)
+        if not self.sync_max_audio_length:
+            _disable_max_seq_length_sync(self.asr_encoder)
+            _disable_max_seq_length_sync(self.diarization_model)
+        self.always_run_diarization = bool(always_run_diarization)
+
         self.freeze_diar = freeze_diar
         self.freeze_asr = freeze_asr
 
         # Long-form / online inference configuration.
         self.online_inference_length = int(online_inference_length)
+        # Opt-in, and never on during training or validation: see `online_inference`.
+        self.online_inference_enabled = False
         # Overlap-and-trim context (output frames) shared by both branches.
         self.chunk_left_context = max(0, int(chunk_left_context))
         self.chunk_right_context = max(0, int(chunk_right_context))
@@ -488,7 +530,8 @@ class ParallelExpertEncoder(nn.Module):
             spk_targets (Tensor): RTTM or Sortformer speaker activity. Shape
                 ``(B, T_diar, n_spk)``.
             diarization_preds (Tensor, optional): Diarization predictions used for
-                rows selected by ``use_diarization``.
+                rows selected by ``use_diarization``. Callers must supply these whenever
+                ``use_diarization`` can select a row; :meth:`_forward` guarantees it.
             use_diarization (Tensor, optional): Bool mask with shape ``(B,)``.
 
         Returns:
@@ -496,9 +539,11 @@ class ParallelExpertEncoder(nn.Module):
         """
         asr_enc_states = asr_encoded.transpose(1, 2)  # (B, T, D)
         spk_targets = self._align_diar_frames(spk_targets, asr_enc_states.shape[1]).to(asr_enc_states.dtype)
-        if use_diarization is not None and bool(use_diarization.any()):
-            if diarization_preds is None:
-                raise ValueError("diarization_preds are required when use_diarization selects any rows.")
+        # Select per row on device. Reading `use_diarization.any()` here to skip the select
+        # would block the host on a device transfer, and with activation checkpointing this
+        # runs again inside the backward pass, where stalling the host reorders the
+        # surrounding FSDP gradient reduce-scatters relative to peer ranks.
+        if use_diarization is not None and diarization_preds is not None:
             if use_diarization.numel() != spk_targets.shape[0]:
                 raise ValueError(
                     f"use_diarization size ({use_diarization.numel()}) must match "
@@ -524,6 +569,23 @@ class ParallelExpertEncoder(nn.Module):
 
         return fused.transpose(1, 2)  # (B, D, T)
 
+    @contextlib.contextmanager
+    def online_inference(self, enabled: bool = True):
+        """Route :meth:`forward` through the windowed long-form path inside this block.
+
+        Off by default, and deliberately not inferred from ``self.training``: validation
+        also runs in eval mode, and it must stay on the single-pass path. The windowed loop
+        calls ``asr_encoder`` once per window, so the number of collectives it emits tracks
+        each rank's own audio length -- fine for a generation call, a deadlock inside a
+        distributed train or validation step. Only generation should open this.
+        """
+        previous = self.online_inference_enabled
+        self.online_inference_enabled = bool(enabled)
+        try:
+            yield
+        finally:
+            self.online_inference_enabled = previous
+
     # Forward — identical signature to ConformerEncoder.forward
     def forward(
         self,
@@ -533,8 +595,9 @@ class ParallelExpertEncoder(nn.Module):
     ):
         """Encode ``audio_signal``, optionally fusing diarization.
 
-        Dispatches to :meth:`_forward` (offline) or :meth:`_forward_online` (long-form,
-        inference-only, when the input exceeds one window).
+        Uses :meth:`_forward` (offline, single pass) unless a caller has opened
+        :meth:`online_inference`, which selects the windowed long-form :meth:`_forward_online`.
+        Training and validation therefore never chunk; generation does.
 
         Args:
             audio_signal (Tensor): Un-normalised mel features. Shape ``(B, feat_in, n_frames)``.
@@ -547,13 +610,9 @@ class ParallelExpertEncoder(nn.Module):
         Returns:
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
         """
-        if spk_targets is not None:
-            use_online = False
-        elif self.online_inference_length > 0 and not self.training:
-            # Even if spk_targets is None, use offline if audio is short enough
-            use_online = audio_signal.shape[-1] > self.chunk_feat_len
-        else:
-            use_online = False
+        # Off unless a generation call opened `online_inference()`, so training and
+        # validation both take the single-pass path no matter what the batch holds.
+        use_online = self.online_inference_enabled and self.online_inference_length > 0
 
         if use_online:
             return self._forward_online(audio_signal=audio_signal, length=length, spk_targets=spk_targets)
@@ -577,7 +636,18 @@ class ParallelExpertEncoder(nn.Module):
             else (spk_targets <= self.missing_rttm_target).flatten(start_dim=1).any(dim=1)
         )
         diarization_preds = None
-        if spk_targets is None or bool(use_diarization.any()):
+        # `use_diarization` is rank-local: whether this rank's batch holds a row needing
+        # predicted diarization depends on which cuts the sampler handed it. Branching on it
+        # makes the frontend -- and every collective and FSDP hook underneath it -- run on some
+        # ranks and not others, which desynchronises them. Keep the decision batch-independent,
+        # and never touch the tensor: `bool(...)` on it blocks the host on a device transfer.
+        if spk_targets is None or self.always_run_diarization:
+            run_diarization = True
+        else:
+            # Opt-out path. Reads batch content, so it both syncs the host and lets ranks
+            # disagree; only safe in a single process.
+            run_diarization = bool(use_diarization.any())
+        if run_diarization:
             # Cast fp32 mels to the diarizer's device/dtype before its conv subsampling.
             diar_signal = self._match_module_io(audio_signal, self.diarization_model)
             diar_length = length.to(device=diar_signal.device)
@@ -638,7 +708,9 @@ class ParallelExpertEncoder(nn.Module):
         Args:
             audio_signal (Tensor): Un-normalised mel features. Shape ``(B, feat_in, n_frames)``.
             length (Tensor): Per-sample feature lengths. Shape ``(B,)``.
-            spk_targets (Tensor, optional): ``(B, T, n_spk)`` override; when given, only ASR is chunked.
+            spk_targets (Tensor, optional): ``(B, T, n_spk)`` override. Rows carrying the
+                ``-1`` sentinel still get a streaming Sortformer prediction; the rest keep
+                their targets and only the ASR branch is chunked for them.
 
         Returns:
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
@@ -660,7 +732,15 @@ class ParallelExpertEncoder(nn.Module):
         asr_audio_signal = self._match_module_io(asr_audio_signal, self.asr_encoder)
         length = length.to(device=asr_audio_signal.device)
 
-        run_streaming_diar = spk_targets is None
+        # Rows filled with the `-1` sentinel carry no RTTM and need a prediction, exactly as
+        # in `_forward`. Reading the mask on the host is fine here: only generation reaches
+        # this path (see `online_inference`), and it already syncs on `length.max()` above.
+        use_diarization = (
+            None
+            if spk_targets is None
+            else (spk_targets <= self.missing_rttm_target).flatten(start_dim=1).any(dim=1)
+        )
+        run_streaming_diar = spk_targets is None or bool(use_diarization.any())
         if run_streaming_diar:
             streaming_state, stream_dtype, diar_audio_signal, diar_length = self._init_streaming_diar(
                 audio_signal,
@@ -730,11 +810,17 @@ class ParallelExpertEncoder(nn.Module):
                 diar_chunks.append(new_preds)
 
         asr_encoded = torch.cat(asr_chunks, dim=2)  # (B, D, T_asr)
-        if run_streaming_diar:
-            spk_targets = torch.cat(diar_chunks, dim=1)  # (B, T_asr, n_spk)
+        diarization_preds = torch.cat(diar_chunks, dim=1) if run_streaming_diar else None  # (B, T_asr, n_spk)
+        if spk_targets is None:
+            spk_targets = diarization_preds
 
         if spk_targets is not None:
-            outputs = self._fuse_diar_and_asr(asr_encoded, spk_targets)
+            outputs = self._fuse_diar_and_asr(
+                asr_encoded,
+                spk_targets,
+                diarization_preds=diarization_preds,
+                use_diarization=use_diarization,
+            )
         else:
             outputs = asr_encoded
 

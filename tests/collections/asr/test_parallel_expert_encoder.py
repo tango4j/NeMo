@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import io
 import tarfile
 
@@ -22,6 +23,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
 from nemo.collections.asr.models import SortformerEncLabelModel
+from nemo.collections.asr.modules import parallel_expert_encoder as pee_module
 from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder
 from nemo.collections.asr.modules.parallel_expert_encoder import (
     ParallelExpertEncoder,
@@ -137,6 +139,7 @@ def dispatch_stub(online_inference_length, chunk_feat_len, training):
     enc = _PEE.__new__(_PEE)
     nn.Module.__init__(enc)
     enc.online_inference_length = online_inference_length
+    enc.online_inference_enabled = False
     enc.chunk_feat_len = chunk_feat_len
     enc.training = training
     enc._forward = lambda **kw: "offline"
@@ -146,20 +149,50 @@ def dispatch_stub(online_inference_length, chunk_feat_len, training):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "online_len, chunk_feat_len, training, n_frames, expected",
+    "online_len, chunk_feat_len, training, n_frames, generating, expected",
     [
-        (500, 100, False, 200, "online"),  # eval + long enough -> online
-        (500, 100, False, 50, "offline"),  # eval but shorter than one window
-        (500, 100, True, 200, "offline"),  # training always offline
-        (0, 100, False, 200, "offline"),  # online disabled
-        (500, 100, False, 100, "offline"),  # exactly one window (not strictly greater)
+        # Training and validation are offline whatever the audio length and whichever mode
+        # the module is in: a length-dependent choice would let ranks run different numbers
+        # of encoder calls in the same step.
+        (500, 100, True, 200, False, "offline"),
+        (500, 100, True, 50, False, "offline"),
+        (500, 100, False, 200, False, "offline"),  # validation: eval mode, still offline
+        (500, 100, False, 50, False, "offline"),
+        # Generation is online whatever the audio length, including below one window.
+        (500, 100, False, 200, True, "online"),
+        (500, 100, False, 50, True, "online"),
+        (500, 100, False, 100, True, "online"),
+        # Master switch off.
+        (0, 100, False, 200, True, "offline"),
     ],
 )
-def test_forward_dispatch(online_len, chunk_feat_len, training, n_frames, expected):
+def test_forward_dispatch(online_len, chunk_feat_len, training, n_frames, generating, expected):
     enc = dispatch_stub(online_len, chunk_feat_len, training)
     audio = torch.zeros(1, 8, n_frames)
     length = torch.tensor([n_frames])
-    assert enc.forward(audio, length) == expected
+    with enc.online_inference() if generating else contextlib.nullcontext():
+        assert enc.forward(audio, length) == expected
+
+
+@pytest.mark.unit
+def test_online_inference_scope_restores_previous_state():
+    enc = dispatch_stub(500, 100, training=False)
+    assert enc.online_inference_enabled is False
+    with enc.online_inference():
+        assert enc.online_inference_enabled is True
+        with enc.online_inference(False):
+            assert enc.online_inference_enabled is False
+        assert enc.online_inference_enabled is True
+    assert enc.online_inference_enabled is False
+
+
+@pytest.mark.unit
+def test_online_inference_scope_restores_state_on_exception():
+    enc = dispatch_stub(500, 100, training=False)
+    with pytest.raises(RuntimeError):
+        with enc.online_inference():
+            raise RuntimeError("boom")
+    assert enc.online_inference_enabled is False
 
 
 # ----------------------------------------------------------------------------- #
@@ -468,6 +501,240 @@ def test_pe_encoder_builds_and_wires_both_real_encoders():
     assert any(p.requires_grad for p in enc.asr_encoder.parameters())
 
 
+# ----------------------------------------------------------------------------- #
+# Rank-invariant collective schedule
+#
+# Both sub-encoders wrap a ConformerEncoder whose `update_max_seq_length` all-reduces
+# on the default process group, and the diarization branch used to be entered per batch
+# content. Together those let ranks emit different numbers of default-PG collectives on
+# the same step, which NCCL matches positionally -> permanent deadlock. These tests pin
+# both halves of the fix without needing a distributed process group.
+# ----------------------------------------------------------------------------- #
+def _conformer_submodules(enc: ParallelExpertEncoder) -> list[ConformerEncoder]:
+    return [m for m in enc.modules() if isinstance(m, ConformerEncoder)]
+
+
+@pytest.mark.unit
+def test_pe_encoder_disables_conformer_max_length_sync_by_default():
+    enc = build_toy_pe_encoder()
+    conformers = _conformer_submodules(enc)
+    # Both the ASR branch and the Sortformer frontend must be covered.
+    assert len(conformers) == 2
+    assert all(not c.sync_max_audio_length for c in conformers)
+    assert not enc.sync_max_audio_length
+
+
+@pytest.mark.unit
+def test_pe_encoder_max_length_sync_is_opt_in():
+    enc = build_toy_pe_encoder(sync_max_audio_length=True)
+    assert enc.sync_max_audio_length
+    # Left at the ConformerEncoder default; only safe when every rank runs both encoders.
+    assert all(c.sync_max_audio_length for c in _conformer_submodules(enc))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("missing_rows", [[], [0], [1], [0, 1]])
+def test_pe_encoder_diarization_branch_does_not_depend_on_batch_content(missing_rows):
+    """The diarization frontend must run the same number of times regardless of how many
+    rows carry the missing-RTTM sentinel, so peer ranks stay on the same collective."""
+    enc = build_toy_pe_encoder().train()
+    batch_size, n_frames = 2, 160
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+    spk_targets = torch.rand(batch_size, 7, _N_SPK)
+    for row in missing_rows:
+        spk_targets[row].fill_(enc.missing_rttm_target)
+
+    calls = []
+    real_frontend = enc.diarization_model.frontend_encoder
+
+    def counting_frontend(**kwargs):
+        calls.append(1)
+        return real_frontend(**kwargs)
+
+    enc.diarization_model.frontend_encoder = counting_frontend
+    with torch.no_grad():
+        outputs, _ = enc(mels, length, spk_targets=spk_targets)
+
+    assert len(calls) == 1
+    assert torch.isfinite(outputs).all()
+
+
+@contextlib.contextmanager
+def _forbid_host_sync():
+    """Make every tensor -> Python-scalar conversion raise.
+
+    Those conversions block the host until the compute stream drains. With
+    ``activation_checkpointing_perception`` the encoder forward re-runs inside the backward
+    pass, so a sync there stalls the host mid-backward and reorders the surrounding FSDP
+    gradient reduce-scatters against peer ranks.
+    """
+    original = {name: getattr(torch.Tensor, name) for name in ("__bool__", "item", "tolist")}
+
+    def _blocked(name):
+        def _raise(self, *args, **kwargs):
+            raise AssertionError(f"device-to-host sync via Tensor.{name}()")
+
+        return _raise
+
+    for name in original:
+        setattr(torch.Tensor, name, _blocked(name))
+    try:
+        yield
+    finally:
+        for name, fn in original.items():
+            setattr(torch.Tensor, name, fn)
+
+
+@pytest.mark.unit
+def test_forbid_host_sync_helper_actually_catches_a_sync():
+    """Guard the guard: if patching Tensor.__bool__ ever stops working, the sync tests
+    below would pass vacuously."""
+    with pytest.raises(AssertionError, match="device-to-host sync"):
+        with _forbid_host_sync():
+            bool(torch.zeros(3).any())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("missing_rows", [[], [0], [1], [0, 1]])
+def test_pe_encoder_training_forward_never_syncs_host(missing_rows):
+    """The training path must reach a fused output without reading any tensor on the host,
+    no matter how many rows carry the missing-RTTM sentinel. With activation checkpointing
+    this code re-runs inside the backward pass, where a host stall reorders the surrounding
+    FSDP gradient reduce-scatters against peer ranks."""
+    enc = build_toy_pe_encoder().train()
+    batch_size, n_frames = 2, 160
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+    spk_targets = torch.rand(batch_size, 7, _N_SPK)
+    for row in missing_rows:
+        spk_targets[row].fill_(enc.missing_rttm_target)
+
+    with torch.no_grad(), _forbid_host_sync():
+        outputs, _ = enc(mels, length, spk_targets=spk_targets)
+
+    assert torch.isfinite(outputs).all()
+
+
+@pytest.mark.unit
+def test_pe_encoder_training_forward_never_syncs_host_without_spk_targets():
+    enc = build_toy_pe_encoder().train()
+    mels = torch.randn(1, _MEL_FEATURES, 160)
+    length = torch.full((1,), 160, dtype=torch.long)
+
+    with torch.no_grad(), _forbid_host_sync():
+        outputs, _ = enc(mels, length)
+
+    assert torch.isfinite(outputs).all()
+
+
+def _build_online_capable_encoder():
+    enc = build_toy_pe_encoder(
+        online_inference_length=10,
+        chunk_left_context=2,
+        chunk_right_context=2,
+        diar_fifo_len=10,
+        diar_spkcache_update_period=20,
+        diar_spkcache_len=20,
+    )
+    enc._suppress_online_pbar = True
+    return enc
+
+
+def _record_dispatch(enc):
+    """Record which of the two forward paths `enc.forward` selects."""
+    taken = []
+    real_online, real_offline = enc._forward_online, enc._forward
+    enc._forward_online = lambda **kw: (taken.append("online"), real_online(**kw))[1]
+    enc._forward = lambda **kw: (taken.append("offline"), real_offline(**kw))[1]
+    return taken
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["train", "eval"])
+@pytest.mark.parametrize("spk_targets_given", [False, True])
+@pytest.mark.parametrize("n_frames", [80, 320])
+def test_pe_encoder_training_and_validation_never_use_online_path(mode, spk_targets_given, n_frames):
+    """Training and validation are offline unconditionally. Neither audio length, nor the
+    presence of speaker targets, nor eval mode may steer it, or ranks in the same step
+    would run different numbers of encoder calls."""
+    enc = _build_online_capable_encoder()
+    enc.train() if mode == "train" else enc.eval()
+    mels = torch.randn(1, _MEL_FEATURES, n_frames)
+    length = torch.full((1,), n_frames, dtype=torch.long)
+    spk_targets = torch.rand(1, 7, _N_SPK) if spk_targets_given else None
+
+    taken = _record_dispatch(enc)
+    with torch.no_grad():
+        outputs, _ = enc(mels, length, spk_targets=spk_targets)
+
+    assert taken == ["offline"]
+    assert torch.isfinite(outputs).all()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("spk_targets_given", [False, True])
+@pytest.mark.parametrize("n_frames", [80, 320])
+def test_pe_encoder_generation_always_uses_online_path(spk_targets_given, n_frames):
+    """Generation is online unconditionally, including for audio shorter than one window
+    and for batches that supply their own speaker targets."""
+    enc = _build_online_capable_encoder().eval()
+    mels = torch.randn(1, _MEL_FEATURES, n_frames)
+    length = torch.full((1,), n_frames, dtype=torch.long)
+    spk_targets = torch.rand(1, 7, _N_SPK) if spk_targets_given else None
+
+    taken = _record_dispatch(enc)
+    with torch.no_grad(), enc.online_inference():
+        outputs, _ = enc(mels, length, spk_targets=spk_targets)
+
+    assert taken == ["online"]
+    assert torch.isfinite(outputs).all()
+
+
+@pytest.mark.unit
+def test_pe_encoder_online_path_predicts_for_sentinel_rows():
+    """A `-1` row has no RTTM, so the online path must fill it from the streaming
+    Sortformer instead of feeding the sentinel into the speaker kernel."""
+    enc = _build_online_capable_encoder().eval()
+    batch_size, n_frames = 2, 320
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+
+    spk_targets = torch.rand(batch_size, 7, _N_SPK)
+    sentinel_batch = spk_targets.clone()
+    sentinel_batch[1].fill_(enc.missing_rttm_target)
+
+    with torch.no_grad(), enc.online_inference():
+        kept, _ = enc(mels, length, spk_targets=spk_targets)
+        replaced, _ = enc(mels, length, spk_targets=sentinel_batch)
+
+    # Row 0 keeps its RTTM targets, so it is untouched by row 1's sentinel.
+    torch.testing.assert_close(kept[0], replaced[0])
+    # Row 1 was overridden by a prediction rather than fused from `-1`.
+    assert not torch.allclose(kept[1], replaced[1])
+    assert torch.isfinite(replaced).all()
+
+
+@pytest.mark.unit
+def test_pe_encoder_sentinel_free_batch_output_unaffected_by_always_run_diarization():
+    """Running the frontend unconditionally costs compute but must not change outputs
+    for a batch where no row requests predicted diarization."""
+    batch_size, n_frames = 2, 160
+    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
+    length = torch.full((batch_size,), n_frames, dtype=torch.long)
+    spk_targets = torch.rand(batch_size, 7, _N_SPK)
+
+    with torch.no_grad():
+        eager = build_toy_pe_encoder(always_run_diarization=True).eval()
+        lazy = build_toy_pe_encoder(always_run_diarization=False).eval()
+        lazy.load_state_dict(eager.state_dict())
+        out_eager, len_eager = eager(mels, length, spk_targets=spk_targets)
+        out_lazy, len_lazy = lazy(mels, length, spk_targets=spk_targets)
+
+    assert torch.equal(len_eager, len_lazy)
+    torch.testing.assert_close(out_eager, out_lazy, rtol=0, atol=0)
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("batch_size, n_frames", [(1, 160), (2, 200)])
 def test_pe_encoder_offline_forward_runs_internal_diarizer(batch_size, n_frames):
@@ -592,6 +859,7 @@ def test_pe_encoder_mixed_batch_replaces_only_missing_rows_with_mocked_diarizati
     enc.missing_rttm_target = -1.0
     enc.speaker_activity_threshold = 0.5
     enc.spk_kernel_scale = 1.0
+    enc.always_run_diarization = True
     enc.asr_norm = nn.Identity()
     enc.diar_norm = nn.Identity()
     enc.register_buffer("diar_kernel", torch.eye(2))

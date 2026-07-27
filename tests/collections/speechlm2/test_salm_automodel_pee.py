@@ -321,9 +321,11 @@ class _PEETestPerception(torch.nn.Module):
         self.encoder = pe_encoder  # real ParallelExpertEncoder -> drives the PEE branch
         self.preprocessor = SimpleNamespace(featurizer=SimpleNamespace(sample_rate=16000, hop_length=160))
         self.spk_targets_calls = []
+        self.online_flags = []
 
     def forward(self, input_signal=None, input_signal_length=None, spk_targets=None):
         self.spk_targets_calls.append(spk_targets)
+        self.online_flags.append(getattr(self.encoder, "online_inference_enabled", None))
         max_len = int(input_signal_length.max().item())
         return input_signal[:, :max_len].unsqueeze(-1), input_signal_length.clone()
 
@@ -349,6 +351,45 @@ def dummy_pe_encoder():
 def test_pee_prepare_inputs_detects_parallel_expert_encoder(dummy_pe_encoder):
     model = _make_pee_routing_test_model(dummy_pe_encoder)
     assert model._uses_ext_spk_tgts()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("with_spk_targets", [True, False])
+def test_pee_prepare_inputs_never_enables_online_inference(dummy_pe_encoder, with_spk_targets):
+    """Training and validation both reach the encoder through ``prepare_inputs``, and both
+    must stay on the single-pass path: the windowed loop calls the ASR encoder once per
+    window, so its collective count would track each rank's own audio length."""
+    model = _make_pee_routing_test_model(dummy_pe_encoder)
+    batch = {
+        "audios": torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]]),
+        "audio_lens": torch.tensor([5], dtype=torch.long),
+        "input_ids": torch.tensor([[model.audio_locator_tag_id, 10]], dtype=torch.long),
+        "loss_mask": torch.tensor([[False, True]], dtype=torch.bool),
+    }
+    if with_spk_targets:
+        batch["spk_targets"] = torch.rand(1, 4, _N_SPK)
+
+    model.prepare_inputs(batch)
+
+    assert model.perception.online_flags[-1] is False
+    assert dummy_pe_encoder.online_inference_enabled is False
+
+
+@pytest.mark.unit
+def test_pee_generation_scope_enables_online_inference_and_restores(dummy_pe_encoder):
+    model = _make_pee_routing_test_model(dummy_pe_encoder)
+    assert dummy_pe_encoder.online_inference_enabled is False
+    with model._perception_online_inference():
+        assert dummy_pe_encoder.online_inference_enabled is True
+    assert dummy_pe_encoder.online_inference_enabled is False
+
+
+@pytest.mark.unit
+def test_pee_generation_scope_is_a_noop_without_a_pe_encoder():
+    model = _make_pee_routing_test_model(torch.nn.Linear(2, 2))
+    assert not model._uses_ext_spk_tgts()
+    with model._perception_online_inference():
+        pass
 
 
 @pytest.mark.unit
