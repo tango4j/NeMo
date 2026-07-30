@@ -83,6 +83,7 @@ from nemo.collections.asr.parts.submodules.subsampling import FeatureStacking
 
 __all__ = [
     'GroupedFeedForward',
+    'PEECUDAGraphRunner',
     'PEETransformerEncoder',
     'pad_feedforward',
     'bucket_ffns_by_shape',
@@ -99,6 +100,70 @@ __all__ = [
 # A future 'triton'/'cutlass' backend (ragged per-group offsets) plugs in here
 # without changing the parameter layout or any call site.
 GROUPED_GEMM_BACKENDS = ('baddbmm', 'loop')
+
+
+class PEECUDAGraphRunner:
+    """Replay a fixed-shape PEE inference graph with reusable CUDA memory.
+
+    Instances are created by :meth:`PEETransformerEncoder.capture_cuda_graph`.
+    Input storage and every intermediate/output allocation stay alive with the
+    graph, deliberately trading persistent GPU memory for lower launch overhead.
+
+    The returned output tensors are stable graph-owned buffers and are overwritten
+    by the next call. A consumer that must retain an output across replays needs to
+    clone it (or consume it before the next replay).
+    """
+
+    def __init__(
+        self,
+        graph: torch.cuda.CUDAGraph,
+        static_audio: torch.Tensor,
+        static_length: torch.Tensor,
+        output: Dict[str, object],
+        route: str,
+        persistent_bytes: int,
+        capture_peak_bytes: int,
+        owner: nn.Module,
+    ):
+        self.graph = graph
+        self.static_audio = static_audio
+        self.static_length = static_length
+        self.output = output
+        self.route = route
+        self.persistent_bytes = persistent_bytes
+        self.capture_peak_bytes = capture_peak_bytes
+        # Keep parameters/caches referenced by captured kernel pointers alive.
+        self.owner = owner
+
+    def __call__(self, audio_signal: torch.Tensor, length: torch.Tensor) -> Dict[str, object]:
+        """Copy a same-shape input into static storage, replay, and return outputs.
+
+        Shape, dtype, and device are checked without a device synchronization.
+        Length *values* must obey the fixed-shape capture contract supplied to
+        :meth:`capture_cuda_graph`; validating them on every call would add the
+        CUDA-to-host synchronization this runner is intended to remove.
+        """
+        for label, value, static in (
+            ('audio_signal', audio_signal, self.static_audio),
+            ('length', length, self.static_length),
+        ):
+            if value.shape != static.shape or value.dtype != static.dtype or value.device != static.device:
+                raise ValueError(
+                    f"CUDA graph {label} must match captured shape/dtype/device "
+                    f"{tuple(static.shape)}/{static.dtype}/{static.device}, got "
+                    f"{tuple(value.shape)}/{value.dtype}/{value.device}."
+                )
+        self.static_audio.copy_(audio_signal)
+        self.static_length.copy_(length)
+        self.graph.replay()
+        return self.output
+
+
+def _autocast_compute_dtype(x: torch.Tensor) -> torch.dtype:
+    """Return the dtype GEMMs will use for ``x`` under the active autocast policy."""
+    if torch.is_autocast_enabled(x.device.type):
+        return torch.get_autocast_dtype(x.device.type)
+    return x.dtype
 
 
 def grouped_ffn_compute(
@@ -132,9 +197,15 @@ def grouped_ffn_compute(
     Returns:
         ``(E, T, d_model)`` stacked expert outputs.
     """
-    # Match weight dtype to x (handles AMP) without upcasting x.
-    w1, b1 = w1.to(x.dtype), b1.to(x.dtype)
-    w2, b2 = w2.to(x.dtype), b2.to(x.dtype)
+    # LayerNorm commonly leaves ``x`` in fp32 under autocast even though the GEMMs
+    # execute in bf16/fp16. Cast all operands explicitly to that compute dtype.
+    # This is especially important for eval-time packed weights: they are ordinary
+    # cached tensors (not Parameters), so autocast would otherwise re-cast the full
+    # multi-GB packed bank on every forward.
+    compute_dtype = _autocast_compute_dtype(x)
+    x = x.to(compute_dtype)
+    w1, b1 = w1.to(compute_dtype), b1.to(compute_dtype)
+    w2, b2 = w2.to(compute_dtype), b2.to(compute_dtype)
 
     if backend == 'baddbmm':
         hidden = torch.baddbmm(b1, x, w1)  # (E, T, d_hidden)
@@ -465,7 +536,11 @@ class PEETransformerEncoder(nn.Module):
         # Stale after a weight change: call clear_packed_weights() (done automatically
         # on train()/load_state_dict()) to rebuild.
         self._use_packed_grouped: bool = True
-        self._packed_cache: Dict[Tuple[int, Tuple[str, ...], torch.dtype], Tuple[torch.Tensor, ...]] = {}
+        self._packed_cache: Dict[Tuple[object, ...], Tuple[torch.Tensor, ...]] = {}
+        # Runtime-dtype RoPE buffers keyed by the source buffer identity. The
+        # Transformer encoders store cos/sin in model dtype (usually fp32), while
+        # q/k run in bf16 under autocast; caching avoids four casts per expert/layer.
+        self._rope_cache: Dict[Tuple[object, ...], Tuple[torch.Tensor, torch.Tensor]] = {}
 
         # SDPA fast-path toggle (README §4.2). When True (default) the packed /
         # serial-SDPA attention paths (1) drop the additive mask for unpadded,
@@ -479,12 +554,24 @@ class PEETransformerEncoder(nn.Module):
         # Packed weights are an eval-time optimization; invalidate when (re-)entering
         # training so we never read stale, pre-update weights.
         self._packed_cache.clear()
+        self._rope_cache.clear()
         return super().train(mode)
 
-    def clear_packed_weights(self) -> None:
-        """Drop the cached pre-packed grouped-FFN weights. Call after mutating expert
-        parameters (e.g. ``load_state_dict``) so :meth:`forward_grouped` repacks."""
+    def _apply(self, fn, recurse: bool = True):
+        # These caches are plain tensors rather than registered buffers, so Module.to()
+        # cannot migrate them safely. Rebuild lazily after any device/dtype transform.
         self._packed_cache.clear()
+        self._rope_cache.clear()
+        return super()._apply(fn, recurse=recurse)
+
+    def clear_packed_weights(self) -> None:
+        """Drop eval-time grouped-FFN and RoPE caches.
+
+        Call after mutating expert parameters outside ``load_state_dict`` so the
+        next grouped/packed forward rebuilds its runtime-dtype tensors.
+        """
+        self._packed_cache.clear()
+        self._rope_cache.clear()
 
     @property
     def expert_d_models(self) -> Dict[str, int]:
@@ -558,7 +645,14 @@ class PEETransformerEncoder(nn.Module):
     # :meth:`verify_grouped_equivalence` (see README §4.1 for why it is ULP-level,
     # not bit-exact) -- run it in eval mode (dropout off).
 
-    def _expert_pre(self, expert: nn.Module, audio_signal, length, bypass_pre_encode: bool):
+    def _expert_pre(
+        self,
+        expert: nn.Module,
+        audio_signal,
+        length,
+        bypass_pre_encode: bool,
+        build_block_mask: bool = True,
+    ):
         """Run an expert's pre-layer stack (mirrors ``forward`` + pre-loop of
         ``forward_internal``); returns ``(x, layer_pos_emb, block_mask, length)``."""
         if not bypass_pre_encode and audio_signal.shape[-2] != expert._feat_in:
@@ -608,14 +702,131 @@ class PEETransformerEncoder(nn.Module):
             pos_emb = None
         x = expert.embed_norm(x)
 
-        B, T, _ = x.shape
-        if expert.attn_mode == "causal":
-            mask_mod = and_masks(_causal_mask_mod(), _padding_mask_mod(length))
-        else:
-            mask_mod = _padding_mask_mod(length)
-        block_mask = create_block_mask(mask_mod, B=B, H=1, Q_LEN=T, KV_LEN=T, device=x.device)
+        block_mask = None
+        if build_block_mask:
+            B, T, _ = x.shape
+            if expert.attn_mode == "causal":
+                mask_mod = and_masks(_causal_mask_mod(), _padding_mask_mod(length))
+            else:
+                mask_mod = _padding_mask_mod(length)
+            block_mask = create_block_mask(mask_mod, B=B, H=1, Q_LEN=T, KV_LEN=T, device=x.device)
         layer_pos_emb = pos_emb if expert.self_attention_model == "rel_pos" else None
         return x, layer_pos_emb, block_mask, length
+
+    def _experts_pre(
+        self,
+        encs: Dict[str, nn.Module],
+        audio_signal: torch.Tensor,
+        length: Optional[torch.Tensor],
+        bypass_pre_encode: bool,
+        build_block_mask: bool,
+    ) -> Dict[str, Tuple[torch.Tensor, Optional[torch.Tensor], object, torch.Tensor]]:
+        """Prepare every expert, batching compatible ``FeatureStacking`` projections.
+
+        All PEE-v2 experts consume the same 128-bin features with the same stacking
+        factor. Their learned projections have a common input width but heterogeneous
+        output widths (2048/1024/2048). In eval, this method stacks/pads their weights
+        once and evaluates one ``bmm`` over an expanded view of the common stacked
+        features. The wider padded output intentionally uses more workspace to turn
+        three small projection launches into one.
+
+        Unsupported/training/bypass cases retain the original per-expert path.
+        FlexAttention masks are also shared by experts with the same attention mode;
+        SDPA callers request no block mask.
+        """
+        names = list(encs)
+        feature_stackers = [encs[name].pre_encode for name in names]
+        can_batch = (
+            not self.training
+            and not bypass_pre_encode
+            and feature_stackers
+            and all(isinstance(pre, FeatureStacking) for pre in feature_stackers)
+            and len({pre.subsampling_factor for pre in feature_stackers}) == 1
+            and len({pre.proj.in_features for pre in feature_stackers}) == 1
+            and len({encs[name]._feat_in for name in names}) == 1
+        )
+        if not can_batch:
+            return {
+                name: self._expert_pre(
+                    encs[name], audio_signal, length, bypass_pre_encode, build_block_mask=build_block_mask
+                )
+                for name in names
+            }
+
+        feat_in = encs[names[0]]._feat_in
+        if audio_signal.shape[-2] != feat_in:
+            raise ValueError(
+                f"Experts expect feat_in={feat_in} on dim -2, got {audio_signal.shape[-2]}."
+            )
+        for expert in encs.values():
+            expert.update_max_seq_length(seq_length=audio_signal.size(2), device=audio_signal.device)
+
+        if length is None:
+            length = audio_signal.new_full(
+                (audio_signal.size(0),), audio_signal.size(-1), dtype=torch.int64,
+                device=audio_signal.device,
+            )
+        else:
+            length = length.to(torch.int64)
+
+        factor = feature_stackers[0].subsampling_factor
+        stacked = audio_signal.transpose(1, 2)
+        B, T, C = stacked.shape
+        pad_size = (factor - (T % factor)) % factor
+        if pad_size:
+            stacked = F.pad(stacked, (0, 0, 0, pad_size))
+        T_out = (T + pad_size) // factor
+        stacked = stacked.reshape(B * T_out, C * factor)
+        out_length = feature_stackers[0].compute_num_out_frames(length)
+
+        target_d = max(pre.proj.out_features for pre in feature_stackers)
+        compute_dtype = _autocast_compute_dtype(stacked)
+        key = ('pre_encode', tuple(names), target_d, compute_dtype)
+        packed = self._packed_cache.get(key)
+        if packed is None:
+            with torch.no_grad():
+                weights = []
+                for pre in feature_stackers:
+                    weight = pre.proj.weight.t()
+                    weights.append(F.pad(weight, (0, target_d - weight.shape[1])))
+                packed = (torch.stack(weights).to(compute_dtype).contiguous(),)
+            self._packed_cache[key] = packed
+        weights = packed[0]
+        shared_input = stacked.to(compute_dtype).unsqueeze(0).expand(len(names), -1, -1)
+        projected = torch.bmm(shared_input, weights)
+
+        mask_cache = {}
+        result = {}
+        for slot, name in enumerate(names):
+            expert = encs[name]
+            x = projected[slot, :, :expert.d_model].reshape(B, T_out, expert.d_model)
+            if expert.self_attention_model == "rope":
+                if expert.xscale:
+                    x = x * expert.xscale
+                x = expert.dropout_pre_encoder(x)
+                pos_emb = None
+            elif expert.pos_enc is not None:
+                x, pos_emb = expert.pos_enc(x=x)
+            else:
+                pos_emb = None
+            x = expert.embed_norm(x)
+
+            block_mask = None
+            if build_block_mask:
+                mask_key = expert.attn_mode
+                block_mask = mask_cache.get(mask_key)
+                if block_mask is None:
+                    if expert.attn_mode == "causal":
+                        mask_mod = and_masks(_causal_mask_mod(), _padding_mask_mod(out_length))
+                    else:
+                        mask_mod = _padding_mask_mod(out_length)
+                    block_mask = create_block_mask(
+                        mask_mod, B=B, H=1, Q_LEN=T_out, KV_LEN=T_out, device=x.device
+                    )
+                    mask_cache[mask_key] = block_mask
+            layer_pos_emb = pos_emb if expert.self_attention_model == "rel_pos" else None
+            result[name] = (x, layer_pos_emb, block_mask, out_length)
+        return result
 
     def _expert_post(self, expert: nn.Module, x, length):
         """Run an expert's post-layer stack (mirrors post-loop of ``forward_internal``)."""
@@ -672,7 +883,8 @@ class PEETransformerEncoder(nn.Module):
             hs.append(h.reshape(B * T, d))
         H = torch.stack(hs, dim=0)  # (E, B*T, d)
 
-        ffns, (w1, b1, w2, b2) = self._grouped_weights(encs, layer_idx, names, H.dtype)
+        compute_dtype = _autocast_compute_dtype(H)
+        ffns, (w1, b1, w2, b2) = self._grouped_weights(encs, layer_idx, names, compute_dtype)
         drop_rate = ffns[0].net[2].p
 
         out = grouped_ffn_compute(
@@ -810,7 +1022,8 @@ class PEETransformerEncoder(nn.Module):
                 slot += n_units
 
             H = torch.stack(rows, dim=0)  # (E_total, N, target_d)
-            w1, b1, w2, b2 = self._unified_weights(group, target_d, d_hidden, layer_idx, H.dtype)
+            compute_dtype = _autocast_compute_dtype(H)
+            w1, b1, w2, b2 = self._unified_weights(group, target_d, d_hidden, layer_idx, compute_dtype)
             drop_rate = group[0]['units'][0].net[2].p
             out = grouped_ffn_compute(
                 H, w1, b1, w2, b2, drop_rate=drop_rate, training=self.training, backend=backend
@@ -902,7 +1115,8 @@ class PEETransformerEncoder(nn.Module):
         buf = x_flat.new_zeros(ne, capacity, d)
         buf[s_expert, within] = x_flat.index_select(0, s_token)
 
-        w1, b1, w2, b2 = self._moe_weights(n, moe, layer_idx, buf.dtype)
+        compute_dtype = _autocast_compute_dtype(buf)
+        w1, b1, w2, b2 = self._moe_weights(n, moe, layer_idx, compute_dtype)
         out = grouped_ffn_compute(
             buf, w1, b1, w2, b2, drop_rate=moe.experts[0].net[2].p,
             training=self.training, backend=backend,
@@ -952,8 +1166,11 @@ class PEETransformerEncoder(nn.Module):
         n_layers = n_layers_set.pop()
 
         state: Dict[str, dict] = {}
+        prepared = self._experts_pre(
+            encs, audio_signal, length, bypass_pre_encode, build_block_mask=True
+        )
         for name, e in encs.items():
-            x, pos_emb, block_mask, ln = self._expert_pre(e, audio_signal, length, bypass_pre_encode)
+            x, pos_emb, block_mask, ln = prepared[name]
             state[name] = {'x': x, 'pos_emb': pos_emb, 'block_mask': block_mask, 'length': ln}
 
         for i in range(n_layers):
@@ -1017,6 +1234,33 @@ class PEETransformerEncoder(nn.Module):
             base = causal_add if base is None else base + causal_add
         return base
 
+    def _apply_rope_cached(self, rope, q: torch.Tensor, k: torch.Tensor):
+        """Apply RoPE using cos/sin buffers cached in the q/k runtime dtype."""
+        cos = rope.cos
+        sin = rope.sin
+        key = (
+            id(rope),
+            cos.data_ptr(),
+            sin.data_ptr(),
+            cos.device,
+            cos.dtype,
+            q.dtype,
+        )
+        runtime = self._rope_cache.get(key)
+        if runtime is None:
+            runtime = (cos.to(q.dtype), sin.to(q.dtype))
+            self._rope_cache[key] = runtime
+        cos, sin = runtime
+
+        t_q = q.size(2)
+        t_k = k.size(2)
+        cache_len = t_k - t_q
+        cos_k = cos[:t_k].view(1, 1, t_k, rope.d_k_rot)
+        sin_k = sin[:t_k].view(1, 1, t_k, rope.d_k_rot)
+        cos_q = cos[cache_len:t_k].view(1, 1, t_q, rope.d_k_rot)
+        sin_q = sin[cache_len:t_k].view(1, 1, t_q, rope.d_k_rot)
+        return rope._apply_rotary(q, cos_q, sin_q), rope._apply_rotary(k, cos_k, sin_k)
+
     def _expert_qkv(self, attn, x: torch.Tensor, pos_emb):
         """Project ``x`` to per-head q/k/v for one expert and return an optional
         additive score bias, reproducing the flex-attention math in
@@ -1034,7 +1278,7 @@ class PEETransformerEncoder(nn.Module):
             q = attn.q_norm(q).to(v.dtype)
             k = attn.k_norm(k).to(v.dtype)
         if attn._uses_rope:
-            q, k = attn.rope(q, k)
+            q, k = self._apply_rope_cached(attn.rope, q, k)
             return q, k, v, None
         if attn._uses_rel_pos:
             # Mirror MultiHeadAttention._build_rel_pos_score_mod, but return the bias
@@ -1109,7 +1353,7 @@ class PEETransformerEncoder(nn.Module):
 
     def forward_packed(
         self, audio_signal, length, bypass_pre_encode: bool = False, backend: str = 'baddbmm',
-        moe_mode: str = 'dense',
+        moe_mode: str = 'dense', assume_no_padding: bool = False,
     ) -> Dict[str, object]:
         """Lockstep multi-expert forward using batched-SDPA packed-head attention
         and grouped FFN -- the launch-count-reducing path (BGG-MEI).
@@ -1123,6 +1367,10 @@ class PEETransformerEncoder(nn.Module):
         tolerance
         (README §4.1); attention switches from flex to SDPA, so it is allclose, not
         bit-exact, vs the experts' native flex path.
+
+        ``assume_no_padding=True`` skips the CUDA-to-host length check and is
+        reserved for a validated fixed-shape CUDA graph; callers must guarantee
+        that every sequence fills the encoded time dimension.
         """
         encs = {name: self.experts[name] for name in self.expert_names}
         for name, e in encs.items():
@@ -1134,13 +1382,16 @@ class PEETransformerEncoder(nn.Module):
         n_layers = n_layers_set.pop()
 
         state: Dict[str, dict] = {}
+        prepared = self._experts_pre(
+            encs, audio_signal, length, bypass_pre_encode, build_block_mask=False
+        )
         for name, e in encs.items():
-            x, pos_emb, block_mask, ln = self._expert_pre(e, audio_signal, length, bypass_pre_encode)
+            x, pos_emb, block_mask, ln = prepared[name]
             # Cache the no-padding flag once (length is layer-invariant) so the
             # per-layer attention loop never re-syncs to decide whether the SDPA
             # mask can be dropped (FlashAttention-2 path).
             state[name] = {'x': x, 'pos_emb': pos_emb, 'block_mask': block_mask, 'length': ln,
-                           'no_pad': self._no_padding(ln, x.shape[1])}
+                           'no_pad': assume_no_padding or self._no_padding(ln, x.shape[1])}
 
         for i in range(n_layers):
             self._packed_attention_step(encs, state, i)
@@ -1149,6 +1400,113 @@ class PEETransformerEncoder(nn.Module):
             self._unified_ffn_step(encs, state, i, backend, moe_mode=moe_mode)
 
         return {name: self._expert_post(encs[name], state[name]['x'], state[name]['length']) for name in self.expert_names}
+
+    def capture_cuda_graph(
+        self,
+        audio_signal: torch.Tensor,
+        length: torch.Tensor,
+        route: str = 'packed',
+        backend: str = 'baddbmm',
+        moe_mode: str = 'dense',
+        autocast_dtype: Optional[torch.dtype] = torch.bfloat16,
+        warmup: int = 3,
+    ) -> PEECUDAGraphRunner:
+        """Capture a fixed-shape dense PEE route for low-overhead replay.
+
+        CUDA graphs keep static inputs, outputs, and a private allocation pool
+        alive. They are therefore suited to repeated streaming/fixed-window
+        inference where extra resident memory is preferable to hundreds of
+        Python/kernel-launch gaps per forward.
+
+        Only the production fused routes (``'packed'`` and ``'grouped'``) with
+        ``moe_mode='dense'`` are accepted. Sparse top-k dispatch has data-dependent
+        capacity and is not graph-static. The capture also requires a fully
+        unpadded CUDA input and freezes shape, dtype, device, and length values.
+        Do not mutate/load weights or change train/eval mode after capture.
+        """
+        if self.training:
+            raise RuntimeError("CUDA graph capture requires PEETransformerEncoder.eval().")
+        if route not in ('packed', 'grouped'):
+            raise ValueError(f"route must be 'packed' or 'grouped', got {route!r}.")
+        if moe_mode != 'dense':
+            raise ValueError("CUDA graph capture currently requires moe_mode='dense'.")
+        if not audio_signal.is_cuda or not length.is_cuda:
+            raise ValueError("CUDA graph capture requires CUDA audio_signal and length tensors.")
+        if length.ndim != 1 or length.shape[0] != audio_signal.shape[0]:
+            raise ValueError("length must have shape (batch,) matching audio_signal.")
+        if not bool(torch.all(length == audio_signal.shape[-1])):
+            raise ValueError(
+                "CUDA graph capture requires a fully unpadded fixed-length batch "
+                "(every length must equal audio_signal.shape[-1])."
+            )
+        if warmup < 1:
+            raise ValueError(f"warmup must be >= 1, got {warmup}.")
+
+        static_audio = torch.empty_like(audio_signal)
+        static_length = torch.empty_like(length)
+        static_audio.copy_(audio_signal)
+        static_length.copy_(length)
+        static_bytes = (
+            static_audio.numel() * static_audio.element_size()
+            + static_length.numel() * static_length.element_size()
+        )
+
+        if route == 'packed':
+            def _run():
+                return self.forward_packed(
+                    static_audio, static_length, backend=backend, moe_mode=moe_mode,
+                    assume_no_padding=True,
+                )
+        else:
+            def _run():
+                return self.forward_grouped(
+                    static_audio, static_length, backend=backend, moe_mode=moe_mode
+                )
+
+        def _amp_context():
+            return (
+                torch.autocast(device_type='cuda', dtype=autocast_dtype)
+                if autocast_dtype is not None and autocast_dtype != torch.float32
+                else contextlib.nullcontext()
+            )
+
+        capture_stream = torch.cuda.Stream(device=audio_signal.device)
+        capture_stream.wait_stream(torch.cuda.current_stream(audio_signal.device))
+        with torch.cuda.stream(capture_stream), torch.no_grad(), _amp_context():
+            for _ in range(warmup):
+                _run()
+        torch.cuda.current_stream(audio_signal.device).wait_stream(capture_stream)
+        torch.cuda.synchronize(audio_signal.device)
+
+        # Release ordinary caching-allocator slack so the free-VRAM delta below
+        # isolates graph-private retained blocks instead of pre-existing cache.
+        torch.cuda.empty_cache()
+        free_before, _ = torch.cuda.mem_get_info(audio_signal.device)
+        before = torch.cuda.memory_allocated(audio_signal.device)
+        torch.cuda.reset_peak_memory_stats(audio_signal.device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), _amp_context(), torch.cuda.graph(graph):
+            output = _run()
+        torch.cuda.synchronize(audio_signal.device)
+        torch.cuda.empty_cache()
+        free_after, _ = torch.cuda.mem_get_info(audio_signal.device)
+        persistent_bytes = max(
+            max(0, torch.cuda.memory_allocated(audio_signal.device) - before),
+            max(0, free_before - free_after),
+        ) + static_bytes
+        capture_peak_bytes = max(
+            0, torch.cuda.max_memory_allocated(audio_signal.device) - before
+        ) + static_bytes
+        return PEECUDAGraphRunner(
+            graph=graph,
+            static_audio=static_audio,
+            static_length=static_length,
+            output=output,
+            route=route,
+            persistent_bytes=persistent_bytes,
+            capture_peak_bytes=capture_peak_bytes,
+            owner=self,
+        )
 
     def _sdpa_attention_single(self, e, layer_idx: int, s: dict) -> None:
         """Run a single expert's attention via SDPA (same FlashAttention kernel as
@@ -1219,8 +1577,11 @@ class PEETransformerEncoder(nn.Module):
         # native .forward() is that attention runs through SDPA instead of flex
         # (we cannot edit the base encoder to switch its kernel).
         out: Dict[str, object] = {}
+        prepared = self._experts_pre(
+            encs, audio_signal, length, bypass_pre_encode, build_block_mask=False
+        )
         for name, e in encs.items():
-            x, pos_emb, block_mask, ln = self._expert_pre(e, audio_signal, length, bypass_pre_encode)
+            x, pos_emb, block_mask, ln = prepared[name]
             s = {'x': x, 'pos_emb': pos_emb, 'block_mask': block_mask, 'length': ln,
                  'no_pad': self._no_padding(ln, x.shape[1])}
             for i in range(e.n_layers):
@@ -1281,6 +1642,7 @@ class PEETransformerEncoder(nn.Module):
 
         # Loading new weights invalidates any pre-packed grouped-FFN cache.
         self._packed_cache.clear()
+        self._rope_cache.clear()
 
         for key in keys_to_remove:
             del state_dict[key]
