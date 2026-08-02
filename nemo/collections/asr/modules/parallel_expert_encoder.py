@@ -317,11 +317,12 @@ class ParallelExpertEncoder(nn.Module):
         asr_normalize_type (str, optional): Normalization replayed on the ASR branch. Defaults to ``per_feature``.
         freeze_diar (bool): Freeze the Sortformer parameters. Defaults to ``True``.
         freeze_asr (bool): Freeze the wrapped ASR ConformerEncoder. Defaults to ``False``.
-        online_inference_length (int): Online-inference window in encoder output frames
-            (default ``500`` ~= 40s); ``<= 0`` disables it.
-        chunk_left_context (int): Left context (output frames) per online window, shared by
+        online_inference_length (int): Generation-time window in encoder output frames
+            (default ``500`` ~= 40s); ``<= 0`` disables windowing. Unused by training and
+            validation, which always encode in a single pass.
+        chunk_left_context (int): Left context (output frames) per window, shared by
             both branches. Default ``50``.
-        chunk_right_context (int): Right context (output frames) per online window, shared by
+        chunk_right_context (int): Right context (output frames) per window, shared by
             both branches. Default ``50``.
         diar_fifo_len (int): Sortformer streaming ``fifo_len``. Default ``40``.
         diar_spkcache_update_period (int): Sortformer streaming ``spkcache_update_period``. Default ``300``.
@@ -336,10 +337,10 @@ class ParallelExpertEncoder(nn.Module):
             maximum sequence length on the default process group. Defaults to ``False``;
             leave it off unless every rank is guaranteed to run both encoders on every
             step, since the reduction is emitted from inside a data-dependent branch.
-        always_run_diarization (bool): Run the diarization frontend on every offline
+        always_run_diarization (bool): Run the diarization frontend on every single-pass
             forward instead of only when some row requests predicted diarization.
             Defaults to ``True`` so the collective schedule cannot depend on batch
-            content. Set to ``False`` only for single-process inference.
+            content. Set to ``False`` only in a single process.
     """
 
     def __init__(
@@ -573,11 +574,11 @@ class ParallelExpertEncoder(nn.Module):
     def online_inference(self, enabled: bool = True):
         """Route :meth:`forward` through the windowed long-form path inside this block.
 
-        Off by default, and deliberately not inferred from ``self.training``: validation
-        also runs in eval mode, and it must stay on the single-pass path. The windowed loop
-        calls ``asr_encoder`` once per window, so the number of collectives it emits tracks
-        each rank's own audio length -- fine for a generation call, a deadlock inside a
-        distributed train or validation step. Only generation should open this.
+        Generation always opens this; training and validation never do. Off by default, and
+        deliberately not inferred from ``self.training``, because validation also runs in
+        eval mode and must stay on the single-pass path. The windowed loop calls
+        ``asr_encoder`` once per window, so the number of collectives it emits tracks each
+        rank's own audio length -- fine in one process, a deadlock in a distributed step.
         """
         previous = self.online_inference_enabled
         self.online_inference_enabled = bool(enabled)
@@ -593,19 +594,24 @@ class ParallelExpertEncoder(nn.Module):
         length,
         spk_targets=None,
     ):
-        """Encode ``audio_signal``, optionally fusing diarization.
+        """Encode ``audio_signal``, fusing speaker activity into the ASR states.
 
-        Uses :meth:`_forward` (offline, single pass) unless a caller has opened
-        :meth:`online_inference`, which selects the windowed long-form :meth:`_forward_online`.
-        Training and validation therefore never chunk; generation does.
+        Fusion is per row and the same in every mode: a row with RTTM uses its
+        ``spk_targets``, a row of ``-1`` (no RTTM) uses the Sortformer prediction.
+
+        Only the encoding differs:
+
+        1. Training and validation always take :meth:`_forward`, a single pass over the
+           whole utterance, so every rank issues the same collectives.
+        2. Generation opens :meth:`online_inference` and takes :meth:`_forward_online`,
+           which walks long-form audio window by window.
 
         Args:
             audio_signal (Tensor): Un-normalised mel features. Shape ``(B, feat_in, n_frames)``.
             length (Tensor): Per-sample feature lengths. Shape ``(B,)``.
-            spk_targets (Tensor, optional): ``(B, T, n_spk)`` speaker-activity override (RTTM/oracle);
-                when ``None`` the wrapped Sortformer is run. A row filled with the
-                reserved value ``-1`` also requests Sortformer output for that row,
-                allowing RTTM and non-RTTM examples in one training batch.
+            spk_targets (Tensor, optional): ``(B, T, n_spk)`` RTTM/oracle speaker activity.
+                ``None`` predicts for the whole batch; a row of ``-1`` predicts for that row,
+                so RTTM and non-RTTM examples can share a batch.
 
         Returns:
             Tuple ``(outputs, encoded_lengths)`` with ``outputs`` of shape ``(B, D, T_asr)``.
@@ -695,7 +701,11 @@ class ParallelExpertEncoder(nn.Module):
         return outputs, asr_encoded_len
 
     def _forward_online(self, audio_signal, length, spk_targets=None):
-        """Long-form online inference: a lock-step loop over fixed windows.
+        """Long-form generation path: a lock-step loop over fixed windows.
+
+        Reached only from :meth:`online_inference`, which only generation opens -- the
+        window count depends on this rank's audio, so the loop must never run in a
+        distributed training or validation step.
 
         Walks the recording in non-overlapping windows of ``online_inference_length``
         output frames. Both experts run on the same context-extended slice

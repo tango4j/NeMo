@@ -196,9 +196,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def _uses_ext_spk_tgts(self) -> bool:
         """Whether the mounted perception encoder is a ``ParallelExpertEncoder``.
 
-        The PE encoder performs its own context-preserving long-form online inference
-        (``forward`` -> ``_forward_online``), so audio must be fed to it as a
-        single long sequence when oracle speaker targets are absent.
+        During generation the PE encoder does its own context-preserving long-form
+        windowing, so audio must reach it as one long sequence rather than pre-chunked.
         """
         from nemo.collections.asr.modules.parallel_expert_encoder import ParallelExpertEncoder
 
@@ -208,9 +207,10 @@ class SALMAutomodel(LightningModule, HFHubMixin):
     def _perception_online_inference(self):
         """Let the PE encoder use its windowed long-form path for the enclosed block.
 
-        Only :meth:`generate` opens this. Training and validation go through
-        ``prepare_inputs`` and must stay on the single-pass path, because the windowed loop
-        emits a number of collectives that tracks each rank's own audio length.
+        :meth:`generate` is the only caller, and it always opens this. Training and
+        validation reach the encoder through :meth:`prepare_inputs` and never do, because
+        the windowed loop emits a number of collectives that tracks each rank's own audio
+        length, which would deadlock a distributed step.
         """
         if not self._uses_ext_spk_tgts():
             yield
@@ -234,8 +234,8 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             warnings.warn(
                 "The ParallelExpertEncoder inference path is currently experimental and does not support "
                 f"{', '.join(unsupported)}. It will be made to work with these options later."
-                " This warning only applies when `spk_targets` are absent; training with ground-truth "
-                "`spk_targets` still uses the regular encoder chunking path.",
+                " This applies to generation, which always uses the encoder's own long-form windowing;"
+                " training and validation use the regular single-pass encoder path.",
                 stacklevel=2,
             )
 
@@ -243,20 +243,20 @@ class SALMAutomodel(LightningModule, HFHubMixin):
         """
         Performs additional processing on the mini-batch collected from dataloader.
         Notably:
-        * Convert source audio to speech representations. With a
-          ``ParallelExpertEncoder`` the full audio is encoded in a single
-          perception forward (long-form streaming is handled inside the encoder).
-          With an ordinary encoder, long source audio is optionally time-chunked
-          and recombined via ``parts.encoder_chunking``.
+        * Convert source audio to speech representations. Long source audio is
+          optionally time-chunked and recombined via ``parts.encoder_chunking``.
         * Convert target audio to target audio tokens.
         * Convert target text to embeddings.
         * Combine the input audio and target text embeddings.
         * Take care of any necessary slicing to align the shapes of source audio,
             target audio, and target token ids.
 
-        When ``batch["spk_targets"]`` is present, those RTTM-derived speaker
-        targets are injected into a ``ParallelExpertEncoder``. Otherwise, the
-        encoder runs its embedded Sortformer to predict diarization.
+        Shared by ``training_step`` and ``validation_step``, so a ``ParallelExpertEncoder``
+        always encodes in a single pass here -- never through its long-form windowing,
+        whose collective count would vary per rank and deadlock the step.
+
+        Rows of ``batch["spk_targets"]`` carrying RTTM are injected into the encoder;
+        rows of ``-1``, and a missing key, fall back to its embedded Sortformer.
         """
         from nemo.collections.speechlm2.parts.cp_helpers import (
             encode_audio_with_cp_distribution,
@@ -682,12 +682,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             audio_lens: Optional. Length of each audio example.
             spk_targets: Optional ``(B, T, n_spk)`` speaker-activity tensor (e.g. oracle / RTTM-derived
                 diarization) injected into the perception encoder. Only effective when the mounted
-                encoder is a ``ParallelExpertEncoder`` (i.e. ``model.pe_encoder_path`` was set); it
-                overrides the encoder's embedded Sortformer prediction for this call. When ``None``
-                (default), the encoder runs its embedded Sortformer as usual.
+                encoder is a ``ParallelExpertEncoder`` (i.e. ``model.pe_encoder_path`` was set); rows
+                supplied here override its Sortformer prediction. When ``None`` (default), or for a
+                row of ``-1``, the encoder predicts speaker activity itself.
             spk_target_lengths: Optional ``(B,)`` valid frame counts for ``spk_targets``.
-                Required for exact target slicing when generation uses encoder chunking on a
-                padded, mixed-length speaker-target batch.
+                Used for exact target slicing when an ordinary encoder chunks a padded,
+                mixed-length speaker-target batch; a ``ParallelExpertEncoder`` does its own
+                windowing and does not need it.
             generation_config: Optional HuggingFace GenerationConfig object.
             enable_thinking: Optional prompt-formatter hint forwarded to ``encode_dialog``.
                 Relevant for prompt formats that support thinking/reasoning mode.
@@ -724,12 +725,13 @@ class SALMAutomodel(LightningModule, HFHubMixin):
             tokens_to_embed = tokens.where(tokens != self.audio_locator_tag_id, 0)
             token_embeds = self._embed_tokens(tokens_to_embed)
             with self._perception_online_inference():
-                if self._uses_ext_spk_tgts() and spk_targets is None:
-                    # This is only used for inference when ``spk_targets`` is None.
-                    # PEE needs to produce ``spk_targets`` itself through recursive encoding.
+                if self._uses_ext_spk_tgts():
+                    # The PE encoder walks long-form audio window by window itself, so hand it
+                    # the whole sequence: chunking here would nest a second windowing inside
+                    # every chunk. Rows without RTTM get a streaming Sortformer prediction.
                     self._warn_parallel_expert_encoder_inference_compatibility(cp_size=1)
                     audio_embeds, audio_embed_lens = self.perception(
-                        input_signal=audios, input_signal_length=audio_lens
+                        input_signal=audios, input_signal_length=audio_lens, spk_targets=spk_targets
                     )
                     audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embeds, audio_embed_lens)]
                 else:
