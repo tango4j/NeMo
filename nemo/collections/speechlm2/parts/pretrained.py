@@ -301,13 +301,16 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
     model.perception.encoder = pe_encoder
     logging.info(
         "Mounted ParallelExpertEncoder from %s onto model.perception.encoder "
-        "(d_model=%d, n_spk=%d, freeze_diar=%s, freeze_asr=%s, spk_kernel_scale=%g); "
+        "(d_model=%d, n_spk=%d, frozen: speech=%s speaker=%s sound=%s, "
+        "sound_merge=%s, spk_kernel_scale=%g); "
         "perception preprocessor normalization disabled (was %r).",
         pe_encoder_path,
         int(pe_encoder.d_model),
         int(pe_encoder.n_spk),
-        bool(pe_encoder.freeze_diar),
-        bool(pe_encoder.freeze_asr),
+        bool(pe_encoder.freeze_speech),
+        bool(pe_encoder.freeze_speaker),
+        bool(pe_encoder.freeze_sound),
+        bool(pe_encoder.merge_sound_expert_to_asr),
         float(pe_encoder.spk_kernel_scale),
         prev_normalize,
     )

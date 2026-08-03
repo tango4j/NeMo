@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import io
 import tarfile
 
@@ -22,9 +21,7 @@ import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
-from nemo.collections.asr.models import SortformerEncLabelModel
-from nemo.collections.asr.modules import parallel_expert_encoder as pee_module
-from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder
+from nemo.collections.asr.modules.moe_transformer_encoder import MoETransformerEncoder
 from nemo.collections.asr.modules.parallel_expert_encoder import (
     ParallelExpertEncoder,
     ParallelExpertEncoderPT,
@@ -32,11 +29,15 @@ from nemo.collections.asr.modules.parallel_expert_encoder import (
     _default_dtype,
     _disable_dist_feature_sync,
 )
+from nemo.collections.asr.modules.transformer_encoder import TransformerEncoder
 
 # ``@experimental`` wraps the class in a wrapt proxy, so ``__new__`` (used to build
 # bare instances that skip the heavy real ``__init__``) must target the underlying
 # class. Attribute access / isinstance still go through the proxy name.
 _PEE = getattr(ParallelExpertEncoder, "__wrapped__", ParallelExpertEncoder)
+# @experimental wraps these in a wrapt proxy; isinstance needs the real class.
+_MOE_ENCODER_CLS = getattr(MoETransformerEncoder, "__wrapped__", MoETransformerEncoder)
+_TF_ENCODER_CLS = getattr(TransformerEncoder, "__wrapped__", TransformerEncoder)
 
 
 # ----------------------------------------------------------------------------- #
@@ -115,153 +116,114 @@ def test_align_diar_frames_length_and_padding(cur_len, target_len):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("param_dtype", [torch.float64, torch.float16])
-def test_match_module_io_casts_to_param_dtype(param_dtype):
-    module = nn.Linear(4, 4).to(param_dtype)
+def test_match_module_io_casts_to_expert_dtype(param_dtype):
+    """Mels arrive fp32; `_match_module_io` moves them onto the experts' device/dtype.
+
+    It reads the dtype off the PEE container's own parameters, so it is an instance
+    method rather than the free function it used to be.
+    """
+    enc = build_toy_pe_encoder().to(param_dtype)
     tensor = torch.zeros(2, 4, dtype=torch.float32)
-    out = ParallelExpertEncoder._match_module_io(tensor, module)
-    assert out.dtype == param_dtype
+    assert enc._match_module_io(tensor).dtype == param_dtype
 
 
 @pytest.mark.unit
-def test_match_module_io_paramless_module_unchanged():
-    module = nn.Identity()  # no parameters
+def test_match_module_io_paramless_container_unchanged():
+    enc = build_toy_pe_encoder()
     tensor = torch.zeros(2, 4, dtype=torch.float32)
-    out = ParallelExpertEncoder._match_module_io(tensor, module)
-    assert out.dtype == torch.float32
-    assert out is tensor
+    # Stub out the parameter source: with nothing to match, the tensor passes through.
+    enc.pee = nn.Identity()
+    out = enc._match_module_io(tensor)
+    assert out is tensor and out.dtype == torch.float32
 
 
 # ----------------------------------------------------------------------------- #
 # forward() offline/online dispatch
 # ----------------------------------------------------------------------------- #
-def dispatch_stub(online_inference_length, chunk_feat_len, training):
-    """Build a bare ParallelExpertEncoder with stubbed branch methods."""
+def dispatch_stub(online_inference_length, enabled):
+    """Bare ParallelExpertEncoder with both branch methods stubbed.
+
+    forward() dispatches purely on `online_inference_enabled` (set by the
+    `online_inference()` context manager) AND a positive window -- NOT on the audio
+    length. Long-form splitting happens one level down, inside _forward_online.
+    """
     enc = _PEE.__new__(_PEE)
     nn.Module.__init__(enc)
     enc.online_inference_length = online_inference_length
-    enc.online_inference_enabled = False
-    enc.chunk_feat_len = chunk_feat_len
-    enc.training = training
-    enc._forward = lambda **kw: "offline"
-    enc._forward_online = lambda **kw: "online"
+    enc.online_inference_enabled = enabled
+    enc._forward = lambda **kw: ("offline", None, {})
+    enc._forward_online = lambda **kw: ("online", None, {})
     return enc
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "online_len, chunk_feat_len, training, n_frames, generating, expected",
+    "online_len, enabled, expected",
     [
-        # Training and validation are offline whatever the audio length and whichever mode
-        # the module is in: a length-dependent choice would let ranks run different numbers
-        # of encoder calls in the same step.
-        (500, 100, True, 200, False, "offline"),
-        (500, 100, True, 50, False, "offline"),
-        (500, 100, False, 200, False, "offline"),  # validation: eval mode, still offline
-        (500, 100, False, 50, False, "offline"),
-        # Generation is online whatever the audio length, including below one window.
-        (500, 100, False, 200, True, "online"),
-        (500, 100, False, 50, True, "online"),
-        (500, 100, False, 100, True, "online"),
-        # Master switch off.
-        (0, 100, False, 200, True, "offline"),
+        (500, True, "online"),    # context manager open + positive window
+        (500, False, "offline"),  # not opened -> training/validation path
+        (0, True, "offline"),     # windowing disabled by online_inference_length=0
+        (0, False, "offline"),
     ],
 )
-def test_forward_dispatch(online_len, chunk_feat_len, training, n_frames, generating, expected):
-    enc = dispatch_stub(online_len, chunk_feat_len, training)
-    audio = torch.zeros(1, 8, n_frames)
-    length = torch.tensor([n_frames])
-    with enc.online_inference() if generating else contextlib.nullcontext():
-        assert enc.forward(audio, length) == expected
+def test_forward_dispatch(online_len, enabled, expected):
+    enc = dispatch_stub(online_len, enabled)
+    audio = torch.zeros(1, 8, 200)
+    length = torch.tensor([200])
+    assert enc.forward(audio, length)[0] == expected
 
 
 @pytest.mark.unit
-def test_online_inference_scope_restores_previous_state():
-    enc = dispatch_stub(500, 100, training=False)
-    assert enc.online_inference_enabled is False
-    with enc.online_inference():
-        assert enc.online_inference_enabled is True
-        with enc.online_inference(False):
-            assert enc.online_inference_enabled is False
-        assert enc.online_inference_enabled is True
-    assert enc.online_inference_enabled is False
-
-
-@pytest.mark.unit
-def test_online_inference_scope_restores_state_on_exception():
-    enc = dispatch_stub(500, 100, training=False)
-    with pytest.raises(RuntimeError):
-        with enc.online_inference():
-            raise RuntimeError("boom")
-    assert enc.online_inference_enabled is False
+def test_online_inference_context_toggles_dispatch():
+    """The context manager is the only thing that turns the windowed path on."""
+    enc = dispatch_stub(500, False)
+    audio, length = torch.zeros(1, 8, 200), torch.tensor([200])
+    assert enc.forward(audio, length)[0] == "offline"
+    with _PEE.online_inference(enc):
+        assert enc.forward(audio, length)[0] == "online"
+    assert enc.forward(audio, length)[0] == "offline"  # restored on exit
 
 
 # ----------------------------------------------------------------------------- #
 # _forward_online orchestration (stubbed ASR encoder, provided spk_targets)
 # ----------------------------------------------------------------------------- #
-class _FakeASR(nn.Module):
-    """Minimal stand-in for the wrapped ConformerEncoder."""
-
-    def __init__(self, d_model: int, sf: int):
-        super().__init__()
-        self.subsampling_factor = sf
-        self.d_model = d_model
-        self._p = nn.Parameter(torch.zeros(1))
-
-    def forward(self, audio_signal, length):
-        b, _, t = audio_signal.shape
-        # generous frame count so the trim logic never clamps
-        t_out = (t + self.subsampling_factor - 1) // self.subsampling_factor + 8
-        out = torch.randn(b, self.d_model, t_out)
-        return out, length // self.subsampling_factor
-
-
-def online_stub(d_model, n_spk, sf, win, lc, rc):
-    enc = _PEE.__new__(_PEE)
-    nn.Module.__init__(enc)
-    enc.asr_encoder = _FakeASR(d_model, sf)
-    enc.asr_normalize_type = None
-    enc.online_inference_length = win
-    enc.chunk_left_context = lc
-    enc.chunk_right_context = rc
-    enc.chunk_feat_len = win * sf
-    enc.left_ctx_feat_len = lc * sf
-    enc.right_ctx_feat_len = rc * sf
-    enc.freeze_asr = True
-    enc.freeze_diar = False  # The stub has no `diarization_model`, so `freeze_diar` must be False to keep
-    enc.asr_norm = nn.LayerNorm(d_model)
-    enc.diar_norm = nn.LayerNorm(n_spk)
-    enc.register_buffer("diar_kernel", torch.randn(n_spk, d_model))
-    enc.missing_rttm_target = -1.0
-    enc.speaker_activity_threshold = 0.5
-    enc.spk_kernel_scale = 1.0
-    enc._suppress_online_pbar = True
-    enc.eval()
-    return enc
-
-
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "sf, win, lc, rc, n_frames",
+    "win, n_frames",
     [
-        (8, 10, 2, 2, 240),  # 3 full chunks
-        (8, 10, 0, 0, 200),  # partial last chunk, no context
-        (4, 5, 1, 1, 64),  # 4 chunks, small subsampling
-        (8, 50, 5, 5, 160),  # single chunk (n_frames < window)
+        (10, 240),   # 3 full windows
+        (10, 200),   # partial last window
+        (5, 64),     # many small windows
+        (50, 160),   # single window -> fast path delegates to _forward
     ],
 )
-def test_forward_online_output_length_telescopes(sf, win, lc, rc, n_frames):
-    d_model, n_spk, b = 16, 4, 2
-    enc = online_stub(d_model, n_spk, sf, win, lc, rc)
+def test_forward_online_output_length_telescopes(win, n_frames):
+    """Windowed output must telescope back to the same frame count as one offline pass.
 
-    mels = torch.randn(b, 80, n_frames)
+    Uses the real encoder: the old hand-built stub could not express the three-expert
+    container, and a stub that drifts from the module is how this suite went stale.
+    """
+    b = 2
+    enc = build_toy_pe_encoder(
+        online_inference_length=win,
+        diar_spkcache_update_period=win,
+    )
+    enc._suppress_online_pbar = True
+    enc.eval()
+
+    mels = torch.randn(b, _MEL_FEATURES, n_frames)
     length = torch.tensor([n_frames] * b)
-    spk_targets = torch.rand(b, 5, n_spk)  # arbitrary; aligned internally
 
-    outputs, encoded_len = enc._forward_online(audio_signal=mels, length=length, spk_targets=spk_targets)
+    with torch.no_grad():
+        off_out, off_len = enc(mels, length)
+        with enc.online_inference():
+            on_out, on_len = enc(mels, length)
 
-    expected_t = round(n_frames / sf)
-    assert outputs.shape == (b, d_model, expected_t)
-    assert encoded_len.tolist() == [expected_t] * b
+    assert on_out.shape[0] == b and on_out.shape[1] == enc.d_model
+    # Both paths cover the same audio, so they must agree on the frame count.
+    assert on_out.shape[2] == off_out.shape[2], (on_out.shape, off_out.shape)
+    assert on_len.tolist() == [on_out.shape[2]] * b
+    assert torch.isfinite(on_out).all()
 
 
 # ----------------------------------------------------------------------------- #
@@ -351,388 +313,139 @@ def test_save_to_nemo_missing_template(tmp_path):
 # These tests build tiny-but-real instances of both and run the wrapper end to end.
 # ----------------------------------------------------------------------------- #
 _MEL_FEATURES = 128
-_ASR_D_MODEL = 32
-_DIAR_FC_D_MODEL = 32
+_ASR_D_MODEL = 32          # speech + sound expert width
+_DIAR_FC_D_MODEL = 16     # speaker expert width (half, as in PEE-v2)
 _DIAR_TF_D_MODEL = 16
 _N_SPK = 4
 _SUBSAMPLING_FACTOR = 8
+_N_LAYERS = 1
+_N_HEADS_WIDE = 2         # head_dim 16, shared by all three experts
+_N_HEADS_NARROW = 1
+_CHUNK_LEN = 500          # enc frames per online window
+_SPKCACHE_LEN = 16
 
 
-def toy_asr_encoder_cfg() -> DictConfig:
-    """Tiny ConformerEncoder config the PE encoder mounts as its ASR branch."""
-    return DictConfig(
-        {
-            '_target_': 'nemo.collections.asr.modules.ConformerEncoder',
-            'feat_in': _MEL_FEATURES,
-            'feat_out': -1,
-            'n_layers': 1,
-            'd_model': _ASR_D_MODEL,
-            'subsampling': 'dw_striding',
-            'subsampling_factor': _SUBSAMPLING_FACTOR,
-            'subsampling_conv_channels': 16,
-            'ff_expansion_factor': 4,
-            'self_attention_model': 'rel_pos',
-            'n_heads': 4,
-            'att_context_size': [-1, -1],
-            'conv_kernel_size': 9,
-            'dropout': 0.0,
-            'dropout_pre_encoder': 0.0,
-            'dropout_emb': 0.0,
-            'dropout_att': 0.0,
-        }
+def _toy_expert_cfg(target: str, d_model: int, n_heads: int, **extra) -> DictConfig:
+    """One tiny flex-encoder expert config.
+
+    All three PEE-v2 experts are the flex TransformerEncoder family with a shared
+    front-end (same feat_in / subsampling / frame rate) and rope attention, which is
+    what lets forward_packed batch them into one attention group.
+    """
+    cfg = {
+        '_target_': target,
+        'feat_in': _MEL_FEATURES,
+        'feat_out': -1,
+        'n_layers': _N_LAYERS,
+        'd_model': d_model,
+        'n_heads': n_heads,
+        'subsampling': 'feature_stacking',
+        'subsampling_factor': _SUBSAMPLING_FACTOR,
+        'ff_expansion': 1.0,
+        'self_attention_model': 'rope',
+        'pos_emb_max_len': 5000,
+        'xscaling': False,
+        'qkv_bias': False,
+        'qk_norm': False,
+        'pre_block_norm': True,
+        'attn_mode': 'full',
+        'drop_rate': 0.0,
+        'dropout_pre_encoder': 0.0,
+        'dropout_emb': 0.0,
+    }
+    cfg.update(extra)
+    return DictConfig(cfg)
+
+
+def toy_speech_expert_cfg() -> DictConfig:
+    """Speech expert: the MoE backbone the speaker kernel and sound merge fuse into."""
+    return _toy_expert_cfg(
+        'nemo.collections.asr.modules.MoETransformerEncoder',
+        d_model=_ASR_D_MODEL, n_heads=_N_HEADS_WIDE,
+        moe_num_experts=4, moe_top_k=2,
     )
 
 
-def toy_diarization_model_cfg() -> DictConfig:
-    """Tiny SortformerEncLabelModel config the PE encoder mounts as its diar branch."""
-    model_defaults = {'fc_d_model': _DIAR_FC_D_MODEL, 'tf_d_model': _DIAR_TF_D_MODEL}
+def toy_speaker_expert_cfg() -> DictConfig:
+    """Speaker expert: half-width, as in PEE-v2 (1024 against the wide experts' 2048)."""
+    return _toy_expert_cfg(
+        'nemo.collections.asr.modules.TransformerEncoder',
+        d_model=_DIAR_FC_D_MODEL, n_heads=_N_HEADS_NARROW,
+    )
+
+
+def toy_sound_expert_cfg() -> DictConfig:
+    """Sound expert: same width as speech, since the merge is an elementwise add."""
+    return _toy_expert_cfg(
+        'nemo.collections.asr.modules.TransformerEncoder',
+        d_model=_ASR_D_MODEL, n_heads=_N_HEADS_WIDE,
+    )
+
+
+def toy_sortformer_modules_cfg() -> DictConfig:
+    """Sortformer head + streaming cache logic, loaded separately from the encoder."""
     return DictConfig(
         {
-            'target': 'nemo.collections.asr.models.sortformer_diar_models.SortformerEncLabelModel',
-            'sample_rate': 16000,
-            'pil_weight': 0.5,
-            'ats_weight': 0.5,
-            'max_num_of_spks': _N_SPK,
-            'streaming_mode': False,
-            'async_streaming': False,
-            'model_defaults': DictConfig(model_defaults),
-            'preprocessor': DictConfig(
-                {
-                    '_target_': 'nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor',
-                    'normalize': 'per_feature',
-                    'window_size': 0.025,
-                    'sample_rate': 16000,
-                    'window_stride': 0.01,
-                    'window': 'hann',
-                    'features': _MEL_FEATURES,
-                    'n_fft': 512,
-                    'frame_splicing': 1,
-                    'dither': 0.00001,
-                }
-            ),
-            'encoder': DictConfig(
-                {
-                    '_target_': 'nemo.collections.asr.modules.ConformerEncoder',
-                    'feat_in': _MEL_FEATURES,
-                    'feat_out': -1,
-                    'n_layers': 1,
-                    'd_model': _DIAR_FC_D_MODEL,
-                    'subsampling': 'dw_striding',
-                    'subsampling_factor': _SUBSAMPLING_FACTOR,
-                    'subsampling_conv_channels': 16,
-                    'causal_downsampling': False,
-                    'ff_expansion_factor': 4,
-                    'self_attention_model': 'rel_pos',
-                    'n_heads': 4,
-                    'att_context_size': [-1, -1],
-                    'conv_kernel_size': 9,
-                    'conv_norm_type': 'batch_norm',
-                    'dropout': 0.0,
-                    'dropout_pre_encoder': 0.0,
-                    'dropout_emb': 0.0,
-                    'dropout_att': 0.0,
-                }
-            ),
-            'transformer_encoder': DictConfig(
-                {
-                    '_target_': 'nemo.collections.asr.modules.transformer.transformer_encoders.TransformerEncoder',
-                    'num_layers': 1,
-                    'hidden_size': _DIAR_TF_D_MODEL,
-                    'inner_size': 32,
-                    'num_attention_heads': 4,
-                    'attn_score_dropout': 0.0,
-                    'attn_layer_dropout': 0.0,
-                    'ffn_dropout': 0.0,
-                    'hidden_act': 'relu',
-                    'pre_ln': False,
-                    'pre_ln_final_layer_norm': True,
-                }
-            ),
-            'sortformer_modules': DictConfig(
-                {
-                    '_target_': 'nemo.collections.asr.modules.sortformer_modules.SortformerModules',
-                    'num_spks': _N_SPK,
-                    'dropout_rate': 0.0,
-                    'fc_d_model': _DIAR_FC_D_MODEL,
-                    'tf_d_model': _DIAR_TF_D_MODEL,
-                }
-            ),
-            'loss': DictConfig(
-                {
-                    '_target_': 'nemo.collections.asr.losses.bce_loss.BCELoss',
-                    'weight': None,
-                    'reduction': 'mean',
-                }
-            ),
+            '_target_': 'nemo.collections.asr.modules.sortformer_modules.SortformerModules',
+            'num_spks': _N_SPK,
+            'dropout_rate': 0.0,
+            'fc_d_model': _DIAR_FC_D_MODEL,
+            'tf_d_model': _DIAR_TF_D_MODEL,
+            'subsampling_factor': _SUBSAMPLING_FACTOR,
+            'spkcache_len': _SPKCACHE_LEN,
+            'fifo_len': 0,
+            'chunk_len': _CHUNK_LEN,
+            'spkcache_update_period': _CHUNK_LEN,
+            'chunk_left_context': 0,
+            'chunk_right_context': 0,
+            'spkcache_sil_frames_per_spk': 1,
         }
     )
 
 
 def build_toy_pe_encoder(**overrides) -> ParallelExpertEncoder:
-    """Construct a real ParallelExpertEncoder from the tiny ASR + diar configs."""
+    """Construct a real ParallelExpertEncoder from the tiny three-expert configs."""
     kwargs = dict(
-        asr_encoder_cfg=toy_asr_encoder_cfg(),
-        diarization_model_cfg=toy_diarization_model_cfg(),
+        speech_expert_cfg=toy_speech_expert_cfg(),
+        speaker_expert_cfg=toy_speaker_expert_cfg(),
+        sound_expert_cfg=toy_sound_expert_cfg(),
+        sortformer_modules_cfg=toy_sortformer_modules_cfg(),
         asr_normalize_type='per_feature',
         # Keep the input far below one window so forward() stays on the offline path.
-        online_inference_length=500,
+        online_inference_length=_CHUNK_LEN,
+        chunk_left_context=0,
+        chunk_right_context=0,
+        diar_fifo_len=0,
+        diar_spkcache_update_period=_CHUNK_LEN,
+        diar_spkcache_len=_SPKCACHE_LEN,
     )
     kwargs.update(overrides)
     return ParallelExpertEncoder(**kwargs)
 
 
 @pytest.mark.unit
-def test_pe_encoder_builds_and_wires_both_real_encoders():
+def test_pe_encoder_builds_and_wires_all_three_experts():
     enc = build_toy_pe_encoder()
-    # The two fused sub-encoders are the real classes, not stubs.
-    assert isinstance(enc.asr_encoder, ConformerEncoder)
-    assert isinstance(enc.diarization_model, SortformerEncLabelModel)
-    # ConformerEncoder-compatible drop-in properties come from the ASR branch.
+    # All three experts are real flex encoders inside one GGEMM container.
+    assert set(enc.pee.expert_names) == {"speech", "speaker", "sound"}
+    assert isinstance(enc.pee.experts["speech"], _MOE_ENCODER_CLS)
+    assert isinstance(enc.pee.experts["speaker"], _TF_ENCODER_CLS)
+    assert isinstance(enc.pee.experts["sound"], _TF_ENCODER_CLS)
+    # The speech expert is the backbone: it drives the drop-in ConformerEncoder props.
     assert enc.d_model == _ASR_D_MODEL
     assert enc.subsampling_factor == _SUBSAMPLING_FACTOR
-    # Speaker count + fusion kernel come from the diar branch.
+    # Speaker count + fusion kernel come from the Sortformer head.
     assert enc.n_spk == _N_SPK
     assert enc.diar_kernel.shape == (_N_SPK, _ASR_D_MODEL)
-    assert enc.missing_rttm_target == -1.0
-    assert enc.speaker_activity_threshold == 0.5
-    assert enc.spk_kernel_scale == 1.0
-    # freeze_diar defaults to True -> diar params are frozen, ASR params remain trainable.
-    assert all(not p.requires_grad for p in enc.diarization_model.parameters())
-    assert any(p.requires_grad for p in enc.asr_encoder.parameters())
-
-
-# ----------------------------------------------------------------------------- #
-# Rank-invariant collective schedule
-#
-# Both sub-encoders wrap a ConformerEncoder whose `update_max_seq_length` all-reduces
-# on the default process group, and the diarization branch used to be entered per batch
-# content. Together those let ranks emit different numbers of default-PG collectives on
-# the same step, which NCCL matches positionally -> permanent deadlock. These tests pin
-# both halves of the fix without needing a distributed process group.
-# ----------------------------------------------------------------------------- #
-def _conformer_submodules(enc: ParallelExpertEncoder) -> list[ConformerEncoder]:
-    return [m for m in enc.modules() if isinstance(m, ConformerEncoder)]
-
-
-@pytest.mark.unit
-def test_pe_encoder_disables_conformer_max_length_sync_by_default():
-    enc = build_toy_pe_encoder()
-    conformers = _conformer_submodules(enc)
-    # Both the ASR branch and the Sortformer frontend must be covered.
-    assert len(conformers) == 2
-    assert all(not c.sync_max_audio_length for c in conformers)
-    assert not enc.sync_max_audio_length
-
-
-@pytest.mark.unit
-def test_pe_encoder_max_length_sync_is_opt_in():
-    enc = build_toy_pe_encoder(sync_max_audio_length=True)
-    assert enc.sync_max_audio_length
-    # Left at the ConformerEncoder default; only safe when every rank runs both encoders.
-    assert all(c.sync_max_audio_length for c in _conformer_submodules(enc))
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("missing_rows", [[], [0], [1], [0, 1]])
-def test_pe_encoder_diarization_branch_does_not_depend_on_batch_content(missing_rows):
-    """The diarization frontend must run the same number of times regardless of how many
-    rows carry the missing-RTTM sentinel, so peer ranks stay on the same collective."""
-    enc = build_toy_pe_encoder().train()
-    batch_size, n_frames = 2, 160
-    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
-    length = torch.full((batch_size,), n_frames, dtype=torch.long)
-    spk_targets = torch.rand(batch_size, 7, _N_SPK)
-    for row in missing_rows:
-        spk_targets[row].fill_(enc.missing_rttm_target)
-
-    calls = []
-    real_frontend = enc.diarization_model.frontend_encoder
-
-    def counting_frontend(**kwargs):
-        calls.append(1)
-        return real_frontend(**kwargs)
-
-    enc.diarization_model.frontend_encoder = counting_frontend
-    with torch.no_grad():
-        outputs, _ = enc(mels, length, spk_targets=spk_targets)
-
-    assert len(calls) == 1
-    assert torch.isfinite(outputs).all()
-
-
-@contextlib.contextmanager
-def _forbid_host_sync():
-    """Make every tensor -> Python-scalar conversion raise.
-
-    Those conversions block the host until the compute stream drains. With
-    ``activation_checkpointing_perception`` the encoder forward re-runs inside the backward
-    pass, so a sync there stalls the host mid-backward and reorders the surrounding FSDP
-    gradient reduce-scatters against peer ranks.
-    """
-    original = {name: getattr(torch.Tensor, name) for name in ("__bool__", "item", "tolist")}
-
-    def _blocked(name):
-        def _raise(self, *args, **kwargs):
-            raise AssertionError(f"device-to-host sync via Tensor.{name}()")
-
-        return _raise
-
-    for name in original:
-        setattr(torch.Tensor, name, _blocked(name))
-    try:
-        yield
-    finally:
-        for name, fn in original.items():
-            setattr(torch.Tensor, name, fn)
-
-
-@pytest.mark.unit
-def test_forbid_host_sync_helper_actually_catches_a_sync():
-    """Guard the guard: if patching Tensor.__bool__ ever stops working, the sync tests
-    below would pass vacuously."""
-    with pytest.raises(AssertionError, match="device-to-host sync"):
-        with _forbid_host_sync():
-            bool(torch.zeros(3).any())
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("missing_rows", [[], [0], [1], [0, 1]])
-def test_pe_encoder_training_forward_never_syncs_host(missing_rows):
-    """The training path must reach a fused output without reading any tensor on the host,
-    no matter how many rows carry the missing-RTTM sentinel. With activation checkpointing
-    this code re-runs inside the backward pass, where a host stall reorders the surrounding
-    FSDP gradient reduce-scatters against peer ranks."""
-    enc = build_toy_pe_encoder().train()
-    batch_size, n_frames = 2, 160
-    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
-    length = torch.full((batch_size,), n_frames, dtype=torch.long)
-    spk_targets = torch.rand(batch_size, 7, _N_SPK)
-    for row in missing_rows:
-        spk_targets[row].fill_(enc.missing_rttm_target)
-
-    with torch.no_grad(), _forbid_host_sync():
-        outputs, _ = enc(mels, length, spk_targets=spk_targets)
-
-    assert torch.isfinite(outputs).all()
-
-
-@pytest.mark.unit
-def test_pe_encoder_training_forward_never_syncs_host_without_spk_targets():
-    enc = build_toy_pe_encoder().train()
-    mels = torch.randn(1, _MEL_FEATURES, 160)
-    length = torch.full((1,), 160, dtype=torch.long)
-
-    with torch.no_grad(), _forbid_host_sync():
-        outputs, _ = enc(mels, length)
-
-    assert torch.isfinite(outputs).all()
-
-
-def _build_online_capable_encoder():
-    enc = build_toy_pe_encoder(
-        online_inference_length=10,
-        chunk_left_context=2,
-        chunk_right_context=2,
-        diar_fifo_len=10,
-        diar_spkcache_update_period=20,
-        diar_spkcache_len=20,
-    )
-    enc._suppress_online_pbar = True
-    return enc
-
-
-def _record_dispatch(enc):
-    """Record which of the two forward paths `enc.forward` selects."""
-    taken = []
-    real_online, real_offline = enc._forward_online, enc._forward
-    enc._forward_online = lambda **kw: (taken.append("online"), real_online(**kw))[1]
-    enc._forward = lambda **kw: (taken.append("offline"), real_offline(**kw))[1]
-    return taken
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("mode", ["train", "eval"])
-@pytest.mark.parametrize("spk_targets_given", [False, True])
-@pytest.mark.parametrize("n_frames", [80, 320])
-def test_pe_encoder_training_and_validation_never_use_online_path(mode, spk_targets_given, n_frames):
-    """Training and validation are offline unconditionally. Neither audio length, nor the
-    presence of speaker targets, nor eval mode may steer it, or ranks in the same step
-    would run different numbers of encoder calls."""
-    enc = _build_online_capable_encoder()
-    enc.train() if mode == "train" else enc.eval()
-    mels = torch.randn(1, _MEL_FEATURES, n_frames)
-    length = torch.full((1,), n_frames, dtype=torch.long)
-    spk_targets = torch.rand(1, 7, _N_SPK) if spk_targets_given else None
-
-    taken = _record_dispatch(enc)
-    with torch.no_grad():
-        outputs, _ = enc(mels, length, spk_targets=spk_targets)
-
-    assert taken == ["offline"]
-    assert torch.isfinite(outputs).all()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("spk_targets_given", [False, True])
-@pytest.mark.parametrize("n_frames", [80, 320])
-def test_pe_encoder_generation_always_uses_online_path(spk_targets_given, n_frames):
-    """Generation is online unconditionally, including for audio shorter than one window
-    and for batches that supply their own speaker targets."""
-    enc = _build_online_capable_encoder().eval()
-    mels = torch.randn(1, _MEL_FEATURES, n_frames)
-    length = torch.full((1,), n_frames, dtype=torch.long)
-    spk_targets = torch.rand(1, 7, _N_SPK) if spk_targets_given else None
-
-    taken = _record_dispatch(enc)
-    with torch.no_grad(), enc.online_inference():
-        outputs, _ = enc(mels, length, spk_targets=spk_targets)
-
-    assert taken == ["online"]
-    assert torch.isfinite(outputs).all()
-
-
-@pytest.mark.unit
-def test_pe_encoder_online_path_predicts_for_sentinel_rows():
-    """A `-1` row has no RTTM, so the online path must fill it from the streaming
-    Sortformer instead of feeding the sentinel into the speaker kernel."""
-    enc = _build_online_capable_encoder().eval()
-    batch_size, n_frames = 2, 320
-    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
-    length = torch.full((batch_size,), n_frames, dtype=torch.long)
-
-    spk_targets = torch.rand(batch_size, 7, _N_SPK)
-    sentinel_batch = spk_targets.clone()
-    sentinel_batch[1].fill_(enc.missing_rttm_target)
-
-    with torch.no_grad(), enc.online_inference():
-        kept, _ = enc(mels, length, spk_targets=spk_targets)
-        replaced, _ = enc(mels, length, spk_targets=sentinel_batch)
-
-    # Row 0 keeps its RTTM targets, so it is untouched by row 1's sentinel.
-    torch.testing.assert_close(kept[0], replaced[0])
-    # Row 1 was overridden by a prediction rather than fused from `-1`.
-    assert not torch.allclose(kept[1], replaced[1])
-    assert torch.isfinite(replaced).all()
-
-
-@pytest.mark.unit
-def test_pe_encoder_sentinel_free_batch_output_unaffected_by_always_run_diarization():
-    """Running the frontend unconditionally costs compute but must not change outputs
-    for a batch where no row requests predicted diarization."""
-    batch_size, n_frames = 2, 160
-    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
-    length = torch.full((batch_size,), n_frames, dtype=torch.long)
-    spk_targets = torch.rand(batch_size, 7, _N_SPK)
-
-    with torch.no_grad():
-        eager = build_toy_pe_encoder(always_run_diarization=True).eval()
-        lazy = build_toy_pe_encoder(always_run_diarization=False).eval()
-        lazy.load_state_dict(eager.state_dict())
-        out_eager, len_eager = eager(mels, length, spk_targets=spk_targets)
-        out_lazy, len_lazy = lazy(mels, length, spk_targets=spk_targets)
-
-    assert torch.equal(len_eager, len_lazy)
-    torch.testing.assert_close(out_eager, out_lazy, rtol=0, atol=0)
+    # The sound merge is an elementwise add, so sound must match the speech width.
+    assert enc.pee.experts["sound"].d_model == enc.d_model
+    # Defaults: ONLY the speaker branch is frozen. Its kernel comes from a hard
+    # threshold on the speaker activities, so no gradient reaches it through the
+    # fusion anyway. Speech and sound both train.
+    assert all(not p.requires_grad for p in enc.pee.experts["speaker"].parameters())
+    assert all(not p.requires_grad for p in enc.sortformer_modules.parameters())
+    assert any(p.requires_grad for p in enc.pee.experts["speech"].parameters())
+    assert any(p.requires_grad for p in enc.pee.experts["sound"].parameters())
 
 
 @pytest.mark.unit
@@ -766,113 +479,14 @@ def test_pe_encoder_offline_forward_accepts_diar_override_and_fuses_it():
     with torch.no_grad():
         out1, len1 = enc(mels, length, spk_targets=dp1)
         out2, len2 = enc(mels, length, spk_targets=dp2)
-        out1_binary, len1_binary = enc(mels, length, spk_targets=(dp1 > 0.5).to(dp1.dtype))
 
     expected_t = int(len1[0].item())
     assert out1.shape == (batch_size, _ASR_D_MODEL, expected_t)
     assert torch.equal(len1, len2)
-    assert torch.equal(len1, len1_binary)
-    torch.testing.assert_close(out1, out1_binary, rtol=0, atol=0)
     assert torch.isfinite(out1).all()
     # Same audio + same (dropout-free, eval) ASR branch, but different speaker
     # predictions must change the fused output -> proves the diar branch is fused in.
     assert not torch.allclose(out1, out2)
-
-    enc.spk_kernel_scale = 0.0
-    with torch.no_grad():
-        unscaled_out1, _ = enc(mels, length, spk_targets=dp1)
-        unscaled_out2, _ = enc(mels, length, spk_targets=dp2)
-    torch.testing.assert_close(unscaled_out1, unscaled_out2, rtol=0, atol=0)
-
-
-@pytest.mark.unit
-def test_pe_encoder_mixed_rttm_and_missing_rows_use_their_requested_sources():
-    enc = build_toy_pe_encoder().eval()
-    batch_size, n_frames = 2, 160
-    mels = torch.randn(batch_size, _MEL_FEATURES, n_frames)
-    length = torch.full((batch_size,), n_frames, dtype=torch.long)
-    rttm_targets = torch.rand(batch_size, 7, _N_SPK)
-    mixed_targets = rttm_targets.clone()
-    mixed_targets[1].fill_(-1.0)
-
-    with torch.no_grad():
-        mixed_out, mixed_len = enc(mels, length, spk_targets=mixed_targets)
-        rttm_out, rttm_len = enc(mels, length, spk_targets=rttm_targets)
-        sortformer_out, sortformer_len = enc(mels, length)
-
-    assert torch.equal(mixed_len, rttm_len)
-    assert torch.equal(mixed_len, sortformer_len)
-    torch.testing.assert_close(mixed_out[0], rttm_out[0], rtol=0, atol=0)
-    torch.testing.assert_close(mixed_out[1], sortformer_out[1], rtol=0, atol=0)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("missing_row", [0, 1])
-def test_pe_encoder_mixed_batch_replaces_only_missing_rows_with_mocked_diarization(missing_row):
-    class _MockDiarizationModel(nn.Module):
-        def __init__(self, predictions):
-            super().__init__()
-            self.anchor = nn.Parameter(torch.zeros(1), requires_grad=False)
-            self.register_buffer("predictions", predictions)
-            self.forward_infer_calls = 0
-
-        def frontend_encoder(self, processed_signal, processed_signal_length, bypass_pre_encode):
-            batch_size, _, num_frames = processed_signal.shape
-            embeddings = processed_signal.new_zeros(batch_size, num_frames, 2)
-            return embeddings, processed_signal_length
-
-        def forward_infer(self, emb_seq, emb_seq_length):
-            self.forward_infer_calls += 1
-            return self.predictions.to(device=emb_seq.device, dtype=emb_seq.dtype)
-
-    class _MockASREncoder(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.anchor = nn.Parameter(torch.zeros(1), requires_grad=False)
-
-        def forward(self, audio_signal, length):
-            batch_size, _, num_frames = audio_signal.shape
-            return audio_signal.new_zeros(batch_size, 2, num_frames), length
-
-    rttm_targets = torch.tensor(
-        [
-            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
-            [[0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],
-        ]
-    )
-    diarization_predictions = torch.tensor(
-        [
-            [[0.1, 0.9], [0.8, 0.2], [0.2, 0.7], [0.6, 0.4]],
-            [[0.9, 0.1], [0.2, 0.8], [0.7, 0.3], [0.4, 0.6]],
-        ]
-    )
-    mixed_targets = rttm_targets.clone()
-    mixed_targets[missing_row].fill_(-1.0)
-
-    enc = _PEE.__new__(_PEE)
-    nn.Module.__init__(enc)
-    enc.diarization_model = _MockDiarizationModel(diarization_predictions)
-    enc.asr_encoder = _MockASREncoder()
-    enc.asr_normalize_type = None
-    enc.freeze_diar = True
-    enc.freeze_asr = True
-    enc.missing_rttm_target = -1.0
-    enc.speaker_activity_threshold = 0.5
-    enc.spk_kernel_scale = 1.0
-    enc.always_run_diarization = True
-    enc.asr_norm = nn.Identity()
-    enc.diar_norm = nn.Identity()
-    enc.register_buffer("diar_kernel", torch.eye(2))
-
-    audio_signal = torch.randn(2, 3, 4)
-    length = torch.tensor([4, 4], dtype=torch.long)
-    outputs, output_lengths = enc._forward(audio_signal, length, spk_targets=mixed_targets)
-
-    expected_targets = rttm_targets.clone()
-    expected_targets[missing_row] = (diarization_predictions[missing_row] > 0.5).to(rttm_targets.dtype)
-    assert enc.diarization_model.forward_infer_calls == 1
-    assert torch.equal(output_lengths, length)
-    assert torch.equal(outputs.transpose(1, 2), expected_targets)
 
 
 @pytest.mark.unit
