@@ -592,23 +592,62 @@ class GGEMMTransformerEncoder(nn.Module):
     # not bit-exact) -- run it in eval mode (dropout off).
 
     @staticmethod
-    def _prepend_prefix(x: torch.Tensor, length: torch.Tensor, prefix: Optional[torch.Tensor]):
-        """Prepend a streaming cache ``prefix`` to ``x`` and extend ``length``.
+    def _prepend_prefix(
+        x: torch.Tensor, length: torch.Tensor, prefix: Optional[torch.Tensor],
+        mode: str = 'extend',
+    ):
+        """Splice a streaming cache ``prefix`` onto ``x``; returns ``(x, length, chunk)``.
 
         ``prefix`` is ``(B, P, d_model)`` of already-projected embeddings (the same
         representation ``x`` carries at this point: post-projection, pre-norm), so the
         concatenation is normalized as one sequence -- matching how Sortformer's
         ``forward_streaming_step`` feeds ``[spkcache | fifo | chunk]`` through the
         encoder body in a single pass.
+
+        Two ways to splice, differing in what happens to the *other* experts:
+
+        ``'extend'``
+            ``[prefix | x]``, so the prefixed expert grows to ``P + T`` while every
+            other expert stays at ``T`` and gets right-padded with zeros to match.
+            Those pad frames are masked out, so their attention and FFN work is pure
+            waste -- 675/475 = 1.42x on PEE-v2.
+
+        ``'replace'``
+            ``[prefix | x[:, P:]]``, i.e. the cache *substitutes* for the expert's own
+            leading ``P`` frames rather than extending past them. ``T`` is unchanged,
+            so every expert in the group already agrees on ``T`` and nothing is padded.
+            The caller feeds a window extended ``P`` frames further back, which turns
+            what would have been zero padding for the unprefixed experts into ``P``
+            frames of real left context -- same FLOPs, real signal instead of zeros,
+            and the group can stay FlashAttention-2 eligible.
+
+        Returns the spliced ``x``, the updated ``length``, and ``chunk`` -- the slice of
+        ``x`` the prefixed expert treats as its current chunk (``x[:, P:]`` under
+        ``'replace'``, all of ``x`` under ``'extend'``). Streaming callers must push
+        ``chunk``, not the raw projection, into their cache.
         """
         if prefix is None:
-            return x, length
+            return x, length, x
+        if mode not in ('extend', 'replace'):
+            raise ValueError(f"prefix mode must be 'extend' or 'replace', got {mode!r}.")
         if prefix.dim() != 3 or prefix.shape[0] != x.shape[0] or prefix.shape[-1] != x.shape[-1]:
             raise ValueError(
                 f"prefix must be (B={x.shape[0]}, P, d_model={x.shape[-1]}), got {tuple(prefix.shape)}."
             )
-        x = torch.cat([prefix.to(dtype=x.dtype, device=x.device), x], dim=1)
-        return x, length + prefix.shape[1]
+        p = prefix.shape[1]
+        prefix = prefix.to(dtype=x.dtype, device=x.device)
+        if mode == 'extend':
+            return torch.cat([prefix, x], dim=1), length + p, x
+        if p > x.shape[1]:
+            raise ValueError(
+                f"prefix of {p} frames cannot replace the leading frames of a {x.shape[1]}-frame "
+                "input; feed a window extended at least P frames further back, or use "
+                "mode='extend'."
+            )
+        chunk = x[:, p:]
+        # The prefix frames are cache and always valid, so a sample whose audio ended
+        # inside them still has P valid frames.
+        return torch.cat([prefix, chunk], dim=1), torch.clamp(length, min=p), chunk
 
     @staticmethod
     def _right_pad_to(x: torch.Tensor, t_max: int) -> torch.Tensor:
@@ -634,6 +673,7 @@ class GGEMMTransformerEncoder(nn.Module):
         prefix: Optional[torch.Tensor] = None,
         t_max: Optional[int] = None,
         return_pre_encode: bool = False,
+        prefix_mode: str = 'extend',
     ):
         """Run an expert's pre-layer stack (mirrors ``forward`` + pre-loop of
         ``forward_internal``); returns ``(x, layer_pos_emb, block_mask, length)``.
@@ -681,10 +721,14 @@ class GGEMMTransformerEncoder(nn.Module):
             x = audio_signal
             length = length.to(torch.int64)
 
-        # Projected chunk embeddings, before the streaming prefix and before the
-        # norm -- what a streaming caller pushes into its cache.
-        x_proj, proj_length = x, length
-        x, length = self._prepend_prefix(x, length, prefix)
+        # Projected chunk embeddings, before the norm -- what a streaming caller
+        # pushes into its cache. Under prefix_mode='replace' this is the post-splice
+        # chunk, i.e. the leading P frames consumed by the cache are excluded, so its
+        # length has to drop by the same amount to stay in step.
+        pre_len = length
+        n_before = x.shape[1]
+        x, length, x_proj = self._prepend_prefix(x, length, prefix, mode=prefix_mode)
+        proj_length = (pre_len - (n_before - x_proj.shape[1])).clamp(min=0)
 
         if expert.self_attention_model == "rope":
             if expert.xscale:
@@ -721,6 +765,7 @@ class GGEMMTransformerEncoder(nn.Module):
         build_block_mask: bool,
         prefix: Optional[Dict[str, torch.Tensor]] = None,
         return_pre_encode: bool = False,
+        prefix_mode: str = 'extend',
     ) -> Dict[str, Tuple[torch.Tensor, Optional[torch.Tensor], object, torch.Tensor]]:
         """Prepare every expert, batching compatible ``FeatureStacking`` projections.
 
@@ -775,7 +820,7 @@ class GGEMMTransformerEncoder(nn.Module):
                 name: self._expert_pre(
                     encs[name], audio_signal, length, bypass_pre_encode,
                     build_block_mask=build_block_mask, prefix=prefix.get(name),
-                    return_pre_encode=return_pre_encode,
+                    return_pre_encode=return_pre_encode, prefix_mode=prefix_mode,
                 )
                 for name in names
             }
@@ -828,9 +873,12 @@ class GGEMMTransformerEncoder(nn.Module):
         shared_input = stacked.to(compute_dtype).unsqueeze(0).expand(len(names), -1, -1)
         projected = torch.bmm(shared_input, weights)
 
-        # With a streaming prefix the experts become ragged; every one is padded up
-        # to the longest so the packed-attention group still shares a single T.
-        t_max = T_out + max((p.shape[1] for p in prefix.values()), default=0)
+        # Under 'extend' a prefixed expert grows past the others and they get padded up
+        # to it. Under 'replace' the prefix consumes that expert's own leading frames,
+        # so every expert already shares T_out and nothing is padded.
+        t_max = T_out
+        if prefix_mode == 'extend':
+            t_max += max((p.shape[1] for p in prefix.values()), default=0)
 
         mask_cache = {}
         result = {}
@@ -838,11 +886,18 @@ class GGEMMTransformerEncoder(nn.Module):
         for slot, name in enumerate(names):
             expert = encs[name]
             x = projected[slot, :, :expert.d_model].reshape(B, T_out, expert.d_model)
-            # Projected chunk embeddings, pre-prefix and pre-norm: exactly what the
-            # prefix path consumes, so a streaming caller can cache them directly.
+            n_before = x.shape[1]
+            x, length_n, chunk = self._prepend_prefix(
+                x, out_length, prefix.get(name), mode=prefix_mode
+            )
+            # Pre-norm chunk embeddings a streaming caller pushes into its cache. Under
+            # 'replace' this excludes the leading frames the cache stood in for, so it
+            # lines up with the lc/rc the caller passes to streaming_update. Measure the
+            # drop against the PRE-splice frame count -- under 'extend' the chunk keeps
+            # all of them and its length must not move.
             if return_pre_encode:
-                pre_encode_out[name] = (x, out_length)
-            x, length_n = self._prepend_prefix(x, out_length, prefix.get(name))
+                n_dropped = n_before - chunk.shape[1]
+                pre_encode_out[name] = (chunk, (out_length - n_dropped).clamp(min=0))
 
             if expert.self_attention_model == "rope":
                 if expert.xscale:
@@ -1402,7 +1457,7 @@ class GGEMMTransformerEncoder(nn.Module):
     def forward_packed(
         self, audio_signal, length, bypass_pre_encode: bool = False, backend: str = 'baddbmm',
         moe_mode: str = 'dense', prefix: Optional[Dict[str, torch.Tensor]] = None,
-        return_pre_encode: bool = False,
+        return_pre_encode: bool = False, prefix_mode: str = 'extend',
     ) -> Dict[str, object]:
         """Lockstep multi-expert forward using batched-SDPA packed-head attention
         and grouped FFN -- the launch-count-reducing path (BGG-MEI).
@@ -1420,15 +1475,20 @@ class GGEMMTransformerEncoder(nn.Module):
 
         Args:
             prefix: Optional ``{name: (B, P, d_model)}`` of streaming-cache embeddings
-                prepended to that expert's projected chunk before the norm, so the
-                expert attends over ``[cache | chunk]``. Prefixed experts run longer
-                than the rest, so every expert is right-padded to a common ``T`` while
-                keeping its true ``length``; attention masks each expert with its own
-                length (see :meth:`_group_additive_mask`). Note the group loses its
-                FlashAttention-2 eligibility once any expert is padded.
-            return_pre_encode: Also return ``{name: (x_proj, out_length)}`` -- the
-                projected chunk embeddings the ``prefix`` path consumes -- so a
-                streaming caller can push them into its cache without reprojecting.
+                spliced into that expert's projected chunk before the norm, so the
+                expert attends over ``[cache | chunk]``.
+            prefix_mode: How the prefix is spliced (see :meth:`_prepend_prefix`).
+                ``'extend'`` grows the prefixed expert to ``P + T`` and right-pads the
+                others with zeros to match -- correct, but the pad frames are masked
+                out, so that work is wasted and the group loses FlashAttention-2
+                eligibility. ``'replace'`` has the cache stand in for the expert's own
+                leading ``P`` frames, leaving ``T`` unchanged and nothing padded; feed a
+                window extended ``P`` frames further back and the unprefixed experts
+                spend those slots on real left context instead of zeros.
+            return_pre_encode: Also return ``{name: (chunk, chunk_length)}`` -- the
+                pre-norm chunk embeddings -- so a streaming caller can push them into
+                its cache without reprojecting. Under ``'replace'`` this excludes the
+                leading frames the cache stood in for.
 
         Returns:
             ``{name: (out, length)}``, or ``({name: (out, length)}, {name: (x_proj,
@@ -1446,7 +1506,7 @@ class GGEMMTransformerEncoder(nn.Module):
         state: Dict[str, dict] = {}
         prepared = self._experts_pre(
             encs, audio_signal, length, bypass_pre_encode, build_block_mask=False,
-            prefix=prefix, return_pre_encode=return_pre_encode,
+            prefix=prefix, return_pre_encode=return_pre_encode, prefix_mode=prefix_mode,
         )
         if return_pre_encode:
             prepared, pre_encode_out = prepared

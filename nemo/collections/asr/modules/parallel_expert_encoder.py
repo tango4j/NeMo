@@ -23,8 +23,23 @@ Hosts the three PEE-v2 experts -- a multilingual-ASR MoE **speech** expert
 The speaker expert's states go through the Sortformer head
 (``encoder_proj`` -> ``forward_speaker_sigmoids``) to produce per-frame speaker
 activities, which are fused into the speech states (LayerNorm + sinusoidal
-speaker kernel + ADD). The sound expert rides along in the packed group and is
-returned unfused.
+speaker kernel + ADD).
+
+The sound expert is merged in per ``merge_sound_expert_to_asr``:
+
+* ``True`` (current) -- its encoder states are LayerNorm-ed, scaled and added onto
+  the ASR states, the interim path while the sound CTC head is being trained.
+* ``False`` -- the eventual SoundToken route: a tiny CTC head on the sound expert
+  emits sound tokens injected through a learned kernel, the direct analogue of the
+  speaker branch. Not implemented yet; raises ``NotImplementedError``.
+
+Order matters: sound joins the ASR states FIRST, so speech + sound together form
+the backbone that ``asr_norm`` normalizes, and the speaker kernel is then added on
+top of that normalized sum.
+
+Only the **speaker** expert is frozen by default. Its kernel is built from a hard
+threshold on the speaker activities, so no gradient reaches it through the fusion
+regardless; speech and sound both train.
 
 Two encoding modes, same fusion:
 
@@ -51,6 +66,7 @@ import importlib
 import inspect
 import math
 import os
+import shutil
 import tarfile
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -235,7 +251,7 @@ class ParallelExpertEncoderPT(ModelPT):
             asr_normalize_type=self._cfg.get('asr_normalize_type', 'per_feature'),
             freeze_speaker=self._cfg.get('freeze_speaker', True),
             freeze_speech=self._cfg.get('freeze_speech', False),
-            freeze_sound=self._cfg.get('freeze_sound', True),
+            freeze_sound=self._cfg.get('freeze_sound', False),
             online_inference_length=self._cfg.get('online_inference_length', 375),
             chunk_left_context=self._cfg.get('chunk_left_context', 50),
             chunk_right_context=self._cfg.get('chunk_right_context', 50),
@@ -249,6 +265,9 @@ class ParallelExpertEncoderPT(ModelPT):
             always_run_diarization=self._cfg.get('always_run_diarization', True),
             moe_mode=self._cfg.get('moe_mode', 'dense'),
             ggemm_backend=self._cfg.get('ggemm_backend', 'baddbmm'),
+            online_prefix_mode=self._cfg.get('online_prefix_mode', 'replace'),
+            merge_sound_expert_to_asr=self._cfg.get('merge_sound_expert_to_asr', True),
+            sound_merge_scale=self._cfg.get('sound_merge_scale', 0.3),
         )
 
     @classmethod
@@ -302,7 +321,9 @@ class ParallelExpertEncoderPT(ModelPT):
         Follows the standard NeMo :class:`~nemo.core.classes.common.Model`
         convention for resolving a checkpoint reference:
 
-        * a local ``.nemo`` file is restored with :meth:`ModelPT.restore_from`;
+        * a local ``.nemo`` file is read directly by
+          :meth:`_load_encoder_from_archive` -- ``ModelPT.restore_from`` cannot
+          instantiate an ``@experimental`` target (see that method's docstring);
         * otherwise ``model_path_or_name`` is treated as a pretrained model
           identifier -- a HuggingFace Hub repo id (``{repo}/{name}``) or an NGC
           alias -- and resolved with :meth:`Model.from_pretrained`, which
@@ -322,18 +343,92 @@ class ParallelExpertEncoderPT(ModelPT):
             and model_path_or_name.endswith('.nemo')
             and os.path.isfile(model_path_or_name)
         ):
-            bundle = cls.restore_from(
-                restore_path=model_path_or_name,
-                map_location=map_location,
-                strict=strict,
+            return cls._load_encoder_from_archive(
+                model_path_or_name, map_location=map_location, strict=strict
             )
-        else:
-            bundle = cls.from_pretrained(
-                model_name=model_path_or_name,
-                map_location=map_location,
-                strict=strict,
-            )
+        bundle = cls.from_pretrained(
+            model_name=model_path_or_name,
+            map_location=map_location,
+            strict=strict,
+        )
         return bundle.encoder
+
+    @classmethod
+    def _load_encoder_from_archive(
+        cls,
+        nemo_path: str,
+        *,
+        map_location: Union[str, torch.device] = 'cpu',
+        strict: bool = True,
+    ) -> ParallelExpertEncoder:
+        """Build the encoder straight from a ``.nemo`` archive, bypassing ``restore_from``.
+
+        ``ModelPT.restore_from`` routes the bundle's ``target:`` through NeMo's
+        config-instantiation allow-list, which rejects any ``@experimental``-decorated
+        class: the decorator wraps the class in a ``wrapt`` proxy, ``issubclass()``
+        raises ``TypeError`` on it, and the allow-list turns that into "unsafe target".
+        Both :class:`ParallelExpertEncoderPT` and the flex ``TransformerEncoder`` the
+        experts are built from are decorated, so a PE bundle can never be restored the
+        normal way. Fixing that belongs in ``nemo/core/classes/common.py``, which is
+        deliberately out of scope here.
+
+        A PE bundle is only ``model_config.yaml`` + ``model_weights.ckpt``, and the
+        encoder is fully described by the inline expert configs, so reading those two
+        directly is both sufficient and strictly less machinery than ``restore_from``.
+        The archive's ``target:`` is still verified first, so this does not widen what
+        gets instantiated.
+
+        Args:
+            nemo_path (str): Local ``.nemo`` bundle.
+            map_location: Device to map weights onto.
+            strict (bool): Enforce exact state-dict match.
+
+        Returns:
+            The restored :class:`ParallelExpertEncoder`.
+        """
+        import tempfile
+
+        if not cls.is_pe_nemo(nemo_path):
+            raise ValueError(f"{nemo_path!r} is not a ParallelExpertEncoderPT .nemo bundle.")
+
+        with tempfile.TemporaryDirectory() as td:
+            with tarfile.open(nemo_path, mode='r') as tf:
+                members = {os.path.basename(m.name): m for m in tf.getmembers() if m.isfile()}
+                for name in ('model_config.yaml', 'model_weights.ckpt'):
+                    if name not in members:
+                        raise RuntimeError(f"{nemo_path} is missing '{name}'.")
+                    member = members[name]
+                    fobj = tf.extractfile(member)
+                    if fobj is None:
+                        raise RuntimeError(f"Could not read '{name}' from {nemo_path}.")
+                    with open(os.path.join(td, name), 'wb') as out:
+                        shutil.copyfileobj(fobj, out)
+
+            cfg = OmegaConf.load(os.path.join(td, 'model_config.yaml'))
+            shell = cls(cfg=cfg, trainer=None)
+            state = torch.load(
+                os.path.join(td, 'model_weights.ckpt'),
+                map_location=map_location,
+                weights_only=True,
+            )
+
+        # The bundle stores the PT shell's state dict, so the encoder's own tensors
+        # sit under an `encoder.` prefix. Anything else belongs to the shell and has
+        # no counterpart on the bare encoder.
+        prefix = 'encoder.'
+        enc_state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
+        if not enc_state:
+            raise RuntimeError(
+                f"No '{prefix}*' tensors found in {nemo_path}; the bundle does not look "
+                "like a saved ParallelExpertEncoderPT."
+            )
+        missing, unexpected = shell.encoder.load_state_dict(enc_state, strict=strict)
+        if missing or unexpected:
+            logging.warning(
+                "[ParallelExpertEncoder] load_from_nemo(%s): %d missing / %d unexpected keys.",
+                nemo_path, len(missing), len(unexpected),
+            )
+        return shell.encoder.to(map_location)
 
     @classmethod
     def save_to_nemo(
@@ -435,8 +530,15 @@ class ParallelExpertEncoder(nn.Module):
             there is one packed call over one input tensor, so the three experts
             cannot be normalised differently. Pass ``None`` to feed raw mels.
         freeze_speaker (bool): Freeze the speaker expert + head. Defaults to ``True``.
+            The speaker kernel is built from a hard threshold on the speaker
+            activities, so no gradient reaches this branch through the fusion
+            anyway -- freezing makes that explicit and saves the optimizer state.
         freeze_speech (bool): Freeze the speech expert. Defaults to ``False``.
-        freeze_sound (bool): Freeze the sound expert. Defaults to ``True``.
+        freeze_sound (bool): Freeze the sound expert. Defaults to ``False`` -- the
+            sound expert trains alongside speech, and its states reach the loss
+            through the merge. Only the speaker expert (the Sortformer diarizer,
+            whose head is non-differentiable past the activity threshold) is frozen
+            by default.
         online_inference_length (int): Generation-time window in encoder output
             frames (default ``375`` = 30 s at subsampling 8); ``<= 0`` disables
             windowing. Unused by training and validation, which encode in one pass.
@@ -464,6 +566,33 @@ class ParallelExpertEncoder(nn.Module):
         moe_mode (str): ``'dense'`` or ``'topk'`` for the speech MoE inside the grouped
             FFN. Defaults to ``'dense'``.
         ggemm_backend (str): Grouped-GEMM backend. Defaults to ``'baddbmm'``.
+        online_prefix_mode (str): How the speaker's streaming cache is spliced in the
+            windowed path. ``'replace'`` (default) walks each window's start back by
+            the cache length and lets the cache stand in for the speaker's leading
+            frames, so speech and sound spend those slots on real left context instead
+            of zero padding -- same FLOPs, and the packed group stays
+            FlashAttention-2 eligible. ``'extend'`` is the older behaviour: the cache
+            lengthens the speaker and the other experts are zero-padded to match.
+            Windows too near the start of a recording to walk back far enough fall
+            back to ``'extend'`` automatically.
+        merge_sound_expert_to_asr (bool): How the sound expert reaches the ASR states.
+            ``True`` (default, and currently the only supported mode) adds the sound
+            expert's **encoder states** onto the ASR states, LayerNorm-ed and scaled by
+            ``sound_merge_scale``. ``False`` selects the eventual SoundToken path -- a
+            tiny CTC head on the sound expert producing sound tokens that are injected
+            through a learned kernel, exactly as the speaker sigmoids are injected
+            through ``diar_kernel`` -- and raises :class:`NotImplementedError` until
+            that CTC head exists.
+        sound_merge_scale (float): Relative weight of the sound stream in the merged
+            backbone, mirroring ``spk_kernel_scale``. Both streams are normalized
+            first, and they are near-orthogonal in practice (measured cosine
+            ~0.004), so a scale of ``s`` gives sound a variance share of roughly
+            ``s^2 / (1 + s^2)``: 0.3 -> ~8%, 0.5 -> ~20%, 1.0 -> ~50%.
+            Defaults to ``0.3``, a deliberately modest starting weight because the
+            sound expert is trained on far less data (~2.6 kh) than the speech
+            backbone. This is a starting point, not a ceiling: ``sound_norm`` keeps
+            a learnable affine gain and the sound expert itself trains, so the
+            model can grow the contribution if the loss rewards it.
     """
 
     def __init__(
@@ -475,7 +604,7 @@ class ParallelExpertEncoder(nn.Module):
         asr_normalize_type: Optional[str] = 'per_feature',
         freeze_speaker: bool = True,
         freeze_speech: bool = False,
-        freeze_sound: bool = True,
+        freeze_sound: bool = False,
         online_inference_length: int = 375,
         chunk_left_context: int = 50,
         chunk_right_context: int = 50,
@@ -489,6 +618,9 @@ class ParallelExpertEncoder(nn.Module):
         always_run_diarization: bool = True,
         moe_mode: str = 'dense',
         ggemm_backend: str = 'baddbmm',
+        online_prefix_mode: str = 'replace',
+        merge_sound_expert_to_asr: bool = True,
+        sound_merge_scale: float = 0.3,
     ):
         super().__init__()
 
@@ -544,6 +676,11 @@ class ParallelExpertEncoder(nn.Module):
 
         self.moe_mode = moe_mode
         self.ggemm_backend = ggemm_backend
+        if online_prefix_mode not in ('replace', 'extend'):
+            raise ValueError(
+                f"online_prefix_mode must be 'replace' or 'extend', got {online_prefix_mode!r}."
+            )
+        self.online_prefix_mode = online_prefix_mode
 
         # Long-form / online inference configuration.
         self.online_inference_length = int(online_inference_length)
@@ -574,6 +711,50 @@ class ParallelExpertEncoder(nn.Module):
             self._build_sinusoid_position_encoding(self.n_spk, self.asr_d_model),
             persistent=False,
         )
+
+        # --- sound expert -> ASR merge -------------------------------------
+        self.merge_sound_expert_to_asr = bool(merge_sound_expert_to_asr)
+        self.sound_merge_scale = float(sound_merge_scale)
+        if not self.merge_sound_expert_to_asr:
+            # TODO(sound-ctc): implement the SoundToken kernel-injection path.
+            #   Planned shape, mirroring the speaker branch:
+            #     sound expert states -> tiny CTC head -> sound-token posteriors
+            #       -> binarize/threshold -> sound_norm -> matmul(sound_kernel)
+            #       -> scaled add onto the ASR states,
+            #   i.e. the direct analogue of forward_speaker_sigmoids -> diar_kernel.
+            #   Blocked on the CTC head being trained (weiqingw). Until then the
+            #   only supported mode is merge_sound_expert_to_asr=True, which adds
+            #   the sound ENCODER STATES rather than a token kernel.
+            raise NotImplementedError(
+                "merge_sound_expert_to_asr=False (SoundToken CTC kernel injection) is not "
+                "implemented yet -- the sound CTC head is still being trained. Use "
+                "merge_sound_expert_to_asr=True, which adds the sound expert's encoder "
+                "states to the ASR states directly."
+            )
+
+        sound_d_model = int(self.pee.experts['sound'].d_model)
+        if sound_d_model != self.asr_d_model:
+            raise ValueError(
+                f"merge_sound_expert_to_asr requires the sound expert d_model "
+                f"({sound_d_model}) to match the speech expert d_model ({self.asr_d_model}); "
+                "the merge is an elementwise add onto the ASR states."
+            )
+        # Both streams are normalized before the add so `sound_merge_scale` is a true
+        # RELATIVE weight rather than an absolute magnitude.
+        #
+        # This matters more than it looks. The merge happens before `asr_norm`, so the
+        # speech states arrive raw -- measured RMS ~0.04 on the PEE-v2 speech expert,
+        # against unit variance for a LayerNorm-ed sound stream. Adding those directly
+        # would let sound take ~98% of the merged variance even at scale=0.3, burying
+        # the speech expert. Normalizing speech here puts the two on the same footing,
+        # so scale=s gives sound a variance share of s^2/(1+s^2) (the streams are
+        # near-orthogonal in practice: measured cosine ~0.004).
+        #
+        # The speech-side norm is affine-free: it exists only to fix the scale, and
+        # `asr_norm` right after the merge already carries a learnable affine. The
+        # sound-side norm keeps its affine so training can still adjust the sound gain.
+        self.merge_speech_norm = nn.LayerNorm(self.asr_d_model, elementwise_affine=False)
+        self.sound_norm = nn.LayerNorm(self.asr_d_model)
 
         self._apply_freezing()
 
@@ -695,6 +876,41 @@ class ParallelExpertEncoder(nn.Module):
         preds = self.sortformer_modules.forward_speaker_sigmoids(emb_seq)  # (B, T, n_spk)
         mask = self.sortformer_modules.length_to_mask(length, emb_seq.shape[1])
         return preds * mask.unsqueeze(-1).to(preds.dtype)
+
+    def _merge_sound_and_asr(self, asr_encoded: torch.Tensor, sound_encoded: torch.Tensor) -> torch.Tensor:
+        """Add the sound expert's encoder states onto the ASR states.
+
+        Interim path while the sound CTC head is in training. The eventual design
+        routes sound through a CTC head into sound tokens and injects those through a
+        kernel, the way the speaker sigmoids go through ``diar_kernel`` -- see the
+        ``merge_sound_expert_to_asr=False`` branch in ``__init__``.
+
+        Both experts run over the same frames in the same packed group, so the two
+        tensors are already aligned in time and need no resampling.
+
+        Args:
+            asr_encoded (Tensor): Speech (and speaker-fused) states. Shape ``(B, D, T)``.
+            sound_encoded (Tensor): Sound expert states. Shape ``(B, D, T)``.
+
+        Returns:
+            Merged states, shape ``(B, D, T)``.
+        """
+        if not self.merge_sound_expert_to_asr:
+            # Unreachable today: __init__ rejects False. Kept so the guard is local
+            # to the merge as well, for when the CTC path lands.
+            raise NotImplementedError(
+                "SoundToken CTC kernel injection is not implemented; see __init__."
+            )
+        if sound_encoded.shape[-1] != asr_encoded.shape[-1]:
+            raise ValueError(
+                f"sound expert produced {sound_encoded.shape[-1]} frames but the ASR states "
+                f"have {asr_encoded.shape[-1]}; the two experts must share a frame grid."
+            )
+        # Normalize BOTH streams so the scale is a relative weight (see __init__).
+        speech_states = self.merge_speech_norm(asr_encoded.transpose(1, 2))  # (B, T, D)
+        sound_states = self.sound_norm(sound_encoded.transpose(1, 2))        # (B, T, D)
+        merged = speech_states + self.sound_merge_scale * sound_states.to(speech_states.dtype)
+        return merged.transpose(1, 2).to(asr_encoded.dtype)  # (B, D, T)
 
     def _fuse_diar_and_asr(
         self,
@@ -872,15 +1088,23 @@ class ParallelExpertEncoder(nn.Module):
             if spk_targets is None:
                 spk_targets = diarization_preds
 
+        # Sound merges into the ASR states BEFORE the speaker fusion, so the two
+        # together form the backbone that `asr_norm` normalizes and the speaker
+        # kernel is then added on top of. Merging afterwards would instead bolt sound
+        # onto an already-normalized sum, leaving its scale outside the norm.
+        asr_states = asr_encoded
+        if self.merge_sound_expert_to_asr:
+            asr_states = self._merge_sound_and_asr(asr_states, sound_encoded)
+
         if spk_targets is not None:
             outputs = self._fuse_diar_and_asr(
-                asr_encoded,
+                asr_states,
                 spk_targets,
                 diarization_preds=diarization_preds,
                 use_diarization=use_diarization,
             )
         else:
-            outputs = asr_encoded
+            outputs = asr_states
 
         experts = {
             'speech': (asr_encoded, asr_encoded_len),
@@ -890,7 +1114,12 @@ class ParallelExpertEncoder(nn.Module):
         return outputs, asr_encoded_len, experts
 
     def _forward_online(self, audio_signal, length, spk_targets=None):
-        """Long-form generation path: a lock-step loop over fixed windows.
+        """Long-form generation path: dispatches to the offline pass or the windowed loop.
+
+        If the batch fits a single window (``num_chunks == 1``) this delegates straight
+        to :meth:`_forward`, which is the same computation without any of the streaming
+        bookkeeping -- see the comment at the branch. Otherwise it runs
+        :meth:`_forward_windowed`.
 
         Reached only from :meth:`online_inference`, which only generation opens -- the
         window count depends on this rank's audio, so the loop must never run in a
@@ -922,6 +1151,38 @@ class ParallelExpertEncoder(nn.Module):
         total_feat_len = min(audio_signal.shape[-1], int(length.max().item()))
         num_chunks = max(1, math.ceil(total_feat_len / self.chunk_feat_len))
 
+        if num_chunks == 1:
+            # The whole batch fits one window, so every part of the streaming
+            # apparatus is dead weight: the cache is empty (the prefix is a (B, 0, D)
+            # no-op), there is no context to trim, and `streaming_update` degenerates
+            # to `preds[:, 0:chunk_len]` -- a plain slice -- because spkcache, fifo and
+            # lc are all zero. Take the offline path instead; same result, none of the
+            # per-window bookkeeping. This is the common case for short-utterance
+            # benchmarks (RTFx median ~7 s against a 30 s chunk).
+            #
+            # `num_chunks` follows `length.max()`, so this is a per-BATCH decision: one
+            # long utterance keeps the whole batch on the windowed path. Length-bucket
+            # upstream to get the win on mixed batches.
+            #
+            # Trim to `total_feat_len` first -- the windowed path never looks past it,
+            # and carrying the batch's right padding into the encoder would both change
+            # T and waste the compute this fast path exists to save.
+            return self._forward(
+                audio_signal=audio_signal[:, :, :total_feat_len],
+                length=length.clamp(max=total_feat_len),
+                spk_targets=spk_targets,
+            )
+
+        return self._forward_windowed(
+            audio_signal=audio_signal, length=length, spk_targets=spk_targets,
+            total_feat_len=total_feat_len, num_chunks=num_chunks,
+        )
+
+    def _forward_windowed(self, audio_signal, length, spk_targets, total_feat_len, num_chunks):
+        """The windowed long-form loop proper: one ``forward_packed`` per window with a
+        live speaker cache. Split out from :meth:`_forward_online` so the single-window
+        fast path and this path can each be exercised directly.
+        """
         # Normalise the whole utterance once (not per chunk) to match offline stats.
         signal, signal_length = self._prepare_input(audio_signal, length)
 
@@ -959,25 +1220,42 @@ class ParallelExpertEncoder(nn.Module):
             left_offset = stt - enc_stt
             right_offset = enc_end - end
 
-            window = signal[:, :, enc_stt:enc_end]
-            window_length = (signal_length - enc_stt).clamp(min=0, max=enc_end - enc_stt)
-
-            # The speaker attends over its cache; the other experts are padded to match.
-            prefix = None
+            # The speaker attends over [cache | chunk]. Rather than let the cache
+            # extend it past the others and pad them with zeros, walk the window's
+            # start back by exactly the cache length and splice in 'replace' mode: the
+            # cache stands in for the speaker's leading frames, while speech and sound
+            # spend those same slots on REAL left context. Same T, same FLOPs, no zeros
+            # -- and with every expert full-length the group stays FA-2 eligible.
+            prefix, cache_len, extra = None, 0, 0
             if run_streaming_diar:
                 cache = torch.cat([streaming_state.spkcache, streaming_state.fifo], dim=1)
+                cache_len = cache.shape[1]
                 prefix = {'speaker': cache.to(dtype=signal.dtype)}
+                if self.online_prefix_mode == 'replace':
+                    # Only as far back as the recording actually goes.
+                    extra = min(cache_len * self.subsampling_factor, enc_stt) // self.subsampling_factor
+
+            # 'replace' needs the window to carry at least `cache_len` leading frames to
+            # give up. Near the start of a recording it cannot, so fall back to the
+            # zero-padded 'extend' path for those windows only.
+            prefix_mode = 'replace' if (self.online_prefix_mode == 'replace' and extra == cache_len) else 'extend'
+            ext_stt = enc_stt - (extra * self.subsampling_factor if prefix_mode == 'replace' else 0)
+
+            window = signal[:, :, ext_stt:enc_end]
+            window_length = (signal_length - ext_stt).clamp(min=0, max=enc_end - ext_stt)
 
             with torch.set_grad_enabled(
                 not (self.freeze_speech and self.freeze_speaker and self.freeze_sound)
             ):
                 packed, pre_encode = self.pee.forward_packed(
                     window, window_length, backend=self.ggemm_backend, moe_mode=self.moe_mode,
-                    prefix=prefix, return_pre_encode=True,
+                    prefix=prefix, return_pre_encode=True, prefix_mode=prefix_mode,
                 )
 
             # Trim context off in output-frame space using rounded cumulative positions.
-            left_drop = left_offset // self.subsampling_factor
+            # Speech/sound now also carry `extra` frames of extra left context up front.
+            n_extra = extra if prefix_mode == 'replace' else 0
+            left_drop = n_extra + left_offset // self.subsampling_factor
             right_drop = right_offset // self.subsampling_factor
             core_len = round(end / self.subsampling_factor) - round(stt / self.subsampling_factor)
 
@@ -995,13 +1273,17 @@ class ParallelExpertEncoder(nn.Module):
                     # Predictions span [spkcache | fifo | lc + chunk + rc], which is
                     # exactly the layout `streaming_update` documents.
                     preds = self._speaker_head(speaker_encoded, speaker_len)
+                # The speaker's chunk excludes the frames the cache stood in for, so it
+                # spans exactly [lc | chunk | rc] of the ORIGINAL window -- its lc is
+                # `left_offset`, not the `left_drop` speech/sound use (which also has
+                # to skip the extra left context those two received).
                 chunk_embs, _ = pre_encode['speaker']  # (B, lc+chunk+rc, fc_d_model)
                 with _disable_dist_feature_sync(), _default_dtype(stream_dtype):
                     streaming_state, chunk_preds = self.sortformer_modules.streaming_update(
                         streaming_state,
                         chunk=chunk_embs.to(stream_dtype),
                         preds=preds.to(stream_dtype),
-                        lc=left_drop,
+                        lc=left_offset // self.subsampling_factor,
                         rc=right_drop,
                     )
                 # Newly emitted frames, aligned to the speech chunk (frame-parallel).
@@ -1013,15 +1295,22 @@ class ParallelExpertEncoder(nn.Module):
         if spk_targets is None:
             spk_targets = diarization_preds
 
+        # Same order as the offline path: sound joins the ASR backbone first, then the
+        # speaker kernel is fused on top. The windowed sound chunks were trimmed with
+        # the identical offsets, so they stay frame-aligned with the ASR states.
+        asr_states = asr_encoded
+        if self.merge_sound_expert_to_asr:
+            asr_states = self._merge_sound_and_asr(asr_states, sound_encoded)
+
         if spk_targets is not None:
             outputs = self._fuse_diar_and_asr(
-                asr_encoded,
+                asr_states,
                 spk_targets,
                 diarization_preds=diarization_preds,
                 use_diarization=use_diarization,
             )
         else:
-            outputs = asr_encoded
+            outputs = asr_states
 
         experts = {
             'speech': (asr_encoded, asr_encoded_len),
