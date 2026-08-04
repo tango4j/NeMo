@@ -288,17 +288,25 @@ def setup_parallel_expert_encoder(model: torch.nn.Module):
         pass
 
     model.perception.encoder = pe_encoder
+    # `merge_sound_expert_to_asr` is a route, not an on/off switch: False means the CTC
+    # event tags are injected, which reads backwards as a bare bool in a log line.
+    if pe_encoder.merge_sound_expert_to_asr:
+        sound_route = "encoder states"
+    else:
+        sound_route = f"{int(pe_encoder.n_sound_events)} CTC event tags"
+        if int(pe_encoder.n_sound_styles):
+            sound_route += f" + {int(pe_encoder.n_sound_styles)} style tags"
     logging.info(
         "Mounted ParallelExpertEncoder from %s onto model.perception.encoder "
         "(d_model=%d, n_spk=%d, frozen: speech=%s speaker=%s sound=%s, "
-        "sound_merge=%s); perception preprocessor normalization disabled (was %r).",
+        "sound->ASR via %s); perception preprocessor normalization disabled (was %r).",
         pe_encoder_path,
         int(pe_encoder.d_model),
         int(pe_encoder.n_spk),
         bool(pe_encoder.freeze_speech),
         bool(pe_encoder.freeze_speaker),
         bool(pe_encoder.freeze_sound),
-        bool(pe_encoder.merge_sound_expert_to_asr),
+        sound_route,
         prev_normalize,
     )
 
