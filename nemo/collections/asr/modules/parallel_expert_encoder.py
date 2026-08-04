@@ -27,11 +27,26 @@ speaker kernel + ADD).
 
 The sound expert is merged in per ``merge_sound_expert_to_asr``:
 
-* ``True`` (current) -- its encoder states are LayerNorm-ed, scaled and added onto
-  the ASR states, the interim path while the sound CTC head is being trained.
-* ``False`` -- the eventual SoundToken route: a tiny CTC head on the sound expert
-  emits sound tokens injected through a learned kernel, the direct analogue of the
-  speaker branch. Not implemented yet; raises ``NotImplementedError``.
+* ``False`` (default since v2.1.0) -- the SoundToken route. The sound expert's CTC
+  head reads per-frame ``<ev:...>`` event and ``<sty:stt|end:...>`` style-span
+  probabilities out of its states, and those are thresholded, LayerNorm-ed and
+  injected through sinusoidal kernels: the direct analogue of the speaker branch, on
+  disjoint sets of sinusoid rows. What reaches the ASR states is only the tags, a
+  signal of rank <= ``n_sound_events + n_sound_styles``.
+* ``True`` -- the whole sound representation instead: its encoder states are
+  LayerNorm-ed, scaled and added onto the ASR states. This was the v2.0.0 default,
+  used while the CTC head was still being trained.
+
+Speakers, events and styles are three separate families: each has its own LayerNorm over
+its own tags, its own block of sinusoid rows and its own scale. A single norm spanning
+two families would make each one's code shift with the other's activity, and the sound
+expert is much weaker on styles than on events, so the scales need to move apart.
+
+Every family's rows are strided (see ``_TAG_ROW_STRIDE``) and its kernel calibrated so a
+single active tag injects a vector of norm ``sqrt(d_model)``. That makes each ``*_scale``
+a plain fraction of the ASR state magnitude, unaffected by how many tags the family holds
+or which rows it was given -- so widening a family, or moving it, no longer silently
+changes how loudly it speaks.
 
 Order matters: sound joins the ASR states FIRST, so speech + sound together form
 the backbone that ``asr_norm`` normalizes, and the speaker kernel is then added on
@@ -66,6 +81,7 @@ import importlib
 import inspect
 import math
 import os
+import re
 import shutil
 import tarfile
 from typing import Dict, List, Optional, Tuple, Union
@@ -94,6 +110,68 @@ __all__ = [
 EXPERT_ROLES = ('speech', 'speaker', 'sound')
 # role -> decoder family recorded on the container (see PEE_EXPERT_TASKS).
 EXPERT_TASKS = {'speech': 'asr_tdt', 'speaker': 'diarization', 'sound': 'sound_rnnt'}
+
+# The two tagged families the sound expert's CTC head contributes to the ASR states:
+# event tags such as `<ev:laughter>` (10 in the v2.1.0 checkpoint) and style-span
+# delimiters such as `<sty:stt:anger_contempt>` / `<sty:end:anger_contempt>` (22 = 11
+# styles x start/end). These prefixes are the ones the sound checkpoint itself declares
+# in `token_weighting.{event,style}_prefixes`, which is where to look first if a
+# retrained expert stops matching.
+#
+# `stt`/`end` are kept as 22 INDEPENDENT point tags rather than being folded into 11
+# "style is active over this span" signals. Reconstructing the span would need a state
+# machine carried across window boundaries in `_forward_windowed`, and any disagreement
+# between that carry-over and the offline path shows up as a train/inference mismatch.
+# Emitting the raw delimiters keeps the fusion stateless and lets the decoder's attention
+# tie a start to its end, which is the kind of long-range binding attention is good at.
+#
+# `<spk:0>` / `<spk:1>` are deliberately left out: PEE gets speakers from the Sortformer
+# expert, which owns sinusoid rows 0..n_spk-1, and injecting the sound expert's weaker
+# 2-speaker guesses would put a second opinion on the same question into the states.
+_SOUND_EVENT_TOKEN_PREFIX = '<ev:'
+_SOUND_EVENT_TOKEN_RE = re.compile(r'^<ev:[^>]+>$')
+_SOUND_STYLE_TOKEN_PREFIX = '<sty:'
+_SOUND_STYLE_TOKEN_RE = re.compile(r'^<sty:(?:stt|end):[^>]+>$')
+
+# Where each tag family's sinusoid rows live, and how far apart consecutive rows sit.
+#
+# Rows are STRIDED rather than consecutive, and each family gets its own far-apart block,
+# because these rows are identity codes and not positions. Adjacent rows of the sinusoid
+# table sit at ~0.97 cosine -- the very property that makes the table good at encoding
+# position makes it bad at encoding identity.
+#
+# Two things go wrong with consecutive rows, both measured on the per-tag injection
+# vectors rather than the raw rows:
+#
+#   * Tags become hard to tell apart. Worst within-family cosine at stride 1 is 0.858
+#     (speakers, n_spk=8) and 0.927 (a 32-tag sound family); at stride 16 it is 0.163 and
+#     0.231. Across families, the worst event-vs-speaker pair goes from 0.485 to 0.006.
+#   * Tags become unequally loud. A tag's code is proportional to ``row_i - mean(rows)``,
+#     so with overlapping rows the slots in the MIDDLE of a block sit near the mean and
+#     inject faintly while the edges inject strongly -- a 1.64x spread across 8 speakers,
+#     and 2.22x across 4. Once the rows are near-orthogonal, ``|row_i - mean|`` is the
+#     same for every i and the spread falls to 1.12x.
+#
+# The blocks are spaced far enough apart to stay disjoint as families grow: speakers can
+# reach n_spk=32 before running into the event block.
+_TAG_ROW_STRIDE = 16
+_SPEAKER_ROW_OFFSET = 0
+_SOUND_EVENT_ROW_OFFSET = 512
+_SOUND_STYLE_ROW_OFFSET = 1024
+
+# The v2.0.0 speaker layout: consecutive rows 0..n_spk-1, no calibration, scale 1.0. The
+# published bundle's speech expert was trained against exactly this, so it stays the
+# default and such a bundle reloads bit-identically. New bundles opt in to the calibrated,
+# strided layout by writing spk_kernel_row_stride and spk_kernel_calibrate.
+#
+# Calibration is tied to the layout rather than defaulted on because the two are only
+# ACCIDENTALLY close: at n_spk=8, d_model=2048 the calibration factor happens to be
+# 1.33325, so the new 0.75 default reproduces the old 1.0 to 6e-5 -- near enough to look
+# interchangeable, not near enough to be (it moves 16% of elements by one bf16 ulp), and
+# the near-miss does not hold at any other n_spk.
+_LEGACY_SPEAKER_ROW_STRIDE = 1
+_LEGACY_SPK_KERNEL_SCALE = 1.0
+_CALIBRATED_KERNEL_SCALE = 0.75
 
 
 @contextlib.contextmanager
@@ -248,6 +326,7 @@ class ParallelExpertEncoderPT(ModelPT):
             speaker_expert_cfg=self._cfg.get('speaker_expert_cfg', None),
             sound_expert_cfg=self._cfg.get('sound_expert_cfg', None),
             sortformer_modules_cfg=self._cfg.get('sortformer_modules_cfg', None),
+            sound_ctc_head_cfg=self._cfg.get('sound_ctc_head_cfg', None),
             asr_normalize_type=self._cfg.get('asr_normalize_type', 'per_feature'),
             freeze_speaker=self._cfg.get('freeze_speaker', True),
             freeze_speech=self._cfg.get('freeze_speech', False),
@@ -260,14 +339,20 @@ class ParallelExpertEncoderPT(ModelPT):
             diar_spkcache_len=self._cfg.get('diar_spkcache_len', 200),
             missing_rttm_target=self._cfg.get('missing_rttm_target', -1.0),
             speaker_activity_threshold=self._cfg.get('speaker_activity_threshold', 0.5),
-            spk_kernel_scale=self._cfg.get('spk_kernel_scale', 1.0),
+            spk_kernel_scale=self._cfg.get('spk_kernel_scale', None),
+            spk_kernel_row_stride=self._cfg.get('spk_kernel_row_stride', _LEGACY_SPEAKER_ROW_STRIDE),
+            spk_kernel_calibrate=self._cfg.get('spk_kernel_calibrate', False),
             sync_max_audio_length=self._cfg.get('sync_max_audio_length', False),
             always_run_diarization=self._cfg.get('always_run_diarization', True),
             moe_mode=self._cfg.get('moe_mode', 'dense'),
             ggemm_backend=self._cfg.get('ggemm_backend', 'baddbmm'),
             online_prefix_mode=self._cfg.get('online_prefix_mode', 'replace'),
-            merge_sound_expert_to_asr=self._cfg.get('merge_sound_expert_to_asr', True),
+            merge_sound_expert_to_asr=self._cfg.get('merge_sound_expert_to_asr', False),
             sound_merge_scale=self._cfg.get('sound_merge_scale', 0.3),
+            sound_event_threshold=self._cfg.get('sound_event_threshold', 0.5),
+            sound_kernel_scale=self._cfg.get('sound_kernel_scale', 0.75),
+            inject_sound_styles=self._cfg.get('inject_sound_styles', True),
+            sound_style_scale=self._cfg.get('sound_style_scale', 0.75),
         )
 
     @classmethod
@@ -476,6 +561,16 @@ class ParallelExpertEncoderPT(ModelPT):
                 "it cannot be used as a save template."
             )
 
+        # Only required on the SoundToken path, so it is not in `missing` above -- but
+        # without it the saved bundle would carry sound_ctc_head weights that its own
+        # config never builds, and fail strict reload.
+        if not encoder.merge_sound_expert_to_asr and template_cfg.get('sound_ctc_head_cfg', None) in (None, {}, ''):
+            raise ValueError(
+                f"Encoder uses merge_sound_expert_to_asr=False (SoundToken injection) but template "
+                f"bundle {template_bundle_path} has no sound_ctc_head_cfg; the saved bundle would "
+                "not reload. Use a template built by build_pee_v2_bundle.py at v2.1.0 or later."
+            )
+
         tmpl_d_model = int(template_cfg.speech_expert_cfg.get('d_model', -1))
         tmpl_n_spk = int(template_cfg.sortformer_modules_cfg.get('num_spks', -1))
         enc_d_model = int(encoder.d_model)
@@ -525,6 +620,12 @@ class ParallelExpertEncoder(nn.Module):
             (``encoder_proj`` + ``forward_speaker_sigmoids``) and the streaming
             speaker-cache logic. ``tf_d_model`` must match the checkpoint (192 on
             the v2 speaker), not be assumed equal to ``fc_d_model``.
+        sound_ctc_head_cfg (DictConfig, optional): Inline config for the sound expert's
+            CTC head (a :class:`ConvASRDecoder`), lifted from the sound checkpoint's
+            ``decoder:`` block. Like the Sortformer head this is NOT part of the
+            expert's encoder, so it is built here and loaded separately. Its
+            ``vocabulary`` is what the ``<ev:...>`` column indices are read from.
+            Required when ``merge_sound_expert_to_asr=False``, unused otherwise.
         asr_normalize_type (str, optional): Normalization applied to the shared mel
             input. Defaults to ``per_feature``, which every expert then sees --
             there is one packed call over one input tensor, so the three experts
@@ -554,8 +655,23 @@ class ParallelExpertEncoder(nn.Module):
             predictions. Defaults to ``-1.0``.
         speaker_activity_threshold (float): Binarization threshold applied to RTTM and
             diarization targets before speaker-kernel fusion. Defaults to ``0.5``.
-        spk_kernel_scale (float): Scale applied to the speaker-kernel contribution
-            before adding it to speech encoder states. Defaults to ``1.0``.
+        spk_kernel_scale (float, optional): Weight of the speaker-kernel contribution.
+            Defaults to ``0.75`` when ``spk_kernel_calibrate`` and ``1.0`` otherwise,
+            because the two layouts measure it in different units -- see that argument.
+        spk_kernel_row_stride (int): Spacing between the sinusoid rows the speaker kernel
+            takes. Defaults to ``1`` -- rows ``0 … n_spk-1``, the layout v2.0.0 was built
+            and trained against, so a bundle that does not set this reloads unchanged.
+            New bundles set ``16``, which makes the speaker rows near-orthogonal: the
+            worst speaker-pair cosine drops from 0.858 to 0.163 and the spread in
+            per-speaker injection strength from 1.64x to 1.12x. See ``_TAG_ROW_STRIDE``.
+        spk_kernel_calibrate (bool): Rescale the speaker kernel so one active speaker
+            injects ``sqrt(d_model)``, making ``spk_kernel_scale`` a *fraction of the ASR
+            state magnitude* directly comparable to ``sound_kernel_scale`` and independent
+            of ``n_spk``. Uncalibrated, the same scale injects 0.36 of the state magnitude
+            at ``n_spk=4`` but 0.75 at ``n_spk=8``. Defaults to ``False`` so that v2.0.0
+            bundles, whose speech expert was trained on the raw kernel, reload
+            bit-identically; new bundles set it. Changing it on a trained checkpoint moves
+            the kernel out from under the weights that learned to read it.
         sync_max_audio_length (bool): Let the experts all-reduce their maximum sequence
             length on the default process group. Defaults to ``False``; leave it off
             unless every rank is guaranteed to run the encoder on every step, since the
@@ -576,13 +692,15 @@ class ParallelExpertEncoder(nn.Module):
             Windows too near the start of a recording to walk back far enough fall
             back to ``'extend'`` automatically.
         merge_sound_expert_to_asr (bool): How the sound expert reaches the ASR states.
-            ``True`` (default, and currently the only supported mode) adds the sound
-            expert's **encoder states** onto the ASR states, LayerNorm-ed and scaled by
-            ``sound_merge_scale``. ``False`` selects the eventual SoundToken path -- a
-            tiny CTC head on the sound expert producing sound tokens that are injected
-            through a learned kernel, exactly as the speaker sigmoids are injected
-            through ``diar_kernel`` -- and raises :class:`NotImplementedError` until
-            that CTC head exists.
+            ``False`` (default since v2.1.0) selects the **SoundToken** path: the CTC
+            head reads per-frame ``<ev:...>`` and ``<sty:stt|end:...>`` probabilities
+            out of the sound states, and those are thresholded at
+            ``sound_event_threshold``, LayerNorm-ed per family and injected through
+            ``sound_token_kernel`` / ``sound_style_kernel`` -- exactly as the speaker
+            sigmoids go through ``diar_kernel``. Requires ``sound_ctc_head_cfg``.
+            ``True`` instead adds the sound expert's **encoder states**, LayerNorm-ed
+            and scaled by ``sound_merge_scale``; that was the v2.0.0 behaviour and
+            needs no CTC head.
         sound_merge_scale (float): Relative weight of the sound stream in the merged
             backbone, mirroring ``spk_kernel_scale``. Both streams are normalized
             first, and they are near-orthogonal in practice (measured cosine
@@ -593,6 +711,27 @@ class ParallelExpertEncoder(nn.Module):
             backbone. This is a starting point, not a ceiling: ``sound_norm`` keeps
             a learnable affine gain and the sound expert itself trains, so the
             model can grow the contribution if the loss rewards it.
+            Ignored when ``merge_sound_expert_to_asr=False``.
+        sound_event_threshold (float): Probability above which an event or style tag
+            counts as present, before the kernel injection. Defaults to ``0.5``,
+            mirroring ``speaker_activity_threshold``. Only read on the SoundToken path.
+        sound_kernel_scale (float): Weight of the event-kernel contribution, the sound
+            twin of ``spk_kernel_scale`` and on the same calibrated footing: a fraction of
+            the ASR state magnitude, independent of how many event tags there are.
+            ``asr_encoded`` arrives from the speech expert's ``final_norm``, so it too has
+            norm ``~sqrt(d_model)``. Defaults to ``0.75``, level with the speaker kernel.
+            Only read on the SoundToken path.
+        inject_sound_styles (bool): Whether to also inject the 22 ``<sty:stt|end:...>``
+            span delimiters as their own tag family. Defaults to ``True``. When
+            ``False`` only the event tags are injected and no style kernel is built,
+            which is the v2.1.0-rc behaviour. Only read on the SoundToken path.
+        sound_style_scale (float): Weight of the style-kernel contribution, on the same
+            calibrated footing, so it is directly comparable to ``sound_kernel_scale``
+            despite the family being 22 tags rather than 10. Defaults to ``0.75``. Kept a
+            separate knob because the sound expert is markedly weaker on styles than on
+            events, and this ships at the value that *balances* styles against the states
+            rather than one shown to help: ``0.0`` mutes them while leaving the event path
+            bit-identical. Only read on the SoundToken path.
     """
 
     def __init__(
@@ -601,6 +740,7 @@ class ParallelExpertEncoder(nn.Module):
         speaker_expert_cfg: DictConfig,
         sound_expert_cfg: DictConfig,
         sortformer_modules_cfg: DictConfig,
+        sound_ctc_head_cfg: Optional[DictConfig] = None,
         asr_normalize_type: Optional[str] = 'per_feature',
         freeze_speaker: bool = True,
         freeze_speech: bool = False,
@@ -613,14 +753,20 @@ class ParallelExpertEncoder(nn.Module):
         diar_spkcache_len: int = 200,
         missing_rttm_target: float = -1.0,
         speaker_activity_threshold: float = 0.5,
-        spk_kernel_scale: float = 1.0,
+        spk_kernel_scale: Optional[float] = None,
+        spk_kernel_row_stride: int = _LEGACY_SPEAKER_ROW_STRIDE,
+        spk_kernel_calibrate: bool = False,
         sync_max_audio_length: bool = False,
         always_run_diarization: bool = True,
         moe_mode: str = 'dense',
         ggemm_backend: str = 'baddbmm',
         online_prefix_mode: str = 'replace',
-        merge_sound_expert_to_asr: bool = True,
+        merge_sound_expert_to_asr: bool = False,
         sound_merge_scale: float = 0.3,
+        sound_event_threshold: float = 0.5,
+        sound_kernel_scale: float = 0.75,
+        inject_sound_styles: bool = True,
+        sound_style_scale: float = 0.75,
     ):
         super().__init__()
 
@@ -698,6 +844,14 @@ class ParallelExpertEncoder(nn.Module):
         self.diar_spkcache_len = int(diar_spkcache_len)
         self.missing_rttm_target = float(missing_rttm_target)
         self.speaker_activity_threshold = float(speaker_activity_threshold)
+        self.spk_kernel_calibrate = bool(spk_kernel_calibrate)
+        # The default scale follows the layout: calibrated kernels are a fraction of the
+        # state magnitude, uncalibrated ones are the raw v2.0.0 kernel at unit weight.
+        # These are NOT interchangeable numbers, so neither can serve as both defaults.
+        if spk_kernel_scale is None:
+            spk_kernel_scale = (
+                _CALIBRATED_KERNEL_SCALE if self.spk_kernel_calibrate else _LEGACY_SPK_KERNEL_SCALE
+            )
         self.spk_kernel_scale = float(spk_kernel_scale)
 
         self.n_spk = int(self.sortformer_modules.n_spk)
@@ -706,55 +860,173 @@ class ParallelExpertEncoder(nn.Module):
 
         self.asr_norm = nn.LayerNorm(self.asr_d_model)
         self.diar_norm = nn.LayerNorm(self.n_spk)
+        self.spk_kernel_row_stride = max(1, int(spk_kernel_row_stride))
+        spk_last_row = _SPEAKER_ROW_OFFSET + self.spk_kernel_row_stride * (self.n_spk - 1)
+        if spk_last_row >= _SOUND_EVENT_ROW_OFFSET:
+            raise ValueError(
+                f"n_spk={self.n_spk} at spk_kernel_row_stride={self.spk_kernel_row_stride} "
+                f"reaches sinusoid row {spk_last_row}, which is inside the sound event "
+                f"block at row {_SOUND_EVENT_ROW_OFFSET}. Speakers and sound tags would "
+                "share rows and become indistinguishable; lower the stride or move the "
+                "sound blocks."
+            )
         self.register_buffer(
             "diar_kernel",
-            self._build_sinusoid_position_encoding(self.n_spk, self.asr_d_model),
+            self._build_tag_kernel(
+                self.n_spk,
+                _SPEAKER_ROW_OFFSET,
+                self.asr_d_model,
+                stride=self.spk_kernel_row_stride,
+                calibrate=self.spk_kernel_calibrate,
+            ),
             persistent=False,
         )
 
         # --- sound expert -> ASR merge -------------------------------------
         self.merge_sound_expert_to_asr = bool(merge_sound_expert_to_asr)
         self.sound_merge_scale = float(sound_merge_scale)
+        self.sound_event_threshold = float(sound_event_threshold)
+        self.sound_kernel_scale = float(sound_kernel_scale)
+        self.inject_sound_styles = bool(inject_sound_styles)
+        self.sound_style_scale = float(sound_style_scale)
+        self.sound_ctc_head = None
+        self.n_sound_events = 0
+        self.n_sound_styles = 0
         if not self.merge_sound_expert_to_asr:
-            # TODO(sound-ctc): implement the SoundToken kernel-injection path.
-            #   Planned shape, mirroring the speaker branch:
-            #     sound expert states -> tiny CTC head -> sound-token posteriors
-            #       -> binarize/threshold -> sound_norm -> matmul(sound_kernel)
-            #       -> scaled add onto the ASR states,
-            #   i.e. the direct analogue of forward_speaker_sigmoids -> diar_kernel.
-            #   Blocked on the CTC head being trained (weiqingw). Until then the
-            #   only supported mode is merge_sound_expert_to_asr=True, which adds
-            #   the sound ENCODER STATES rather than a token kernel.
-            raise NotImplementedError(
-                "merge_sound_expert_to_asr=False (SoundToken CTC kernel injection) is not "
-                "implemented yet -- the sound CTC head is still being trained. Use "
-                "merge_sound_expert_to_asr=True, which adds the sound expert's encoder "
-                "states to the ASR states directly."
+            # SoundToken path: the sound expert reaches ASR as discrete EVENT TOKENS
+            # rather than as encoder states. Exactly the speaker branch's shape --
+            # posteriors -> threshold -> LayerNorm -> matmul(kernel) -> scaled add --
+            # with the CTC head standing in for forward_speaker_sigmoids.
+            if sound_ctc_head_cfg is None:
+                raise ValueError(
+                    "merge_sound_expert_to_asr=False needs sound_ctc_head_cfg: the event "
+                    "tokens come from the sound expert's CTC head, which is not part of "
+                    "its encoder. Bundles built by build_pee_v2_bundle.py carry it as the "
+                    "sound checkpoint's `decoder:` block. Pass merge_sound_expert_to_asr="
+                    "True to use the encoder-state merge instead, which needs no head."
+                )
+            self.sound_ctc_head = _build_from_cfg(
+                _clone_config(sound_ctc_head_cfg), 'sound_ctc_head_cfg'
+            )
+            vocabulary = list(sound_ctc_head_cfg.get('vocabulary') or ())
+            if not vocabulary:
+                raise ValueError(
+                    "sound_ctc_head_cfg has no `vocabulary`; the tag column indices are "
+                    "read from it and cannot be guessed from num_classes."
+                )
+            # Read the tag ids out of the vocabulary rather than hard-coding them: they
+            # are an artifact of how the sound expert's tokenizer was built and will move
+            # the next time it is retrained.
+            event_ids = [i for i, tok in enumerate(vocabulary) if _SOUND_EVENT_TOKEN_RE.match(str(tok))]
+            if not event_ids:
+                raise ValueError(
+                    f"sound_ctc_head_cfg.vocabulary has no {_SOUND_EVENT_TOKEN_PREFIX}... "
+                    f"tokens among its {len(vocabulary)} entries, so there is nothing to "
+                    "inject. Is this the CTC-head sound expert?"
+                )
+            self.sound_event_tokens = tuple(str(vocabulary[i]) for i in event_ids)
+            self.n_sound_events = len(event_ids)
+            self.register_buffer(
+                "sound_event_token_ids", torch.tensor(event_ids, dtype=torch.long), persistent=False
             )
 
-        sound_d_model = int(self.pee.experts['sound'].d_model)
-        if sound_d_model != self.asr_d_model:
-            raise ValueError(
-                f"merge_sound_expert_to_asr requires the sound expert d_model "
-                f"({sound_d_model}) to match the speech expert d_model ({self.asr_d_model}); "
-                "the merge is an elementwise add onto the ASR states."
+            style_ids = []
+            if self.inject_sound_styles:
+                style_ids = [i for i, tok in enumerate(vocabulary) if _SOUND_STYLE_TOKEN_RE.match(str(tok))]
+                if not style_ids:
+                    raise ValueError(
+                        f"inject_sound_styles=True but the vocabulary has no "
+                        f"{_SOUND_STYLE_TOKEN_PREFIX}stt|end:... tokens among its "
+                        f"{len(vocabulary)} entries. Pass inject_sound_styles=False to "
+                        "inject only the event tags."
+                    )
+            self.sound_style_tokens = tuple(str(vocabulary[i]) for i in style_ids)
+            self.n_sound_styles = len(style_ids)
+            self.register_buffer(
+                "sound_style_token_ids", torch.tensor(style_ids, dtype=torch.long), persistent=False
             )
-        # Both streams are normalized before the add so `sound_merge_scale` is a true
-        # RELATIVE weight rather than an absolute magnitude.
-        #
-        # This matters more than it looks. The merge happens before `asr_norm`, so the
-        # speech states arrive raw -- measured RMS ~0.04 on the PEE-v2 speech expert,
-        # against unit variance for a LayerNorm-ed sound stream. Adding those directly
-        # would let sound take ~98% of the merged variance even at scale=0.3, burying
-        # the speech expert. Normalizing speech here puts the two on the same footing,
-        # so scale=s gives sound a variance share of s^2/(1+s^2) (the streams are
-        # near-orthogonal in practice: measured cosine ~0.004).
-        #
-        # The speech-side norm is affine-free: it exists only to fix the scale, and
-        # `asr_norm` right after the merge already carries a learnable affine. The
-        # sound-side norm keeps its affine so training can still adjust the sound gain.
-        self.merge_speech_norm = nn.LayerNorm(self.asr_d_model, elementwise_affine=False)
-        self.sound_norm = nn.LayerNorm(self.asr_d_model)
+
+            # Events and styles are two SEPARATE families, each with its own LayerNorm
+            # over its own tags and its own block of sinusoid rows.
+            #
+            # A single LayerNorm spanning both would couple them: its mean and variance
+            # run over every tag, so each style that fires would rewrite the value placed
+            # on an active event dim. Measured on a shared norm over all 32 tags, the
+            # event code moves to 0.949 cosine (and 149.7 -> 119.3 in magnitude) when an
+            # unrelated style co-fires, i.e. the event signal would silently depend on
+            # style activity. With per-family norms that cross-talk is exactly zero.
+            #
+            # It also keeps the two scales independent, which matters because the expert
+            # is markedly weaker on styles than on events: `sound_style_scale=0.0`
+            # recovers the event-only behaviour without disturbing the event path.
+            # Each family also gets its own strided block of sinusoid rows, disjoint from
+            # the speaker block, so an event, a style and a speaker never push the ASR
+            # states in the same direction.
+            self.sound_token_norm = nn.LayerNorm(self.n_sound_events)
+            self.register_buffer(
+                "sound_token_kernel",
+                self._build_tag_kernel(self.n_sound_events, _SOUND_EVENT_ROW_OFFSET, self.asr_d_model),
+                persistent=False,
+            )
+            if self.n_sound_styles:
+                self.sound_style_norm = nn.LayerNorm(self.n_sound_styles)
+                self.register_buffer(
+                    "sound_style_kernel",
+                    self._build_tag_kernel(
+                        self.n_sound_styles, _SOUND_STYLE_ROW_OFFSET, self.asr_d_model
+                    ),
+                    persistent=False,
+                )
+
+            # Frozen, like the speaker head. The threshold below is a hard binarization,
+            # so no gradient would survive the fusion anyway; freezing makes that
+            # explicit and keeps the head out of the optimizer.
+            self.sound_ctc_head.eval()
+            for p in self.sound_ctc_head.parameters():
+                p.requires_grad = False
+
+            # The same argument applies to the expert behind the head: on this route it
+            # reaches ASR only through those binarized tags, so it cannot receive
+            # gradient either. Leaving it unfrozen is not wrong, just inert -- and it
+            # silently costs a full set of optimizer states for ~0.5 B parameters that
+            # cannot move. Warn rather than override, since an auxiliary sound loss
+            # added elsewhere is a legitimate reason to want it trainable.
+            if not freeze_sound:
+                logging.warning(
+                    "merge_sound_expert_to_asr=False with freeze_sound=False: the sound "
+                    "expert reaches the ASR states only through hard-thresholded event "
+                    "tags, so it will receive NO gradient from this path and its "
+                    "optimizer state is wasted. Set freeze_sound=True unless an "
+                    "auxiliary sound loss trains it separately."
+                )
+
+        else:
+            sound_d_model = int(self.pee.experts['sound'].d_model)
+            if sound_d_model != self.asr_d_model:
+                raise ValueError(
+                    f"merge_sound_expert_to_asr requires the sound expert d_model "
+                    f"({sound_d_model}) to match the speech expert d_model ({self.asr_d_model}); "
+                    "the merge is an elementwise add onto the ASR states."
+                )
+            # Both streams are normalized before the add so `sound_merge_scale` is a true
+            # RELATIVE weight rather than an absolute magnitude.
+            #
+            # This matters more than it looks. The merge happens before `asr_norm`, so the
+            # speech states arrive raw -- measured RMS ~0.04 on the PEE-v2 speech expert,
+            # against unit variance for a LayerNorm-ed sound stream. Adding those directly
+            # would let sound take ~98% of the merged variance even at scale=0.3, burying
+            # the speech expert. Normalizing speech here puts the two on the same footing,
+            # so scale=s gives sound a variance share of s^2/(1+s^2) (the streams are
+            # near-orthogonal in practice: measured cosine ~0.004).
+            #
+            # The speech-side norm is affine-free: it exists only to fix the scale, and
+            # `asr_norm` right after the merge already carries a learnable affine. The
+            # sound-side norm keeps its affine so training can still adjust the sound gain.
+            #
+            # Built only on this branch: on the SoundToken branch they would be
+            # parameters in the state dict that no forward pass ever reads.
+            self.merge_speech_norm = nn.LayerNorm(self.asr_d_model, elementwise_affine=False)
+            self.sound_norm = nn.LayerNorm(self.asr_d_model)
 
         self._apply_freezing()
 
@@ -776,6 +1048,12 @@ class ParallelExpertEncoder(nn.Module):
             # The head travels with the speaker expert.
             self.sortformer_modules.eval()
             for p in self.sortformer_modules.parameters():
+                p.requires_grad = False
+        if self.sound_ctc_head is not None:
+            # Unconditionally frozen, unlike the speaker head: the event tags are
+            # binarized before the kernel, so nothing could train it through the fusion.
+            self.sound_ctc_head.eval()
+            for p in self.sound_ctc_head.parameters():
                 p.requires_grad = False
 
     def train(self, mode: bool = True) -> "ParallelExpertEncoder":
@@ -801,6 +1079,8 @@ class ParallelExpertEncoder(nn.Module):
                 self.pee.experts[role].eval()
         if self.freeze_speaker:
             self.sortformer_modules.eval()
+        if self.sound_ctc_head is not None:
+            self.sound_ctc_head.eval()
         return self
 
     # ConformerEncoder-compatible properties (drop-in for SALM perception).
@@ -835,6 +1115,48 @@ class ParallelExpertEncoder(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         return pe
+
+    @classmethod
+    def _build_tag_kernel(
+        cls,
+        n_tags: int,
+        row_offset: int,
+        embedding_dim: int,
+        stride: int = _TAG_ROW_STRIDE,
+        calibrate: bool = True,
+    ) -> torch.Tensor:
+        """Take ``n_tags`` sinusoid rows from ``row_offset``, spaced ``stride``, and calibrate.
+
+        Every tag family slices the one shared table, so no two families can alias onto
+        each other by construction. See ``_TAG_ROW_STRIDE`` for why the rows are strided
+        and offset rather than taken consecutively.
+
+        When ``calibrate``, the kernel is then rescaled so that a single active tag injects
+        a vector of norm ``sqrt(embedding_dim)`` -- the norm of the LayerNorm-ed states it
+        is added to. Without this the injection strength depends on ``n_tags`` and on the
+        row choice, both layout decisions rather than modelling ones: a LayerNorm over
+        ``n`` inputs emits a larger code as ``n`` grows, so widening a family silently
+        turns its contribution up. With it, the ``*_scale`` arguments mean a
+        straightforward *fraction of the ASR state magnitude* and stay meaningful when the
+        layout changes. Pass ``calibrate=False`` only to reproduce the v2.0.0 speaker
+        kernel exactly.
+
+        Returns:
+            Tag kernel. Shape ``(n_tags, embedding_dim)``.
+        """
+        rows = [row_offset + stride * i for i in range(n_tags)]
+        table = cls._build_sinusoid_position_encoding(rows[-1] + 1, embedding_dim)
+        kernel = table[rows].contiguous()
+        if not calibrate:
+            return kernel
+
+        # The mean single-tag code, computed with the LayerNorm at its init values
+        # (gamma=1, beta=0). The norms themselves stay learnable, so the model is free to
+        # move away from this starting point.
+        eye = torch.eye(n_tags, dtype=kernel.dtype)
+        centred = (eye - eye.mean(dim=1, keepdim=True)) / eye.std(dim=1, unbiased=False, keepdim=True)
+        mean_norm = (centred @ kernel).norm(dim=1).mean()
+        return (kernel * (math.sqrt(embedding_dim) / mean_norm)).contiguous()
 
     @staticmethod
     def _align_diar_frames(spk_targets: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -877,13 +1199,82 @@ class ParallelExpertEncoder(nn.Module):
         mask = self.sortformer_modules.length_to_mask(length, emb_seq.shape[1])
         return preds * mask.unsqueeze(-1).to(preds.dtype)
 
+    def _sound_tag_posteriors(self, sound_encoded: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Sound states -> per-frame event and style tag probabilities.
+
+        The analogue of :meth:`_speaker_head`: run the frozen CTC head once and keep the
+        ``<ev:...>`` and ``<sty:stt|end:...>`` columns.
+
+        The softmax spans the FULL CTC vocabulary before the columns are selected -- the
+        head is trained as a distribution over all 13k tokens, so a bare softmax over the
+        tag columns alone would renormalize away the (usually dominant) mass on blank and
+        on ordinary word pieces, and report near-certainty on the most likely tag for
+        every frame including silence.
+
+        Args:
+            sound_encoded (Tensor): Sound expert output. Shape ``(B, D_sound, T)``.
+
+        Returns:
+            ``(events, styles)`` with shapes ``(B, T, n_sound_events)`` and
+            ``(B, T, n_sound_styles)``; ``styles`` is ``None`` when styles are not injected.
+        """
+        log_probs = self.sound_ctc_head(encoder_output=sound_encoded)  # (B, T, V+1)
+        events = log_probs.index_select(-1, self.sound_event_token_ids).exp()
+        styles = None
+        if self.n_sound_styles:
+            styles = log_probs.index_select(-1, self.sound_style_token_ids).exp()
+        return events, styles
+
+    def _inject_sound_tokens(self, asr_encoded: torch.Tensor, sound_encoded: torch.Tensor) -> torch.Tensor:
+        """Fuse sound tags into the ASR states (threshold + LayerNorm + kernel + ADD).
+
+        Deliberately the same shape as :meth:`_fuse_diar_and_asr`, on disjoint sets of
+        sinusoid rows, so an event, a style and a speaker never push the states the same
+        way. The result is low rank: at most ``n_sound_events + n_sound_styles``
+        directions into ``d_model``.
+
+        Events and styles are normalized and projected SEPARATELY, then summed. Sharing a
+        LayerNorm would make each family's code depend on how many tags of the other
+        family happen to be firing -- see the note where the two norms are built.
+
+        Args:
+            asr_encoded (Tensor): Speech states. Shape ``(B, D, T)``.
+            sound_encoded (Tensor): Sound expert states. Shape ``(B, D_sound, T)``.
+
+        Returns:
+            States with the tag signal added. Shape ``(B, D, T)``.
+        """
+        if sound_encoded.shape[-1] != asr_encoded.shape[-1]:
+            raise ValueError(
+                f"sound expert produced {sound_encoded.shape[-1]} frames but the ASR states "
+                f"have {asr_encoded.shape[-1]}; the two experts must share a frame grid."
+            )
+        with torch.no_grad():
+            events, styles = self._sound_tag_posteriors(sound_encoded)
+            # Hard threshold, matching the speaker branch: the kernels are defined over
+            # tag PRESENCE, so the same binary signal is injected at train and at
+            # inference time regardless of how confident the head happens to be.
+            events = (events > self.sound_event_threshold).to(asr_encoded.dtype)
+            if styles is not None:
+                styles = (styles > self.sound_event_threshold).to(asr_encoded.dtype)
+
+        states = asr_encoded.transpose(1, 2)  # (B, T, D)
+        events = self.sound_token_norm(events)
+        infusion = self.sound_kernel_scale * torch.matmul(events, self.sound_token_kernel.to(events.dtype))
+        if styles is not None:
+            styles = self.sound_style_norm(styles)
+            infusion = infusion + self.sound_style_scale * torch.matmul(
+                styles, self.sound_style_kernel.to(styles.dtype)
+            )
+        fused = infusion.to(states.dtype) + states
+        return fused.transpose(1, 2).to(asr_encoded.dtype)  # (B, D, T)
+
     def _merge_sound_and_asr(self, asr_encoded: torch.Tensor, sound_encoded: torch.Tensor) -> torch.Tensor:
         """Add the sound expert's encoder states onto the ASR states.
 
-        Interim path while the sound CTC head is in training. The eventual design
-        routes sound through a CTC head into sound tokens and injects those through a
-        kernel, the way the speaker sigmoids go through ``diar_kernel`` -- see the
-        ``merge_sound_expert_to_asr=False`` branch in ``__init__``.
+        The alternative to :meth:`_inject_sound_tokens`, selected by
+        ``merge_sound_expert_to_asr=True``: the whole sound representation is added,
+        rather than only the discrete event tags the CTC head reads out of it.
 
         Both experts run over the same frames in the same packed group, so the two
         tensors are already aligned in time and need no resampling.
@@ -896,10 +1287,9 @@ class ParallelExpertEncoder(nn.Module):
             Merged states, shape ``(B, D, T)``.
         """
         if not self.merge_sound_expert_to_asr:
-            # Unreachable today: __init__ rejects False. Kept so the guard is local
-            # to the merge as well, for when the CTC path lands.
-            raise NotImplementedError(
-                "SoundToken CTC kernel injection is not implemented; see __init__."
+            raise RuntimeError(
+                "_merge_sound_and_asr is the encoder-state path, but "
+                "merge_sound_expert_to_asr is False; _inject_sound_tokens is the one to call."
             )
         if sound_encoded.shape[-1] != asr_encoded.shape[-1]:
             raise ValueError(
@@ -1095,6 +1485,8 @@ class ParallelExpertEncoder(nn.Module):
         asr_states = asr_encoded
         if self.merge_sound_expert_to_asr:
             asr_states = self._merge_sound_and_asr(asr_states, sound_encoded)
+        else:
+            asr_states = self._inject_sound_tokens(asr_states, sound_encoded)
 
         if spk_targets is not None:
             outputs = self._fuse_diar_and_asr(
@@ -1301,6 +1693,8 @@ class ParallelExpertEncoder(nn.Module):
         asr_states = asr_encoded
         if self.merge_sound_expert_to_asr:
             asr_states = self._merge_sound_and_asr(asr_states, sound_encoded)
+        else:
+            asr_states = self._inject_sound_tokens(asr_states, sound_encoded)
 
         if spk_targets is not None:
             outputs = self._fuse_diar_and_asr(

@@ -382,6 +382,26 @@ def toy_sound_expert_cfg() -> DictConfig:
     )
 
 
+def toy_sound_ctc_head_cfg() -> DictConfig:
+    """Tiny sound CTC head with both event and style tags."""
+    vocabulary = [
+        'ordinary_piece',
+        '<ev:laughter>',
+        '<ev:music>',
+        '<sty:stt:anger>',
+        '<sty:end:anger>',
+    ]
+    return DictConfig(
+        {
+            '_target_': 'nemo.collections.asr.modules.ConvASRDecoder',
+            'feat_in': _ASR_D_MODEL,
+            'num_classes': len(vocabulary),
+            'vocabulary': vocabulary,
+            'add_blank': True,
+        }
+    )
+
+
 def toy_sortformer_modules_cfg() -> DictConfig:
     """Sortformer head + streaming cache logic, loaded separately from the encoder."""
     return DictConfig(
@@ -418,6 +438,9 @@ def build_toy_pe_encoder(**overrides) -> ParallelExpertEncoder:
         diar_fifo_len=0,
         diar_spkcache_update_period=_CHUNK_LEN,
         diar_spkcache_len=_SPKCACHE_LEN,
+        # The existing fixture exercises the legacy encoder-state route. Tests for the
+        # new default SoundToken route provide a CTC head explicitly below.
+        merge_sound_expert_to_asr=True,
     )
     kwargs.update(overrides)
     return ParallelExpertEncoder(**kwargs)
@@ -446,6 +469,29 @@ def test_pe_encoder_builds_and_wires_all_three_experts():
     assert all(not p.requires_grad for p in enc.sortformer_modules.parameters())
     assert any(p.requires_grad for p in enc.pee.experts["speech"].parameters())
     assert any(p.requires_grad for p in enc.pee.experts["sound"].parameters())
+
+
+@pytest.mark.unit
+def test_pe_encoder_sound_token_route_uses_frozen_ctc_tags():
+    enc = build_toy_pe_encoder(
+        merge_sound_expert_to_asr=False,
+        sound_ctc_head_cfg=toy_sound_ctc_head_cfg(),
+        freeze_sound=True,
+    ).eval()
+
+    assert enc.sound_event_tokens == ('<ev:laughter>', '<ev:music>')
+    assert enc.sound_style_tokens == ('<sty:stt:anger>', '<sty:end:anger>')
+    assert enc.n_sound_events == 2
+    assert enc.n_sound_styles == 2
+    assert all(not param.requires_grad for param in enc.sound_ctc_head.parameters())
+
+    mels = torch.randn(1, _MEL_FEATURES, 160)
+    length = torch.tensor([160])
+    with torch.no_grad():
+        outputs, encoded_len = enc(mels, length)
+
+    assert outputs.shape == (1, _ASR_D_MODEL, int(encoded_len[0]))
+    assert torch.isfinite(outputs).all()
 
 
 @pytest.mark.unit
