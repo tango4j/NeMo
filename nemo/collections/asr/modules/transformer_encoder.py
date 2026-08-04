@@ -19,6 +19,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch.nn.attention.flex_attention import and_masks, create_block_mask, flex_attention
 
 from nemo.collections.asr.parts.submodules.multi_head_attention import (
@@ -439,6 +440,12 @@ class TransformerEncoder(nn.Module):
         self.sync_max_audio_length = sync_max_audio_length
         self.self_attention_model = self_attention_model
         self.attn_mode = attn_mode
+        # Recompute each layer in the backward pass instead of storing its activations.
+        # Off by default so inference and existing training runs are untouched; toggled
+        # per-encoder (see ParallelExpertEncoder.set_activation_checkpointing). Kept as a
+        # flag rather than a checkpoint_wrapper around each layer so module structure and
+        # state_dict keys stay identical to a checkpoint saved without it.
+        self.activation_checkpointing = False
 
         if subsampling == 'feature_stacking':
             self.pre_encode = FeatureStacking(subsampling_factor, feat_in, d_model)
@@ -590,8 +597,15 @@ class TransformerEncoder(nn.Module):
         # For ``abs_pos`` the positional information is already baked into ``x``, so we don't
         # need to thread ``pos_emb`` through each layer; only ``rel_pos`` consumes it.
         layer_pos_emb = pos_emb if self.self_attention_model == "rel_pos" else None
+        checkpointing = self.activation_checkpointing and torch.is_grad_enabled()
         for layer in self.layers:
-            x = layer(x, block_mask=block_mask, pos_emb=layer_pos_emb, attn_mask=attn_mask)
+            if checkpointing:
+                x = torch.utils.checkpoint.checkpoint(
+                    layer, x, block_mask=block_mask, pos_emb=layer_pos_emb, attn_mask=attn_mask,
+                    use_reentrant=False,
+                )
+            else:
+                x = layer(x, block_mask=block_mask, pos_emb=layer_pos_emb, attn_mask=attn_mask)
 
         x = self.final_norm(x)
         if self.out_proj is not None:

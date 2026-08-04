@@ -345,6 +345,7 @@ class ParallelExpertEncoderPT(ModelPT):
             sync_max_audio_length=self._cfg.get('sync_max_audio_length', False),
             always_run_diarization=self._cfg.get('always_run_diarization', True),
             moe_mode=self._cfg.get('moe_mode', 'dense'),
+            fused_forward_in_training=self._cfg.get('fused_forward_in_training', False),
             ggemm_backend=self._cfg.get('ggemm_backend', 'baddbmm'),
             online_prefix_mode=self._cfg.get('online_prefix_mode', 'replace'),
             merge_sound_expert_to_asr=self._cfg.get('merge_sound_expert_to_asr', False),
@@ -680,7 +681,14 @@ class ParallelExpertEncoder(nn.Module):
             instead of only when some row requests predicted diarization. Defaults to
             ``True`` so the collective schedule cannot depend on batch content.
         moe_mode (str): ``'dense'`` or ``'topk'`` for the speech MoE inside the grouped
-            FFN. Defaults to ``'dense'``.
+            FFN. Defaults to ``'dense'``. Only reached on the fused path.
+        fused_forward_in_training (bool): Use the fused packed path while training too.
+            Defaults to ``False``: training runs each expert on its own path, which is
+            slower per step but holds far less memory, because fusion has to stack every
+            expert's FFN input into one tensor and (under ``moe_mode='dense'``) evaluate
+            every MoE expert on every token. Inference is unaffected either way -- it
+            always fuses. Set ``True`` only to A/B the two paths, and expect to shrink
+            the batch or ``encoder_chunk_size_seconds`` to fit.
         ggemm_backend (str): Grouped-GEMM backend. Defaults to ``'baddbmm'``.
         online_prefix_mode (str): How the speaker's streaming cache is spliced in the
             windowed path. ``'replace'`` (default) walks each window's start back by
@@ -759,6 +767,7 @@ class ParallelExpertEncoder(nn.Module):
         sync_max_audio_length: bool = False,
         always_run_diarization: bool = True,
         moe_mode: str = 'dense',
+        fused_forward_in_training: bool = False,
         ggemm_backend: str = 'baddbmm',
         online_prefix_mode: str = 'replace',
         merge_sound_expert_to_asr: bool = False,
@@ -821,6 +830,7 @@ class ParallelExpertEncoder(nn.Module):
         self.freeze_sound = freeze_sound
 
         self.moe_mode = moe_mode
+        self.fused_forward_in_training = bool(fused_forward_in_training)
         self.ggemm_backend = ggemm_backend
         if online_prefix_mode not in ('replace', 'extend'):
             raise ValueError(
@@ -1096,6 +1106,27 @@ class ParallelExpertEncoder(nn.Module):
     def pre_encode(self):
         return self.pee.experts['speech'].pre_encode
 
+    def set_activation_checkpointing(self, enabled: bool) -> None:
+        """Recompute each expert's layers in backward instead of storing them.
+
+        SALM's generic helper wraps ``encoder.layers[i]`` in ``checkpoint_wrapper``,
+        which finds nothing here: this module holds no ``layers`` of its own, they live
+        one level down in ``pee.experts[role]``. So it owns the policy instead, and
+        forwards to each expert. Takes effect on the per-expert training path; the fused
+        inference path (:meth:`GGEMMTransformerEncoder.forward_packed`) never calls the
+        layer modules and is deliberately left alone.
+        """
+        for expert in self.pee.experts.values():
+            if hasattr(expert, 'activation_checkpointing'):
+                expert.activation_checkpointing = bool(enabled)
+        if enabled and self.fused_forward_in_training:
+            logging.warning(
+                "set_activation_checkpointing(True) with fused_forward_in_training=True has "
+                "no effect: the fused path runs the layers itself instead of calling the "
+                "layer modules, so there is nothing to recompute. Leave "
+                "fused_forward_in_training at its default False to get the memory back."
+            )
+
     # freeze/unfreeze parity (plain nn.Module re-exposing the standalone helpers).
     def freeze(self) -> None:
         freeze(self)
@@ -1157,6 +1188,27 @@ class ParallelExpertEncoder(nn.Module):
         centred = (eye - eye.mean(dim=1, keepdim=True)) / eye.std(dim=1, unbiased=False, keepdim=True)
         mean_norm = (centred @ kernel).norm(dim=1).mean()
         return (kernel * (math.sqrt(embedding_dim) / mean_norm)).contiguous()
+
+    def _check_spk_target_width(self, spk_targets: Optional[torch.Tensor]) -> None:
+        """Reject speaker targets whose speaker axis disagrees with ``n_spk``.
+
+        ``n_spk`` is baked into the bundle: it fixes the row count of ``diar_kernel`` and
+        the normalized shape of ``diar_norm``, so it cannot adapt to the batch. Left
+        unchecked, a narrower target broadcasts against the predictions inside
+        :meth:`_fuse_diar_and_asr` and reports a bare size mismatch several frames away
+        from the setting that caused it.
+        """
+        if spk_targets is None:
+            return
+        n_given = int(spk_targets.shape[-1])
+        if n_given != self.n_spk:
+            raise ValueError(
+                f"spk_targets carry {n_given} speaker slots but this ParallelExpertEncoder "
+                f"was built with n_spk={self.n_spk}. Set the data-side speaker count to "
+                f"{self.n_spk} (in SALM: data.multispeaker_cfg.num_speakers) so unused "
+                "speakers arrive as empty columns, or export a bundle whose speaker expert "
+                f"has n_spk={n_given}."
+            )
 
     @staticmethod
     def _align_diar_frames(spk_targets: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -1437,11 +1489,20 @@ class ParallelExpertEncoder(nn.Module):
     def _forward(self, audio_signal, length, spk_targets=None):
         """Offline (non-chunked) forward pass. See :meth:`forward` for argument semantics.
 
-        One :meth:`GGEMMTransformerEncoder.forward_packed` call runs all three experts:
-        they share the same input and therefore the same ``T``, so there is no streaming
-        prefix and no padding, and the packed attention group stays FlashAttention-2
-        eligible.
+        Inference takes one :meth:`GGEMMTransformerEncoder.forward_packed` call for all
+        three experts: they share the same input and therefore the same ``T``, so there is
+        no streaming prefix and no padding, and the packed attention group stays
+        FlashAttention-2 eligible. That fusion is what makes generation ~4x faster than
+        running the experts one at a time.
+
+        Training takes the per-expert path instead (see ``fused_forward_in_training``).
+        Fusing costs memory that only matters once activations have to be kept for
+        backward: it stacks every expert's FFN input into one ``(E_total, N, target_d)``
+        tensor, and evaluates all ``moe_num_experts`` experts on every token so it can
+        weight them by a router matrix that is zero outside the top ``k``. Both are a good
+        trade when nothing is stored and a bad one when everything is.
         """
+        self._check_spk_target_width(spk_targets)
         use_diarization = (
             None
             if spk_targets is None
@@ -1463,9 +1524,15 @@ class ParallelExpertEncoder(nn.Module):
         with torch.set_grad_enabled(
             not (self.freeze_speech and self.freeze_speaker and self.freeze_sound)
         ):
-            packed = self.pee.forward_packed(
-                signal, signal_length, backend=self.ggemm_backend, moe_mode=self.moe_mode
-            )
+            if self.training and not self.fused_forward_in_training:
+                # Each expert on its own unmodified path: no cross-expert stacking, and
+                # the speech MoE dispatches only its top-k pairs. Equivalent to the fused
+                # path within the tolerance README 4.1 documents (flex vs SDPA attention).
+                packed = self.pee.forward_all(signal, signal_length)
+            else:
+                packed = self.pee.forward_packed(
+                    signal, signal_length, backend=self.ggemm_backend, moe_mode=self.moe_mode
+                )
 
         asr_encoded, asr_encoded_len = packed['speech']
         sound_encoded, sound_encoded_len = packed['sound']
@@ -1581,6 +1648,7 @@ class ParallelExpertEncoder(nn.Module):
         # Rows filled with the `-1` sentinel carry no RTTM and need a prediction, exactly as
         # in `_forward`. Reading the mask on the host is fine here: only generation reaches
         # this path (see `online_inference`), and it already syncs on `length.max()` above.
+        self._check_spk_target_width(spk_targets)
         use_diarization = (
             None
             if spk_targets is None

@@ -51,6 +51,7 @@ Examples::
 
 import json
 import logging
+import stat
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -352,11 +353,37 @@ def _build_one(job: IndexJob) -> tuple[IndexJob, str]:
     return job, "built"
 
 
+def _is_remote_path(path: str) -> bool:
+    return path.startswith(("ais://", "s3://", "http://", "https://", "gs://"))
+
+
 def _is_indexed(job: IndexJob) -> bool:
-    """True if a non-empty .idx already exists locally."""
-    p = Path(job.idx_path())
+    """True if a structurally valid, source-matching local ``.idx`` is reusable."""
+    index_path = Path(job.idx_path())
     try:
-        return p.is_file() and p.stat().st_size > 0
+        index_stat = index_path.stat()
+    except OSError:
+        return False
+
+    # Lhotse indexes are arrays of uint64 offsets. Treat empty/truncated
+    # sidecars as missing so the regular build path repairs them before pack
+    # conversion performs the same validation.
+    if not stat.S_ISREG(index_stat.st_mode) or index_stat.st_size < 8 or index_stat.st_size % 8:
+        return False
+
+    # Remote sources do not expose a reliable local mtime. For local sources,
+    # match idxpack's freshness contract so a seeded/mirrored stale sidecar is
+    # rebuilt instead of being skipped here and rejected during packing.
+    if _is_remote_path(job.path):
+        return True
+    try:
+        source_stat = Path(job.path).stat()
+        if source_stat.st_mtime_ns > index_stat.st_mtime_ns:
+            return False
+        with index_path.open("rb") as f:
+            f.seek(-8, 2)
+            sentinel = int.from_bytes(f.read(8), "little")
+        return sentinel == source_stat.st_size
     except OSError:
         return False
 
@@ -423,9 +450,14 @@ def main(
             unique.append(j)
 
     todo = unique if force else [j for j in unique if not _is_indexed(j)]
-    skipped = len(unique) - len(todo)
+    reusable = len(unique) - len(todo)
 
-    logging.info("Discovered %d files (%d already indexed, %d to build).", len(unique), skipped, len(todo))
+    logging.info(
+        "Discovered %d files (%d reusable indexes, %d to build/rebuild).",
+        len(unique),
+        reusable,
+        len(todo),
+    )
 
     if dry_run or not todo:
         for j in todo:
