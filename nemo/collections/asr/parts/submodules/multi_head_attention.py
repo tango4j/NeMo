@@ -47,6 +47,8 @@ __all__ = [
     'RelPositionMultiHeadAttention',
     'RelPositionalEncoding',
     'PositionalEncoding',
+    'RoPEMultiHeadAttention',
+    'RotaryPositionalEncoding',
 ]
 
 INF_VAL = 10000.0
@@ -166,6 +168,7 @@ class MultiHeadAttention(nn.Module):
         # temporary until we solve this more gracefully
         with avoid_float16_autocast_context():
             q, k, v = self.forward_qkv(query, key, value)
+            q, k = self._apply_pos_emb(q, k)
 
             if self.use_pytorch_sdpa:
                 n_batch = value.size(0)
@@ -207,6 +210,10 @@ class MultiHeadAttention(nn.Module):
             q_keep_size = query.shape[1] - self.cache_drop_size
             cache = torch.cat([cache[:, q_keep_size:, :], query[:, :q_keep_size, :]], dim=1)
         return key, value, query, cache
+
+    def _apply_pos_emb(self, q, k):
+        """Hook for subclasses to apply a positional transformation to Q/K. No-op by default."""
+        return q, k
 
 
 class RelPositionMultiHeadAttention(MultiHeadAttention):
@@ -990,6 +997,52 @@ class RelPositionMultiHeadAttentionLongformer(RelPositionMultiHeadAttention):
         return context.view(bsz, num_heads, seqlen, head_dim).transpose(1, 2)
 
 
+class RoPEMultiHeadAttention(MultiHeadAttention):
+    """Multi-Head Attention with rotary position embedding applied to Q and K.
+
+    Args:
+        n_head (int): number of heads
+        n_feat (int): size of the features
+        dropout_rate (float): dropout rate
+        pos_enc (RotaryPositionalEncoding): rotary position encoding shared across layers
+        use_bias (bool): whether to apply bias in linear and conv layers
+        use_pytorch_sdpa (bool): use torch sdpa instead of manual attention
+        use_pytorch_sdpa_backends list[str]: list of backend names to use in sdpa.
+    """
+
+    def __init__(
+        self,
+        n_head,
+        n_feat,
+        dropout_rate,
+        pos_enc,
+        max_cache_len=0,
+        use_bias=True,
+        use_pytorch_sdpa=False,
+        use_pytorch_sdpa_backends=None,
+    ):
+        """Construct a RoPEMultiHeadAttention object."""
+        super(RoPEMultiHeadAttention, self).__init__(
+            n_head=n_head,
+            n_feat=n_feat,
+            dropout_rate=dropout_rate,
+            max_cache_len=max_cache_len,
+            use_bias=use_bias,
+            use_pytorch_sdpa=use_pytorch_sdpa,
+            use_pytorch_sdpa_backends=use_pytorch_sdpa_backends,
+        )
+        if pos_enc.d_k != self.d_k:
+            raise ValueError(
+                f"RotaryPositionalEncoding d_k ({pos_enc.d_k}) does not match attention "
+                f"head dim n_feat/n_head ({self.d_k})"
+            )
+        self.pos_enc = pos_enc
+
+    def _apply_pos_emb(self, q, k):
+        """Rotate Q and K via the attached RotaryPositionalEncoding."""
+        return self.pos_enc(q, k)
+
+
 class PositionalEncoding(torch.nn.Module):
     """Fixed sinusoidal positional encoding.
     Args:
@@ -1191,8 +1244,14 @@ class RotaryPositionalEncoding(torch.nn.Module):
         return torch.cat((t_rot, t_pass), dim=-1)
 
     def create_pe(self, positions, dtype):
-        """Build cos/sin buffers covering ``positions`` (1D fp32 tensor)."""
+        """Build cos/sin buffers covering ``positions`` (1D fp32 tensor).
+
+        Frequencies are computed in fp32 for numerical stability and cast to
+        ``dtype`` for storage. The final cast to Q/K runtime dtype happens in
+        ``forward``.
+        """
         freqs = torch.outer(positions, self.inv_freq.to(device=positions.device, dtype=torch.float32))
+        # Duplicate to align with `_rotate_half`: tail half mirrors the head half.
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos().to(dtype)
         sin = emb.sin().to(dtype)
@@ -1216,6 +1275,10 @@ class RotaryPositionalEncoding(torch.nn.Module):
         Args:
             q (torch.Tensor): (batch, head, time1, d_k)
             k (torch.Tensor): (batch, head, time2, d_k); time2 >= time1.
+
+        When time2 > time1 (streaming with KV cache), Q is rotated starting at
+        ``offset = time2 - time1`` and K from offset 0, so the position difference
+        seen inside attention scores remains correct.
         """
         t_q = q.size(2)
         t_k = k.size(2)
@@ -1226,6 +1289,8 @@ class RotaryPositionalEncoding(torch.nn.Module):
         cos_q = self.cos[cache_len:t_k].view(1, 1, t_q, self.d_k_rot)
         sin_q = self.sin[cache_len:t_k].view(1, 1, t_q, self.d_k_rot)
 
+        # Buffers are stored in model dtype; cast to Q/K runtime dtype (which may have
+        # been upgraded to fp32 by autocast handling in MultiHeadAttention.forward).
         q = self._apply_rotary(q, cos_q.to(q.dtype), sin_q.to(q.dtype))
         k = self._apply_rotary(k, cos_k.to(k.dtype), sin_k.to(k.dtype))
         return q, k

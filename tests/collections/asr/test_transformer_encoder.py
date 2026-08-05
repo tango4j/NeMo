@@ -558,7 +558,7 @@ class TestSelfAttentionModel:
         assert model.self_attention_model == "rope"
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("mode", ["abs_pos", "rel_pos", "rope", "no_pos"])
+    @pytest.mark.parametrize("mode", ["abs_pos", "rel_pos", "no_pos", "rope"])
     def test_valid_modes_are_accepted(self, mode):
         model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, self_attention_model=mode)
         assert model.self_attention_model == mode
@@ -595,9 +595,9 @@ class TestSelfAttentionModel:
             assert attn.pos_bias_v.shape == (n_heads, head_dim)
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("mode", ["abs_pos", "rope", "no_pos"])
+    @pytest.mark.parametrize("mode", ["abs_pos", "no_pos", "rope"])
     def test_non_rel_pos_modes_have_no_rel_params(self, mode):
-        """Non-relative modes must not allocate the rel-pos parameters."""
+        """abs_pos, no_pos and rope modes must not allocate the rel-pos parameters."""
         model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=2, self_attention_model=mode)
         for layer in model.layers:
             attn = layer.attn
@@ -614,7 +614,7 @@ class TestSelfAttentionModel:
         assert model.max_audio_length == model.pos_emb_max_len
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("mode", ["abs_pos", "rel_pos", "rope", "no_pos", None])
+    @pytest.mark.parametrize("mode", ["abs_pos", "rel_pos", "no_pos", "rope", None])
     def test_forward_each_mode_cpu(self, mode):
         """Each ``self_attention_model`` choice (including ``None``) must produce a valid forward."""
         model = TransformerEncoder(
@@ -667,10 +667,24 @@ class TestSelfAttentionModel:
         assert not torch.isnan(out).any()
 
     @pytest.mark.unit
-    def test_rope_padding_does_not_affect_valid_output(self):
-        """Masked padding keys must not change valid RoPE encoder outputs."""
+    def test_rope_uses_shared_rotary_pos_enc(self):
+        """rope mode builds a single ``RotaryPositionalEncoding`` reused by every attention layer.
+
+        The cos/sin buffers are computed once on the shared module (see ``TransformerEncoder``),
+        so each layer's ``attn.rope`` must be the *same* object as ``model.pos_enc``.
+        """
+        model = TransformerEncoder(feat_in=128, d_model=64, n_heads=4, n_layers=3, self_attention_model="rope")
+        assert isinstance(model.pos_enc, RotaryPositionalEncoding)
+        for layer in model.layers:
+            attn = layer.attn
+            assert attn._uses_rope is True
+            assert attn.rope is model.pos_enc
+
+    @pytest.mark.unit
+    def test_rope_partial_rotation_forward_cpu(self):
+        """``rotary_fraction`` < 1.0 rotates only part of each head dim (exercises the pass-through split)."""
         model = TransformerEncoder(
-            feat_in=32,
+            feat_in=128,
             d_model=64,
             n_heads=4,
             n_layers=2,

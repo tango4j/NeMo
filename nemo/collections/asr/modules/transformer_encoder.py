@@ -80,7 +80,7 @@ class TransformerEncoderConfig:
               ``dropout_pre_encoder`` and ``dropout_emb`` are unused in this mode.
             - ``"rope"``: rotary position embedding applied to Q and K inside attention. No
               additive positional embedding is added to the embeddings; the standard scaled
-              dot-product attention uses PyTorch SDPA.
+              dot-product attention runs through FlexAttention with ``score_mod=None``.
         rope_base: Theta base for the rotary position embedding. Only used when
             ``self_attention_model='rope'``.
         rotary_fraction: Fraction of the per-head dim to rotate. Only used when
@@ -163,6 +163,8 @@ class MultiHeadAttention(nn.Module):
                 f"but got head_dim={self.head_dim} from d_model={self.d_model}, n_heads={self.n_heads}."
             )
 
+        # Rotary position embedding shared across layers; rotates Q/K before the attention
+        # kernel. The shared module owns the cos/sin buffers (see ``TransformerEncoder``).
         if self._uses_rope:
             if pos_enc is None:
                 raise ValueError("'rope' attention requires a RotaryPositionalEncoding via pos_enc.")
@@ -232,9 +234,8 @@ class MultiHeadAttention(nn.Module):
         p = self.linear_pos(pos_emb).view(pos_emb.size(0), -1, H, D).transpose(1, 2)
         # pos_bias_{u,v}: (H, D) -> (1, H, 1, D) so they broadcast over the (B, H, T, D)
         # Q tensor against the head/depth axes rather than (incorrectly) against time.
-        # Match dtype under AMP so fp32 bias params do not upcast q before FlexAttention.
-        bias_u = self.pos_bias_u.view(1, H, 1, D).to(dtype=q.dtype)
-        bias_v = self.pos_bias_v.view(1, H, 1, D).to(dtype=q.dtype)
+        bias_u = self.pos_bias_u.view(1, H, 1, D).to(q.dtype)
+        bias_v = self.pos_bias_v.view(1, H, 1, D).to(q.dtype)
         # Matrix b + d: ((Q + v) @ R^T) shifted into (q_idx, kv_idx) space, then scaled
         # by 1/sqrt(D) so it can be added directly to FlexAttention's already-scaled scores.
         q_with_bias_v = q + bias_v
@@ -488,6 +489,8 @@ class TransformerEncoder(nn.Module):
                 dropout_rate_emb=dropout_emb,
             )
         elif self_attention_model == "rope":
+            # RoPE has no additive pos-emb step to host dropout, so pre-encoder
+            # dropout is applied separately in forward_internal.
             self.dropout_pre_encoder = nn.Dropout(dropout_pre_encoder)
             self.pos_enc = RotaryPositionalEncoding(
                 d_k=d_model // n_heads,
@@ -498,6 +501,8 @@ class TransformerEncoder(nn.Module):
         else:  # "no_pos"
             self.pos_enc = None
         self.embed_norm = nn.LayerNorm(d_model) if pre_block_norm else nn.Identity()
+        # For 'rope', the shared RotaryPositionalEncoding is passed into each block so the
+        # cos/sin buffers are computed once and reused across all attention modules.
         layer_pos_enc = self.pos_enc if self_attention_model == "rope" else None
         self.layers = nn.ModuleList([TransformerBlock(cfg, pos_enc=layer_pos_enc) for _ in range(n_layers)])
         self.final_norm = nn.LayerNorm(d_model)
@@ -569,6 +574,7 @@ class TransformerEncoder(nn.Module):
             length = length.to(torch.int64)
 
         if self.self_attention_model == "rope":
+            # RoPE: no pos emb added; just apply xscale (if set) + pre-encoder dropout here.
             if self.xscale:
                 x = x * self.xscale
             x = self.dropout_pre_encoder(x)

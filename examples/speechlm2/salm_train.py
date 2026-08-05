@@ -16,7 +16,7 @@ from datetime import timedelta
 
 import torch
 from lightning.pytorch import Trainer, seed_everything
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from nemo.collections.speechlm2 import SALM, DataModule, SALMDataset
 from nemo.core.config import hydra_runner
@@ -39,6 +39,13 @@ def _process_group_timeout(cfg):
         return timedelta(seconds=float(timeout_seconds))
 
     return None
+def _create_salm_dataset(tokenizer, data_cfg: DictConfig | dict) -> SALMDataset:
+    """Build SALMDataset without forwarding unset options to legacy NeMo packages."""
+    multispeaker_cfg = data_cfg.get("multispeaker_cfg", None)
+    # TODO(Dongji): Remove after all release images ship SALMDataset with multispeaker_cfg support.
+    if multispeaker_cfg is None:
+        return SALMDataset(tokenizer=tokenizer)
+    return SALMDataset(tokenizer=tokenizer, multispeaker_cfg=multispeaker_cfg)
 
 
 @hydra_runner(config_path="conf", config_name="salm")
@@ -69,7 +76,7 @@ def train(cfg):
     with trainer.init_module():
         model = model_cls(OmegaConf.to_container(cfg.model, resolve=True))
 
-    dataset = SALMDataset(tokenizer=model.tokenizer, multispeaker_cfg=cfg.data.get("multispeaker_cfg", None))
+    dataset = _create_salm_dataset(model.tokenizer, cfg.data)
     datamodule = DataModule(cfg.data, tokenizer=model.tokenizer, dataset=dataset)
 
     trainer.fit(model, datamodule)
