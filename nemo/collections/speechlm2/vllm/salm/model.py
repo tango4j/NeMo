@@ -109,6 +109,10 @@ class NeMoSpeechLMForConditionalGeneration(
             _maybe_mount_pe_encoder(self.perception, getattr(config, "pe_encoder_path", None))
 
         self._uses_pe_encoder = isinstance(getattr(self.perception, "encoder", None), ParallelExpertEncoder)
+        if self._uses_pe_encoder:
+            # One tqdm bar per window per request would be tens of thousands of
+            # lines in a server log (a 48 min session is ~65 windows).
+            self.perception.encoder._suppress_online_pbar = True
 
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
@@ -156,12 +160,23 @@ class NeMoSpeechLMForConditionalGeneration(
         # forward and the per-chunk embeddings are concatenated. ``None``
         # disables chunking and runs a single forward over the full batch.
         # A ParallelExpertEncoder instead runs its own context-preserving online
-        # inference over the full audio, so it bypasses the chunking helper.
+        # inference over the full audio, so it bypasses the chunking helper. That
+        # windowed path is opt-in: ParallelExpertEncoder.online_inference_enabled
+        # is False by default because the window count depends on each rank's own
+        # audio length, which would deadlock a distributed training step. Nothing
+        # here is distributed, so generation must open it explicitly -- exactly as
+        # SALMAutomodel.generate does via _perception_online_inference. Without it
+        # forward() takes the single-pass branch and runs the ASR Conformer AND the
+        # Sortformer frontend over the whole recording at once, which for a 2600 s
+        # profile_run dummy asks for a ~48 GiB attention matrix on top of ~64 GiB
+        # of already-resident weights. Windowing bounds both branches to
+        # online_inference_length (500 output frames, ~40 s) plus context.
         with torch.no_grad():
             if self._uses_pe_encoder:
-                audio_embs, audio_emb_lens = self.perception(
-                    input_signal=audio_signal, input_signal_length=audio_lengths
-                )
+                with self.perception.encoder.online_inference():
+                    audio_embs, audio_emb_lens = self.perception(
+                        input_signal=audio_signal, input_signal_length=audio_lengths
+                    )
                 audio_embeds = [emb[:emblen] for emb, emblen in zip(audio_embs, audio_emb_lens)]
             else:
                 audio_embeds = encode_audio_with_optional_chunking(

@@ -214,8 +214,39 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
         """
         return getattr(self.get_hf_config(), "encoder_chunk_size_seconds", None)
 
+    def _uses_pe_encoder(self) -> bool:
+        """Whether this checkpoint serves through a ParallelExpertEncoder.
+
+        Decides which forward path -- and therefore which token-count formula
+        -- the model will take, so it must agree with
+        ``NeMoSpeechLMForConditionalGeneration._uses_pe_encoder``. That one
+        isinstance-checks the loaded module, which is unavailable here on the
+        scheduler side, so key off the same ``pe_encoder_path`` the model uses
+        to mount the encoder. It is not a declared field on the config class:
+        it arrives from the checkpoint's ``config.json`` through
+        ``PretrainedConfig``'s ``**kwargs``.
+        """
+        return bool(getattr(self.get_hf_config(), "pe_encoder_path", None))
+
     @staticmethod
-    def _estimate_audio_tokens_single_pass(audio_length_samples: int) -> int:
+    def _mel_frames(audio_length_samples: int) -> int:
+        """Mel-frame count the preprocessor emits for ``audio_length_samples``.
+
+        STFT with n_fft=512, hop_length=160, centre-padded by n_fft // 2.
+        """
+        n_fft = 512
+        hop_length = 160
+        stft_pad = n_fft // 2
+        return (audio_length_samples + 2 * stft_pad - n_fft) // hop_length
+
+    # 3x Conv(kernel=3, stride=2) in the FastConformer subsampling stack.
+    _CONV_KERNEL = 3
+    _CONV_STRIDE = 2
+    _CONV_REPEAT = 3
+    _SUBSAMPLING_FACTOR = _CONV_STRIDE**_CONV_REPEAT
+
+    @classmethod
+    def _estimate_audio_tokens_single_pass(cls, audio_length_samples: int) -> int:
         """Predict the encoder's output frame count for one perception forward.
 
         Mirrors the FastConformer preprocessing chain used by
@@ -229,31 +260,56 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
         compares this function against ``calc_length`` on a canonical set
         of lengths and will fail, forcing a rewrite here.
         """
-        n_fft = 512
-        hop_length = 160
-        stft_pad = n_fft // 2
-        fbank_len = (audio_length_samples + 2 * stft_pad - n_fft) // hop_length
-        kernel, stride, repeat = 3, 2, 3
-        add_pad = 1 + 1 - kernel
-        length = float(fbank_len)
-        for _ in range(repeat):
-            length = (length + add_pad) / stride + 1.0
+        add_pad = 1 + 1 - cls._CONV_KERNEL
+        length = float(cls._mel_frames(audio_length_samples))
+        for _ in range(cls._CONV_REPEAT):
+            length = (length + add_pad) / cls._CONV_STRIDE + 1.0
         return max(1, int(length))
+
+    @classmethod
+    def _estimate_audio_tokens_pe_windowed(cls, audio_length_samples: int) -> int:
+        """Predict the output frame count for a ParallelExpertEncoder forward.
+
+        A PE encoder ignores ``encoder_chunk_size_seconds`` and walks the
+        recording itself, window by window, trimming each window's context in
+        output-frame space using *rounded cumulative* positions
+        (``round(end / sf) - round(stt / sf)``). Consecutive windows share a
+        boundary, so those per-window counts telescope and the total collapses
+        to ``round(mel_frames / subsampling_factor)``. That identity is pinned
+        upstream by ``tests/collections/asr/test_parallel_expert_encoder.py::
+        test_forward_online_output_length_telescopes``.
+
+        This is *not* the same as the single-pass estimate, which works out to
+        ``ceil(mel_frames / 8)``: the two disagree by one token whenever
+        ``mel_frames`` is not a multiple of 8 and its remainder rounds down.
+        Reserving the single-pass count for a PE checkpoint is what produced
+        "Attempted to assign 1695 multimodal tokens to 1696 placeholders" and
+        killed the engine on the first real request.
+        """
+        frames = cls._mel_frames(audio_length_samples)
+        # Built-in round() to match the encoder's own arithmetic, including its
+        # round-half-to-even behaviour at exact .5 boundaries.
+        return max(1, round(frames / cls._SUBSAMPLING_FACTOR))
 
     @classmethod
     def _estimate_audio_tokens(
         cls,
         audio_length_samples: int,
         chunk_size_seconds: float | None = None,
+        pe_encoder: bool = False,
     ) -> int:
         """Predict the encoder's total output frame count for an audio of N samples.
 
-        When ``chunk_size_seconds`` is ``None`` or the audio fits in a single
-        chunk, returns the single-pass estimate. Otherwise mirrors
+        A PE encoder brings its own windowing and ignores
+        ``chunk_size_seconds`` entirely, so it is dispatched first. Otherwise:
+        when ``chunk_size_seconds`` is ``None`` or the audio fits in a single
+        chunk, returns the single-pass estimate; else mirrors
         ``encode_audio_with_optional_chunking``'s split (with the same
         tail-folding rule) and sums the per-chunk frame counts so the
         placeholder count matches what the model emits at forward time.
         """
+        if pe_encoder:
+            return cls._estimate_audio_tokens_pe_windowed(audio_length_samples)
         if chunk_size_seconds is None or audio_length_samples <= 0:
             return cls._estimate_audio_tokens_single_pass(audio_length_samples)
         if chunk_size_seconds <= 0.0:
@@ -274,7 +330,12 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
         return sum(cls._estimate_audio_tokens_single_pass(end - begin) for begin, end in spans)
 
     @classmethod
-    def _samples_for_audio_tokens(cls, target_tokens: int, chunk_size_seconds: float | None = None) -> int:
+    def _samples_for_audio_tokens(
+        cls,
+        target_tokens: int,
+        chunk_size_seconds: float | None = None,
+        pe_encoder: bool = False,
+    ) -> int:
         """Return the smallest sample count estimated to produce ``target_tokens``.
 
         vLLM sizes the multimodal encoder cache from dummy inputs.  The SALM
@@ -287,10 +348,10 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
         target_tokens = max(1, int(target_tokens))
         max_samples = int(_DUMMY_AUDIO_MAX_DURATION_S * _SAMPLING_RATE)
         lo, hi = 1, min(_SAMPLING_RATE, max_samples)
-        while hi < max_samples and cls._estimate_audio_tokens(hi, chunk_size_seconds) < target_tokens:
+        while hi < max_samples and cls._estimate_audio_tokens(hi, chunk_size_seconds, pe_encoder) < target_tokens:
             hi = min(hi * 2, max_samples)
 
-        hi_tokens = cls._estimate_audio_tokens(hi, chunk_size_seconds)
+        hi_tokens = cls._estimate_audio_tokens(hi, chunk_size_seconds, pe_encoder)
         if hi_tokens < target_tokens:
             raise ValueError(
                 f"Cannot produce {target_tokens} audio tokens within the "
@@ -300,7 +361,7 @@ class NeMoSpeechLMProcessingInfo(BaseProcessingInfo):
 
         while lo < hi:
             mid = (lo + hi) // 2
-            if cls._estimate_audio_tokens(mid, chunk_size_seconds) >= target_tokens:
+            if cls._estimate_audio_tokens(mid, chunk_size_seconds, pe_encoder) >= target_tokens:
                 hi = mid
             else:
                 lo = mid + 1
@@ -338,10 +399,11 @@ class NeMoSpeechLMMultiModalProcessor(
     ) -> list[PromptUpdate]:
         audios = mm_items.get_items("audio", AudioProcessorItems)
         chunk_size_seconds = self.info._get_encoder_chunk_size_seconds()
+        pe_encoder = self.info._uses_pe_encoder()
 
         def get_replacement(item_idx: int):
             audio = audios.get(item_idx)
-            n_tokens = self.info._estimate_audio_tokens(audio.shape[-1], chunk_size_seconds)
+            n_tokens = self.info._estimate_audio_tokens(audio.shape[-1], chunk_size_seconds, pe_encoder)
             repl_full = _AUDIO_PLACEHOLDER * n_tokens
             return PromptUpdateDetails.select_text(repl_full, _AUDIO_PLACEHOLDER)
 
@@ -367,6 +429,7 @@ class NeMoSpeechLMMultiModalProcessor(
 
         if audios:
             chunk_size_seconds = self.info._get_encoder_chunk_size_seconds()
+            pe_encoder = self.info._uses_pe_encoder()
             audio_list: list[torch.Tensor] = []
             audio_lengths: list[int] = []
             parts = re.split(f"({re.escape(_AUDIO_PLACEHOLDER)})", prompt)
@@ -386,7 +449,9 @@ class NeMoSpeechLMMultiModalProcessor(
                 )
                 if audio_tensor.dim() > 1:
                     audio_tensor = audio_tensor.squeeze()
-                n_tokens = self.info._estimate_audio_tokens(audio_tensor.shape[-1], chunk_size_seconds)
+                n_tokens = self.info._estimate_audio_tokens(
+                    audio_tensor.shape[-1], chunk_size_seconds, pe_encoder
+                )
                 parts[i] = _AUDIO_PLACEHOLDER * n_tokens
                 audio_list.append(audio_tensor)
                 audio_lengths.append(audio_tensor.shape[-1])
@@ -418,17 +483,20 @@ class NeMoSpeechLMDummyInputsBuilder(
         requested_audio_len = getattr(audio_options, "length", None)
         if requested_audio_len:
             chunk_size_seconds = self.info._get_encoder_chunk_size_seconds()
+            pe_encoder = self.info._uses_pe_encoder()
             if seq_len > _DUMMY_AUDIO_TEXT_TOKEN_RESERVE:
                 max_audio_tokens = seq_len - _DUMMY_AUDIO_TEXT_TOKEN_RESERVE
                 max_audio_len = int(_DUMMY_AUDIO_MAX_DURATION_S * _SAMPLING_RATE)
                 max_supported_audio_tokens = NeMoSpeechLMProcessingInfo._estimate_audio_tokens(
                     max_audio_len,
                     chunk_size_seconds,
+                    pe_encoder,
                 )
                 if max_audio_tokens < max_supported_audio_tokens:
                     max_audio_len = NeMoSpeechLMProcessingInfo._samples_for_audio_tokens(
                         max_audio_tokens,
                         chunk_size_seconds,
+                        pe_encoder,
                     )
             else:
                 max_audio_len = int(_DUMMY_AUDIO_MAX_DURATION_S * _SAMPLING_RATE)
