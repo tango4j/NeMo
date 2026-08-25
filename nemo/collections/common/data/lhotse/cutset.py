@@ -1206,6 +1206,69 @@ def read_lhotse_magpietts_data_as_s2s_duplex(config) -> Tuple[CutSet, bool]:
     return cuts, is_tarred
 
 
+def s2s_duplex_reverse_role_for_one_speaker(
+    speaker: str | None,
+    agent_roles: tuple[str, ...],
+    user_roles: tuple[str, ...],
+    target_agent_name: str,
+    target_user_name: str,
+) -> str | None:
+    """Swap one speaker label for the reverse-role duplex view."""
+    if speaker is None:
+        return speaker
+
+    speaker_l = speaker.lower()
+    if speaker_l in user_roles:
+        return target_agent_name
+    if speaker_l in agent_roles:
+        return target_user_name
+    return speaker
+
+
+def s2s_duplex_reverse_role_for_one_cut(
+    cut: Cut,
+    agent_roles: tuple[str, ...],
+    user_roles: tuple[str, ...],
+    target_agent_name: str,
+    target_user_name: str,
+) -> Cut:
+    """Swap speaker roles and source/target audio streams for one duplex cut."""
+    new_cut = deepcopy(cut)
+
+    if getattr(new_cut, "supervisions", None):
+        new_sups = []
+        for supervision in new_cut.supervisions:
+            swapped_supervision = deepcopy(supervision)
+            swapped_supervision.speaker = s2s_duplex_reverse_role_for_one_speaker(
+                getattr(swapped_supervision, "speaker", None),
+                agent_roles=agent_roles,
+                user_roles=user_roles,
+                target_agent_name=target_agent_name,
+                target_user_name=target_user_name,
+            )
+            new_sups.append(swapped_supervision)
+        new_cut.supervisions = new_sups
+
+    old_recording = new_cut.recording
+    old_target_audio = new_cut.target_audio
+    old_rec_id = old_recording.id
+    old_tar_id = old_target_audio.id
+
+    new_cut.recording = old_target_audio
+    new_cut.target_audio = old_recording
+
+    if hasattr(new_cut, "duration"):
+        new_cut.duration = new_cut.recording.duration
+
+    assert new_cut.target_audio.id == old_rec_id, f"{new_cut.id}: recording swap failed"
+    assert new_cut.recording.id == old_tar_id, f"{new_cut.id}: target_audio swap failed"
+    assert new_cut.recording is old_target_audio, f"{new_cut.id}: recording object not swapped"
+    assert new_cut.target_audio is old_recording, f"{new_cut.id}: target_audio object not swapped"
+
+    new_cut.task = "s2s_duplex_reverse_role"
+    return new_cut
+
+
 @data_type_parser(["s2s_duplex_reverse_role"])
 def read_s2s_duplex_reverse_role(config) -> Tuple[CutSet, bool]:
     """
@@ -1233,74 +1296,19 @@ def read_s2s_duplex_reverse_role(config) -> Tuple[CutSet, bool]:
     """
     cuts, is_tarred = read_cutset_from_config(config)
 
-    # Roles coming from config
-    agent_roles = config.get("agent_roles", ["agent", "Agent", "Assistant", "assistant"])
-    user_roles = config.get("user_roles", ["user", "User"])
-
-    # Normalize for robust matching
-    agent_roles_set = {r.lower() for r in agent_roles}
-    user_roles_set = {r.lower() for r in user_roles}
-
-    # Canonical names you want after swapping
+    agent_roles = tuple(r.lower() for r in config.get("agent_roles", ["agent", "Agent", "Assistant", "assistant"]))
+    user_roles = tuple(r.lower() for r in config.get("user_roles", ["user", "User"]))
     target_agent_name = config.get("target_agent_name", "agent")
     target_user_name = config.get("target_user_name", "user")
 
-    def swap_speaker(role: str) -> str:
-        """Swap a given role based on the configured user/agent sets."""
-        if role is None:
-            return role
-
-        role_l = role.lower()
-
-        # user -> agent
-        if role_l in user_roles_set:
-            return target_agent_name
-
-        # agent -> user
-        if role_l in agent_roles_set:
-            return target_user_name
-
-        # untouched roles (e.g., narrator, system, etc.)
-        return role
-
-    def convert_cut_fn(cut: Cut) -> Cut:
-        """Convert a single cut by swapping supervisions and audio streams."""
-        new_cut = deepcopy(cut)
-
-        # swap supervisions
-        if getattr(new_cut, "supervisions", None):
-            new_sups = []
-            for s in new_cut.supervisions:
-                s2 = deepcopy(s)
-                s2.speaker = swap_speaker(getattr(s2, "speaker", None))
-                new_sups.append(s2)
-            new_cut.supervisions = new_sups
-
-        # swap audio streams
-        old_recording = new_cut.recording
-        old_target_audio = new_cut.target_audio
-        old_rec_id = old_recording.id
-        old_tar_id = old_target_audio.id
-
-        new_cut.recording = old_target_audio
-        new_cut.target_audio = old_recording
-
-        # keep duration consistent
-        if hasattr(new_cut, "duration"):
-            new_cut.duration = new_cut.recording.duration
-
-        # Debug assertions
-        assert new_cut.target_audio.id == old_rec_id, f"{new_cut.id}: recording swap failed"
-        assert new_cut.recording.id == old_tar_id, f"{new_cut.id}: target_audio swap failed"
-
-        # Optional stronger assertions (object identity)
-        assert new_cut.recording is old_target_audio, f"{new_cut.id}: recording object not swapped"
-        assert new_cut.target_audio is old_recording, f"{new_cut.id}: target_audio object not swapped"
-
-        new_cut.task = "s2s_duplex_reverse_role"
-        return new_cut
-
-    cuts = cuts.map(convert_cut_fn)
+    convert_fn = partial(
+        s2s_duplex_reverse_role_for_one_cut,
+        agent_roles=agent_roles,
+        user_roles=user_roles,
+        target_agent_name=target_agent_name,
+        target_user_name=target_user_name,
+    )
+    cuts = cuts.map(convert_fn)
     return cuts, is_tarred
 
 
@@ -1662,23 +1670,45 @@ def read_nemo_manifest(config) -> tuple[CutSet, bool]:
     }
     tar_kwargs_extra = {"indexed": indexed, **indexed_extra, **pack_extra} if indexed else {}
     is_tarred = config.get("tarred_audio_filepaths") is not None
+    manifest_filepath = config.manifest_filepath
+    manifest_is_scalar = isinstance(manifest_filepath, (str, Path))
+    manifest_is_flat_list = (
+        isinstance(manifest_filepath, (list, tuple, ListConfig))
+        and bool(manifest_filepath)
+        and all(isinstance(item, (str, Path)) for item in manifest_filepath)
+    )
+    tarred_audio_filepaths = config.get("tarred_audio_filepaths")
+    tar_is_scalar = isinstance(tarred_audio_filepaths, (str, Path))
+    tar_is_flat_list = (
+        isinstance(tarred_audio_filepaths, (list, tuple, ListConfig))
+        and bool(tarred_audio_filepaths)
+        and all(isinstance(item, (str, Path)) for item in tarred_audio_filepaths)
+    )
     if index_pack is not None:
-        if not isinstance(config.manifest_filepath, (str, Path)):
+        if not (manifest_is_scalar or manifest_is_flat_list):
             raise ValueError(
                 "Packed native NeMo datasets require manifest_filepath to be "
-                "a string/Path (brace expansion is supported); list forms are not."
+                "a string/Path or a non-empty flat list of strings/Paths; nested "
+                "and weighted list forms are not supported."
             )
-        if is_tarred and not isinstance(config.tarred_audio_filepaths, (str, Path)):
+        if is_tarred and not (tar_is_scalar or tar_is_flat_list):
             raise ValueError(
                 "Packed native NeMo datasets require tarred_audio_filepaths to "
-                "be a string/Path (brace expansion is supported); list forms are not."
+                "be a string/Path or a non-empty flat list of strings/Paths; nested "
+                "list forms are not supported."
             )
-    if isinstance(config.manifest_filepath, (str, Path)):
+        if is_tarred and manifest_is_flat_list != tar_is_flat_list:
+            raise ValueError(
+                "Packed native NeMo manifest_filepath and tarred_audio_filepaths "
+                "must both use scalar path specs or both use non-empty flat lists."
+            )
+    packed_flat_list = index_pack is not None and (manifest_is_flat_list or (is_tarred and tar_is_flat_list))
+    if manifest_is_scalar or packed_flat_list:
         if is_tarred and not metadata_only:
             cuts = CutSet(
                 LazyNeMoTarredIterator(
-                    config.manifest_filepath,
-                    tar_paths=config.tarred_audio_filepaths,
+                    manifest_filepath,
+                    tar_paths=tarred_audio_filepaths,
                     skip_missing_manifest_entries=config.get("skip_missing_manifest_entries", False),
                     slice_length=config.get("slice_length", None),
                     **tar_kwargs_extra,
@@ -1688,9 +1718,7 @@ def read_nemo_manifest(config) -> tuple[CutSet, bool]:
             if not force_finite:
                 cuts = cuts.repeat(preserve_id=True)
         else:
-            cuts = CutSet(
-                LazyNeMoIterator(config.manifest_filepath, **notar_kwargs, **notar_kwargs_extra, **common_kwargs)
-            )
+            cuts = CutSet(LazyNeMoIterator(manifest_filepath, **notar_kwargs, **notar_kwargs_extra, **common_kwargs))
     else:
         # Format option 1:
         #   Assume it's [[path1], [path2], ...] (same for tarred_audio_filepaths).
