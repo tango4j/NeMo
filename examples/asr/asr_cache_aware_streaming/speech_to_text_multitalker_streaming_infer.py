@@ -93,6 +93,12 @@ class MultitalkerTranscriptionConfig:
     shift_size: int = -1
     left_chunks: int = 5
     online_normalization: bool = False
+    # Language-ID prompt for prompt-conditioned ASR models. The value must be a key in the
+    # model's prompt_dictionary (for example, "en-US" or "auto"). It is ignored by models
+    # without prompt support.
+    target_lang: Optional[str] = None
+    strip_lang_tags: bool = False
+    lang_tag_pattern: Optional[str] = None
     output_path: Optional[str] = None
     diar_output_rttm_dir: Optional[str] = None
     diar_collar: float = 0.0
@@ -119,6 +125,27 @@ class MultitalkerTranscriptionConfig:
     print_path: Optional[str] = None
     ignored_initial_frame_steps: int = 5
     finetune_realtime_ratio: float = 0.01
+
+
+def configure_asr_for_multitalker_streaming(cfg, asr_model) -> None:
+    """Configure model-specific behavior used by the shared multitalker streaming path."""
+    if cfg.parallel_speaker_strategy and not cfg.masked_asr and not hasattr(asr_model, "set_speaker_targets"):
+        raise ValueError(
+            "parallel_speaker_strategy=true with masked_asr=false requires an ASR model that supports "
+            "speaker-target injection via set_speaker_targets(). Use masked_asr=true for a conventional ASR model."
+        )
+
+    if hasattr(asr_model, "set_inference_prompt"):
+        target_lang = cfg.target_lang if cfg.target_lang is not None else "auto"
+        asr_model.set_inference_prompt(target_lang)
+        if not hasattr(asr_model, "decoding") or not hasattr(asr_model.decoding, "set_strip_lang_tags"):
+            raise ValueError("Prompt-conditioned ASR model does not expose decoding.set_strip_lang_tags().")
+        asr_model.decoding.set_strip_lang_tags(cfg.strip_lang_tags, lang_tag_pattern=cfg.lang_tag_pattern)
+    elif cfg.target_lang is not None:
+        logging.warning(
+            "target_lang=%s was provided, but the ASR model does not support language-ID prompts. Ignoring it.",
+            cfg.target_lang,
+        )
 
 
 def launch_serial_streaming(
@@ -299,6 +326,8 @@ def main(cfg: MultitalkerTranscriptionConfig) -> Union[MultitalkerTranscriptionC
             asr_model.encoder.set_default_att_context_size(att_context_size=cfg.att_context_size)
         else:
             raise ValueError("Model does not support multiple lookaheads.")
+
+    configure_asr_for_multitalker_streaming(cfg, asr_model)
 
     # Initialize to avoid "possibly used before assignment" error
     multispk_asr_streamer = None
