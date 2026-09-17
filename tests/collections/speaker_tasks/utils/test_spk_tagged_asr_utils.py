@@ -17,6 +17,7 @@ import json
 import math
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -129,6 +130,39 @@ class TestConfigureASRForMultitalkerStreaming:
         model = SimpleNamespace(set_speaker_targets=lambda *args: None)
 
         configure_asr_for_multitalker_streaming(cfg, model)
+
+
+class TestLoadDiarModel:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "model_name_or_path,expected_loader_name,expected_path_arg",
+        [
+            ("model.ckpt", "load_from_checkpoint", "checkpoint_path"),
+            ("model.nemo", "restore_from", "restore_path"),
+            (
+                "nvidia/diar_streaming_sortformer_4spk-v2.1",
+                "from_pretrained",
+                "model_name",
+            ),
+        ],
+    )
+    def test_selects_expected_loader(self, monkeypatch, model_name_or_path, expected_loader_name, expected_path_arg):
+        map_location = torch.device("cpu")
+        loader_names = ("load_from_checkpoint", "restore_from", "from_pretrained")
+        sentinels = {name: object() for name in loader_names}
+        loaders = {name: Mock(return_value=sentinels[name]) for name in loader_names}
+        for loader_name, loader in loaders.items():
+            monkeypatch.setattr(streaming_infer.SortformerEncLabelModel, loader_name, loader)
+
+        result = streaming_infer.load_diar_model(model_name_or_path, map_location)
+
+        expected_kwargs = {expected_path_arg: model_name_or_path, "map_location": map_location}
+        if expected_loader_name == "load_from_checkpoint":
+            expected_kwargs["strict"] = False
+        loaders[expected_loader_name].assert_called_once_with(**expected_kwargs)
+        assert result is sentinels[expected_loader_name]
+        for loader_name in set(loader_names) - {expected_loader_name}:
+            loaders[loader_name].assert_not_called()
 
 
 @pytest.fixture()
