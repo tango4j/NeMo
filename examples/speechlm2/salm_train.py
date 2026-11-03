@@ -97,6 +97,10 @@ def train(cfg):
         from nemo.collections.speechlm2 import SALMAutomodel
 
         model_cls = SALMAutomodel
+    if cfg.model.get("_target_"):
+        from hydra.utils import get_class
+
+        model_cls = get_class(cfg.model._target_)
 
     with trainer.init_module():
         model = model_cls(OmegaConf.to_container(cfg.model, resolve=True))

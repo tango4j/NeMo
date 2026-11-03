@@ -1127,7 +1127,15 @@ def collate_conversation_audio_fault_tolerant(
 
     # Phase 2: batched load — one fault-tolerant AudioSamples call for the whole minibatch.
     # ``surviving`` is a subset (in arbitrary order) of cuts that decoded successfully.
-    audios, audio_lens, surviving = load_audio(CutSet(flat_cuts))
+    loaded = load_audio(CutSet(flat_cuts))
+    if len(loaded) == 2:
+        # AudioSamples returns two values in strict mode: any load failure
+        # raises, so every requested cut survived. Keep this collator's
+        # stable three-value API for SALMDataset's strict identity checks.
+        audios, audio_lens = loaded
+        surviving = flat_cuts
+    else:
+        audios, audio_lens, surviving = loaded
     survivor_rows = {c.id: i for i, c in enumerate(surviving)}
 
     # Phase 3: regroup — keep a conversation only if every one of its turns survived.

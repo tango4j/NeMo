@@ -198,6 +198,21 @@ def test_load_rejects_world_size_mismatch():
         )
 
 
+def test_load_world_size_mismatch_can_explicitly_reset(monkeypatch):
+    dl = _new_wrapper(dp_rank=0, dp_world_size=16)
+    monkeypatch.setenv("NEMO_LHOTSE_RESET_DATALOADER_ON_DP_WORLD_SIZE_CHANGE", "1")
+
+    dl.load_state_dict(
+        {
+            "train_dataloader_per_rank": [
+                {"dp_rank": rank, "dp_world_size": 4, "state": {"position": rank}} for rank in range(4)
+            ]
+        }
+    )
+
+    assert dl._inner.load_calls == []
+
+
 def test_load_rejects_tag_mismatch():
     dl = _new_wrapper(dp_rank=0, dp_world_size=2)
     with pytest.raises(RuntimeError, match=r"tagged \(dp_rank=1"):

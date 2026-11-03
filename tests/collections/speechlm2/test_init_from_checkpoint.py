@@ -71,9 +71,13 @@ def _save_ckpt(model, path):
 
 
 def _assert_state_dicts_equal(sd1, sd2):
-    assert set(sd1.keys()) == set(sd2.keys()), f"Key mismatch: {set(sd1.keys()) ^ set(sd2.keys())}"
+    assert set(sd1.keys()) == set(
+        sd2.keys()
+    ), f"Key mismatch: {set(sd1.keys()) ^ set(sd2.keys())}"
     for key in sd1:
-        assert torch.equal(sd1[key].cpu(), sd2[key].cpu()), f"Tensor mismatch at key: {key}"
+        assert torch.equal(
+            sd1[key].cpu(), sd2[key].cpu()
+        ), f"Tensor mismatch at key: {key}"
 
 
 def _assert_state_dicts_not_equal(sd1, sd2):
@@ -166,8 +170,12 @@ class TestInitFromTrainingCheckpoint:
                 "nemo.collections.speechlm2.parts.pretrained._model_has_dtensors",
                 return_value=True,
             ),
-            patch("nemo.collections.speechlm2.parts.hf_hub._load_state_dict_with_dtensors") as distributed_load,
-            patch("nemo.collections.speechlm2.parts.pretrained.init_model_from_checkpoint") as regular_load,
+            patch(
+                "nemo.collections.speechlm2.parts.hf_hub._load_state_dict_with_dtensors"
+            ) as distributed_load,
+            patch(
+                "nemo.collections.speechlm2.parts.pretrained.init_model_from_checkpoint"
+            ) as regular_load,
         ):
             init_from_training_checkpoint(model, str(hf_dir))
 
@@ -185,7 +193,9 @@ class TestInitFromTrainingCheckpoint:
                 "nemo.collections.speechlm2.parts.pretrained._model_has_dtensors",
                 return_value=True,
             ),
-            patch("nemo.collections.speechlm2.parts.hf_hub._load_state_dict_with_dtensors") as distributed_load,
+            patch(
+                "nemo.collections.speechlm2.parts.hf_hub._load_state_dict_with_dtensors"
+            ) as distributed_load,
         ):
             init_from_training_checkpoint(model, str(hf_dir))
 
@@ -200,7 +210,9 @@ class TestInitFromTrainingCheckpoint:
 @pytest.mark.unit
 def test_checkpoint_wrapper_runtime_name_maps_to_hf_export_name():
     assert (
-        _canonical_dtensor_checkpoint_key("llm.model.layers.0._checkpoint_wrapped_module.self_attn.q_proj.weight")
+        _canonical_dtensor_checkpoint_key(
+            "llm.model.layers.0._checkpoint_wrapped_module.self_attn.q_proj.weight"
+        )
         == "llm.model.layers.0.self_attn.q_proj.weight"
     )
 
@@ -208,7 +220,9 @@ def test_checkpoint_wrapper_runtime_name_maps_to_hf_export_name():
 @pytest.mark.unit
 def test_checkpoint_wrapper_name_mapping_preserves_destination_tensor():
     tensor = torch.ones(2)
-    result = _canonicalize_named_tensors([("model._checkpoint_wrapped_module.proj.weight", tensor)], "parameter")
+    result = _canonicalize_named_tensors(
+        [("model._checkpoint_wrapped_module.proj.weight", tensor)], "parameter"
+    )
 
     assert result == {"model.proj.weight": tensor}
 
@@ -248,9 +262,13 @@ def test_wrapper_aware_distributed_hf_loader_copies_checkpoint_value(tmp_path):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("strict", [False, True])
-def test_distributed_hf_loader_requires_complete_parameters_only_when_strict(tmp_path, strict):
+def test_distributed_hf_loader_requires_complete_parameters_only_when_strict(
+    tmp_path, strict
+):
     model = SimpleModel()
-    original = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    original = {
+        name: parameter.detach().clone() for name, parameter in model.named_parameters()
+    }
     expected = torch.full_like(model.linear.weight, 7.0)
     save_file({"linear.weight": expected}, str(tmp_path / "model.safetensors"))
 
@@ -271,7 +289,10 @@ def test_distributed_hf_loader_requires_complete_parameters_only_when_strict(tmp
 @pytest.mark.unit
 def test_distributed_hf_loader_rejects_unexpected_tensors_only_when_exact(tmp_path):
     model = torch.nn.Linear(3, 2)
-    save_file({**model.state_dict(), "extra": torch.ones(1)}, str(tmp_path / "model.safetensors"))
+    save_file(
+        {**model.state_dict(), "extra": torch.ones(1)},
+        str(tmp_path / "model.safetensors"),
+    )
 
     _load_state_dict_with_dtensors(model, str(tmp_path), strict=True)
     with pytest.raises(ValueError, match=r"unexpected tensors=\['extra'\]"):
@@ -317,6 +338,19 @@ class TestInitFromTrainingCheckpointDCP:
             assert "linear.weight" in model_sd
             assert "norm.weight" in model_sd
 
+    def test_dcp_non_strict_load_uses_partial_planner(self, tmp_path):
+        """New auxiliary heads may retain their initialization during weights-only continuation."""
+        ckpt_dir = tmp_path / "step=100.ckpt"
+        ckpt_dir.mkdir()
+        (ckpt_dir / ".metadata").touch()
+        model = ConfigurableModel({"init_from_checkpoint_strict": False})
+
+        with patch.object(dcp, "load") as mock_load:
+            init_from_training_checkpoint(model, str(ckpt_dir))
+
+        planner = mock_load.call_args.kwargs["planner"]
+        assert planner.allow_partial_load is True
+
     def test_dcp_load_uses_python313_pathlib_pickle_compat(self, tmp_path):
         """DCP metadata loading should scope the Python 3.13 pathlib shim."""
         ckpt_dir = tmp_path / "step=100.ckpt"
@@ -324,7 +358,9 @@ class TestInitFromTrainingCheckpointDCP:
         (ckpt_dir / ".metadata").touch()
 
         with (
-            patch("nemo.collections.speechlm2.parts.pretrained.python313_pathlib_pickle_compat") as mock_compat,
+            patch(
+                "nemo.collections.speechlm2.parts.pretrained.python313_pathlib_pickle_compat"
+            ) as mock_compat,
             patch.object(dcp, "load"),
         ):
             init_from_training_checkpoint(SimpleModel(), str(ckpt_dir))
@@ -352,7 +388,10 @@ def test_load_local_nemo_resolves_concrete_target(tmp_path):
     with (
         patch.object(BaseModel, "restore_from", base_restore, create=True),
         patch.object(ConcreteModel, "restore_from", concrete_restore, create=True),
-        patch("nemo.core.classes.common._get_allowed_target_class", return_value=ConcreteModel) as resolve_target,
+        patch(
+            "nemo.core.classes.common._get_allowed_target_class",
+            return_value=ConcreteModel,
+        ) as resolve_target,
     ):
         result = load_pretrained_nemo(BaseModel, str(model_path))
 
@@ -390,7 +429,10 @@ def test_load_local_nemo_rejects_unrelated_target(tmp_path):
 
     with (
         patch.object(BaseModel, "restore_from", base_restore, create=True),
-        patch("nemo.core.classes.common._get_allowed_target_class", return_value=UnrelatedModel),
+        patch(
+            "nemo.core.classes.common._get_allowed_target_class",
+            return_value=UnrelatedModel,
+        ),
         pytest.raises(TypeError, match="not a subclass"),
     ):
         load_pretrained_nemo(BaseModel, str(model_path))
@@ -415,7 +457,10 @@ def test_load_local_nemo_accepts_wrapped_subclass(tmp_path):
     with (
         patch.object(BaseModel, "restore_from", base_restore, create=True),
         patch.object(WrappedModel, "restore_from", wrapped_restore, create=True),
-        patch("nemo.core.classes.common._get_allowed_target_class", return_value=WrappedModel),
+        patch(
+            "nemo.core.classes.common._get_allowed_target_class",
+            return_value=WrappedModel,
+        ),
     ):
         result = load_pretrained_nemo(BaseModel, str(model_path))
 

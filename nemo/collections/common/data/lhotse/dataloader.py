@@ -484,9 +484,22 @@ class _PerRankStatefulDataLoader:
             )
         per_rank = state_dict["train_dataloader_per_rank"]
         if not isinstance(per_rank, list) or len(per_rank) != self._dp_world_size:
+            saved_world_size = len(per_rank) if isinstance(per_rank, list) else None
+            allow_topology_reset = os.environ.get(
+                "NEMO_LHOTSE_RESET_DATALOADER_ON_DP_WORLD_SIZE_CHANGE", ""
+            ).lower() in {"1", "true", "yes"}
+            if allow_topology_reset and saved_world_size is not None and saved_world_size != self._dp_world_size:
+                logging.warning(
+                    "PerRankStatefulDataLoader: discarding saved dataloader state "
+                    "because the explicit topology-migration opt-in is enabled "
+                    f"(saved dp_world_size={saved_world_size}, current "
+                    f"dp_world_size={self._dp_world_size}). Model, optimizer, "
+                    "scheduler, and global-step checkpoint state are unaffected."
+                )
+                return
             raise RuntimeError(
                 f"PerRankStatefulDataLoader: state has dp_world_size="
-                f"{len(per_rank) if isinstance(per_rank, list) else 'unknown'} "
+                f"{saved_world_size if saved_world_size is not None else 'unknown'} "
                 f"but the current run has dp_world_size={self._dp_world_size}."
             )
         entry = per_rank[self._dp_rank]
@@ -932,8 +945,8 @@ def get_lhotse_sampler_from_config(config, global_rank, world_size, tokenizer=No
     if config.perturb_speed:
         cuts = CutSet.mux(
             cuts,
-            cuts.perturb_speed(0.9),
-            cuts.perturb_speed(1.1),
+            cuts.map(partial(_perturb_speed, factor=0.9), apply_fn=None),
+            cuts.map(partial(_perturb_speed, factor=1.1), apply_fn=None),
         )
 
     # 2.d: truncation/slicing
@@ -1418,6 +1431,21 @@ def resample(example, sampling_rate):
         return example
     else:
         return example
+
+
+def _perturb_speed(example, factor):
+    """Apply native Lhotse speed perturbation to cuts inside SALM conversations."""
+    from nemo.collections.common.data.lhotse.text_adapters import NeMoMultimodalConversation
+
+    if isinstance(example, Cut):
+        return example.perturb_speed(factor)
+    if isinstance(example, NeMoMultimodalConversation):
+        example = deepcopy(example)
+        for turn in example.turns:
+            if hasattr(turn, 'cut'):
+                turn.cut = turn.cut.perturb_speed(factor)
+        return example
+    return example
 
 
 def _select_channel(cut, channel_selector: int | str) -> list:
